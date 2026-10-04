@@ -77,12 +77,8 @@ public sealed class FtpLogDetector : IDetector
     /// <inheritdoc />
     public Task StartAsync(Channel<FailedLogin> sink, CancellationToken ct)
     {
-        if (!_settingsAccessor().Ftp.Enabled)
-        {
-            _logger.LogInformation("FTP detector is disabled by settings.");
-            return Task.CompletedTask;
-        }
-
+        // The loop always runs (Enabled is re-checked every cycle) so enabling FTP in the GUI
+        // takes effect without a service restart.
         _ = Task.Run(() => PollLoopAsync(sink, ct), CancellationToken.None);
         _logger.LogInformation("FTP log detector started.");
         return Task.CompletedTask;

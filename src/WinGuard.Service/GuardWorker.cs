@@ -124,7 +124,7 @@ public sealed class GuardWorker : BackgroundService
         RdpSecurityLogDetector => settings.Rdp.Enabled,
         RdpCoreTsDetector => settings.Rdp.Enabled && settings.Rdp.UseRdpCoreTsFallback,
         MsSqlDetector => settings.MsSql.Enabled,
-        FtpLogDetector => settings.Ftp.Enabled,
+        FtpLogDetector => true, // polls always; gated by Ftp.Enabled each cycle (hot-enable)
         CustomLogDetector => settings.CustomSources.Any(source => source.Enabled),
         _ => true,
     };
