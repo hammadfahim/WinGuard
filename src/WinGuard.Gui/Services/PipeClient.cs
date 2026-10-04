@@ -123,10 +123,10 @@ public sealed class PipeClient : IDisposable
         await GetAsync<List<BanDto>>(IpcMethods.ListBans, null, ct).ConfigureAwait(false) ?? [];
 
     /// <summary>Lists events newest-first (optionally only those newer than <paramref name="sinceUtc"/>).</summary>
-    public async Task<List<EventDto>> ListEventsAsync(int limit, DateTime? sinceUtc, CancellationToken ct = default) =>
+    public async Task<List<EventDto>> ListEventsAsync(int limit, DateTime? sinceUtc, long? afterId = null, CancellationToken ct = default) =>
         await GetAsync<List<EventDto>>(
             IpcMethods.ListEvents,
-            new ListEventsParams { Limit = limit, SinceUtc = sinceUtc },
+            new ListEventsParams { Limit = limit, SinceUtc = sinceUtc, AfterId = afterId },
             ct).ConfigureAwait(false) ?? [];
 
     /// <summary>Lists whitelist and blacklist entries.</summary>

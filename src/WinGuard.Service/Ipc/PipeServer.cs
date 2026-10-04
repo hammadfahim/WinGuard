@@ -357,7 +357,7 @@ public sealed partial class PipeServer : BackgroundService
     private async Task<List<EventDto>> ListEventsAsync(ListEventsParams parameters, CancellationToken ct)
     {
         var limit = Math.Clamp(parameters.Limit <= 0 ? 200 : parameters.Limit, 1, 1000);
-        var events = await _store.GetEventsAsync(limit, parameters.SinceUtc, ct).ConfigureAwait(false);
+        var events = await _store.GetEventsAsync(limit, parameters.SinceUtc, parameters.AfterId, ct).ConfigureAwait(false);
         return events.Select(EventDto.From).ToList();
     }
 

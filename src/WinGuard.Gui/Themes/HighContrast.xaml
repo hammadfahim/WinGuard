@@ -1,0 +1,26 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- High-contrast theme: every brush maps to a Windows system color so the user's
+         high-contrast palette is honored. Keys are shared with Dark.xaml / Light.xaml. -->
+
+    <SolidColorBrush x:Key="WindowBackgroundBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="PanelBackgroundBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="CardBackgroundBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="ControlBackgroundBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="ForegroundBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <SolidColorBrush x:Key="SubtleForegroundBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <SolidColorBrush x:Key="BorderBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <SolidColorBrush x:Key="AccentBrush" Color="{x:Static SystemColors.HighlightColor}" />
+    <SolidColorBrush x:Key="AccentForegroundBrush" Color="{x:Static SystemColors.HighlightTextColor}" />
+    <SolidColorBrush x:Key="SuccessBrush" Color="{x:Static SystemColors.HotTrackColor}" />
+    <SolidColorBrush x:Key="WarningBrush" Color="{x:Static SystemColors.HotTrackColor}" />
+    <SolidColorBrush x:Key="ErrorBrush" Color="{x:Static SystemColors.HotTrackColor}" />
+    <SolidColorBrush x:Key="InfoBrush" Color="{x:Static SystemColors.HotTrackColor}" />
+    <SolidColorBrush x:Key="HoverBackgroundBrush" Color="{x:Static SystemColors.ControlLightColor}" />
+    <SolidColorBrush x:Key="SelectedBackgroundBrush" Color="{x:Static SystemColors.HighlightColor}" />
+    <SolidColorBrush x:Key="ControlTrackBrush" Color="{x:Static SystemColors.GrayTextColor}" />
+    <SolidColorBrush x:Key="OnAccentForegroundBrush" Color="{x:Static SystemColors.HighlightTextColor}" />
+    <SolidColorBrush x:Key="WarningForegroundBrush" Color="{x:Static SystemColors.WindowColor}" />
+
+</ResourceDictionary>

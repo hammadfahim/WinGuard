@@ -11,7 +11,7 @@ namespace WinGuard.Gui.ViewModels;
 /// Shell view-model: owns the pipe client, the status poller and all five view-models, exposes the
 /// navigation entries and drives the dark/light theme toggle.
 /// </summary>
-public sealed partial class MainViewModel : ObservableObject
+public sealed partial class MainViewModel : ObservableObject, IDisposable
 {
     private readonly PipeClient _client;
     private readonly StatusPoller _poller;

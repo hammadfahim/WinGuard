@@ -52,7 +52,7 @@ public sealed partial class EventLogViewModel : ObservableObject
         for (var i = events.Count - 1; i >= 0; i--)
         {
             var dto = events[i];
-            var key = dto.TimestampUtc.Ticks.ToString() + "|" + dto.Message;
+            var key = dto.Id > 0 ? "#" + dto.Id : dto.TimestampUtc.Ticks.ToString() + "|" + dto.Message;
             if (!_seen.Add(key))
             {
                 continue;

@@ -29,6 +29,7 @@ public sealed class CustomLogDetector : IDetector
     private readonly ILogger<CustomLogDetector> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly LogFileTailer _tailer = new();
+    private readonly FileChangeSignal _signal = new();
 
     // Compiled pattern cache keyed by (source name, pattern); a null value marks a known-bad source.
     private readonly Dictionary<(string Source, string Pattern), Regex?> _regexCache = new();
@@ -168,7 +169,7 @@ public sealed class CustomLogDetector : IDetector
                     : Defaults.FtpPollInterval;
                 try
                 {
-                    await Task.Delay(interval, _timeProvider, ct).ConfigureAwait(false);
+                    await _signal.WaitAsync(interval, _timeProvider, ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -222,6 +223,7 @@ public sealed class CustomLogDetector : IDetector
         }
 
         _tailer.Prune(activeFiles);
+        _signal.Watch(activeFiles);
     }
 
     /// <summary>

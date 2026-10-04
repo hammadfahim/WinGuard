@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.12" />
   </ItemGroup>
 
   <!-- Both UseWPF and UseWindowsForms are on (WinForms only for the tray NotifyIcon).

@@ -392,21 +392,32 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<LogEvent>> GetEventsAsync(int limit, DateTime? sinceUtc = null, CancellationToken ct = default)
+    public async Task<IReadOnlyList<LogEvent>> GetEventsAsync(int limit, DateTime? sinceUtc = null, long? afterId = null, CancellationToken ct = default)
     {
         var take = limit <= 0 ? 200 : limit;
         return await WithConnectionAsync(
             async connection =>
             {
                 await using var cmd = connection.CreateCommand();
-                cmd.CommandText = sinceUtc is null
-                    ? "SELECT ts_utc, level, source, ip, message FROM events ORDER BY ts_utc DESC LIMIT $limit;"
-                    : "SELECT ts_utc, level, source, ip, message FROM events WHERE ts_utc >= $since ORDER BY ts_utc DESC LIMIT $limit;";
-                cmd.Parameters.AddWithValue("$limit", take);
+                var where = new List<string>();
                 if (sinceUtc is not null)
                 {
+                    where.Add("ts_utc >= $since");
                     cmd.Parameters.AddWithValue("$since", ToDb(sinceUtc.Value));
                 }
+
+                if (afterId is not null)
+                {
+                    where.Add("rowid > $after");
+                    cmd.Parameters.AddWithValue("$after", afterId.Value);
+                }
+
+                cmd.CommandText =
+                    "SELECT ts_utc, level, source, ip, message, rowid FROM events" +
+                    (where.Count > 0 ? " WHERE " + string.Join(" AND ", where) : string.Empty) +
+                    (afterId is not null ? " ORDER BY rowid DESC" : " ORDER BY ts_utc DESC") +
+                    " LIMIT $limit;";
+                cmd.Parameters.AddWithValue("$limit", take);
 
                 var events = new List<LogEvent>();
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -535,6 +546,10 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
         try
         {
             await ExecuteNonQueryAsync(connection, "PRAGMA journal_mode=WAL;", ct).ConfigureAwait(false);
+            // WAL + synchronous=NORMAL is crash-safe for the DB file and avoids an fsync per insert,
+            // the dominant cost when a brute-force burst writes one row per attempt.
+            await ExecuteNonQueryAsync(connection, "PRAGMA synchronous=NORMAL;", ct).ConfigureAwait(false);
+            await ExecuteNonQueryAsync(connection, "PRAGMA temp_store=MEMORY;", ct).ConfigureAwait(false);
             await ExecuteNonQueryAsync(connection, $"PRAGMA busy_timeout={BusyTimeoutMs};", ct).ConfigureAwait(false);
             await ExecuteNonQueryAsync(connection, SchemaSql, ct).ConfigureAwait(false);
         }
@@ -688,6 +703,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
 
     private static LogEvent ReadEvent(SqliteDataReader reader) => new()
     {
+        Id = reader.FieldCount > 5 ? reader.GetInt64(5) : 0,
         TimestampUtc = FromDb(reader.GetString(0)),
         Level = (LogEventLevel)reader.GetInt32(1),
         Source = reader.IsDBNull(2) ? null : (ProtocolSource)reader.GetInt32(2),

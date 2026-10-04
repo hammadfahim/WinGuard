@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using System.IO;
 using System.Windows;
 using System.Windows.Threading;
@@ -17,6 +18,8 @@ public partial class App : System.Windows.Application
     private MainViewModel? _mainViewModel;
     private TrayIconService? _trayIcon;
     private MainWindow? _mainWindow;
+    private ServiceProvider? _services;
+    private bool _currentDark = true;
 
     /// <inheritdoc />
     protected override void OnStartup(StartupEventArgs e)
@@ -26,11 +29,19 @@ public partial class App : System.Windows.Application
         RegisterExceptionHandlers();
         var startDark = ThemePreference.ResolveDark();
         ApplyTheme(startDark);
+        SystemParameters.StaticPropertyChanged += OnSystemParameterChanged;
 
-        _pipeClient = new PipeClient();
+        var services = new ServiceCollection();
+        services.AddSingleton<PipeClient>();
+        services.AddSingleton(sp => new MainViewModel(sp.GetRequiredService<PipeClient>(), Dispatcher));
+        services.AddSingleton<TrayIconService>();
+        services.AddSingleton(sp => new MainWindow { DataContext = sp.GetRequiredService<MainViewModel>() });
+        _services = services.BuildServiceProvider();
+
+        _pipeClient = _services.GetRequiredService<PipeClient>();
         _pipeClient.Start();
 
-        _mainViewModel = new MainViewModel(_pipeClient, Dispatcher);
+        _mainViewModel = _services.GetRequiredService<MainViewModel>();
         _mainViewModel.IsDarkTheme = startDark;
         _mainViewModel.ThemeChanged += dark =>
         {
@@ -38,9 +49,9 @@ public partial class App : System.Windows.Application
             ThemePreference.Save(dark);
         };
 
-        _mainWindow = new MainWindow { DataContext = _mainViewModel };
+        _mainWindow = _services.GetRequiredService<MainWindow>();
 
-        _trayIcon = new TrayIconService();
+        _trayIcon = _services.GetRequiredService<TrayIconService>();
         _trayIcon.ShowRequested += (_, _) => ShowMainWindow();
         _trayIcon.ExitRequested += (_, _) => ExitApplication();
 
@@ -56,9 +67,8 @@ public partial class App : System.Windows.Application
     /// <inheritdoc />
     protected override void OnExit(ExitEventArgs e)
     {
-        _trayIcon?.Dispose();
-        _pipeClient?.Dispose();
-        _mainViewModel?.Dispose();
+        SystemParameters.StaticPropertyChanged -= OnSystemParameterChanged;
+        _services?.Dispose(); // disposes tray icon, view-model and pipe client
         base.OnExit(e);
     }
 
@@ -66,7 +76,11 @@ public partial class App : System.Windows.Application
     /// <param name="dark">True for the dark theme, false for the light theme.</param>
     public void ApplyTheme(bool dark)
     {
-        var uri = new Uri(dark ? "Themes/Dark.xaml" : "Themes/Light.xaml", UriKind.Relative);
+        _currentDark = dark;
+
+        // Windows high-contrast mode always wins so the user's accessibility palette is honored.
+        var themeFile = SystemParameters.HighContrast ? "Themes/HighContrast.xaml" : dark ? "Themes/Dark.xaml" : "Themes/Light.xaml";
+        var uri = new Uri(themeFile, UriKind.Relative);
         var theme = new ResourceDictionary { Source = uri };
 
         var merged = Resources.MergedDictionaries;
@@ -74,13 +88,22 @@ public partial class App : System.Windows.Application
         {
             var source = merged[i].Source?.OriginalString ?? string.Empty;
             if (source.Contains("Themes/Dark.xaml", StringComparison.OrdinalIgnoreCase) ||
-                source.Contains("Themes/Light.xaml", StringComparison.OrdinalIgnoreCase))
+                source.Contains("Themes/Light.xaml", StringComparison.OrdinalIgnoreCase) ||
+                source.Contains("Themes/HighContrast.xaml", StringComparison.OrdinalIgnoreCase))
             {
                 merged.RemoveAt(i);
             }
         }
 
         merged.Insert(0, theme);
+    }
+
+    private void OnSystemParameterChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(SystemParameters.HighContrast))
+        {
+            Dispatcher.BeginInvoke(() => ApplyTheme(_currentDark));
+        }
     }
 
     private void UpdatePolling()

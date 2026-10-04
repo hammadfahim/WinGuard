@@ -62,8 +62,8 @@ public interface IStore
     // ---- events ----
     Task AddEventAsync(LogEvent logEvent, CancellationToken ct = default);
 
-    /// <summary>Newest-first, capped at <paramref name="limit"/>.</summary>
-    Task<IReadOnlyList<LogEvent>> GetEventsAsync(int limit, DateTime? sinceUtc = null, CancellationToken ct = default);
+    /// <summary>Newest-first, capped at <paramref name="limit"/>. When <paramref name="afterId"/> is set only events with a larger <see cref="LogEvent.Id"/> are returned (cursor polling).</summary>
+    Task<IReadOnlyList<LogEvent>> GetEventsAsync(int limit, DateTime? sinceUtc = null, long? afterId = null, CancellationToken ct = default);
 
     /// <summary>Forget events older than the given UTC time (retention housekeeping; the events table must not grow unbounded).</summary>
     Task PruneEventsAsync(DateTime olderThanUtc, CancellationToken ct = default);

@@ -52,6 +52,7 @@ public sealed class FtpLogDetector : IDetector
     private readonly ILogger<FtpLogDetector> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly LogFileTailer _tailer = new();
+    private readonly FileChangeSignal _signal = new();
     private readonly Dictionary<string, string> _fieldsHeaders = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _headerPreReadDone = new(StringComparer.OrdinalIgnoreCase);
 
@@ -232,7 +233,7 @@ public sealed class FtpLogDetector : IDetector
                 var interval = settings.Ftp.PollInterval > TimeSpan.Zero ? settings.Ftp.PollInterval : Defaults.FtpPollInterval;
                 try
                 {
-                    await Task.Delay(interval, _timeProvider, ct).ConfigureAwait(false);
+                    await _signal.WaitAsync(interval, _timeProvider, ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -295,6 +296,7 @@ public sealed class FtpLogDetector : IDetector
         }
 
         _tailer.Prune(activeFiles);
+        _signal.Watch(activeFiles);
 
         var activeSet = new HashSet<string>(activeFiles, StringComparer.OrdinalIgnoreCase);
         foreach (var key in _fieldsHeaders.Keys.Where(k => !activeSet.Contains(k)).ToList())

@@ -17,7 +17,7 @@ public sealed class StatusPoller : IDisposable
     private readonly PipeClient _client;
     private readonly DispatcherTimer _timer;
 
-    private DateTime? _lastEventUtc;
+    private long? _lastEventId;
     private int _tick;
     private bool _busy;
 
@@ -54,7 +54,7 @@ public sealed class StatusPoller : IDisposable
     public void Stop() => _timer.Stop();
 
     /// <summary>Forgets the last-seen event timestamp (call after a reconnect).</summary>
-    public void ResetEventCursor() => _lastEventUtc = null;
+    public void ResetEventCursor() => _lastEventId = null;
 
     /// <inheritdoc />
     public void Dispose()
@@ -84,10 +84,10 @@ public sealed class StatusPoller : IDisposable
                 StatusUpdated?.Invoke(status);
             }
 
-            var events = await _client.ListEventsAsync(EventBatchLimit, _lastEventUtc).ConfigureAwait(true);
+            var events = await _client.ListEventsAsync(EventBatchLimit, null, _lastEventId).ConfigureAwait(true);
             if (events.Count > 0)
             {
-                _lastEventUtc = events.Max(dto => dto.TimestampUtc);
+                _lastEventId = events.Max(dto => dto.Id);
                 EventsReceived?.Invoke(events);
             }
 

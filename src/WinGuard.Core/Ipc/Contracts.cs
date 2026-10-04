@@ -109,6 +109,8 @@ public sealed class BanDto
 
 public sealed class EventDto
 {
+    /// <summary>Monotonic store id used as the GUI polling cursor.</summary>
+    public long Id { get; set; }
     public DateTime TimestampUtc { get; set; }
     public LogEventLevel Level { get; set; }
     public ProtocolSource? Source { get; set; }
@@ -117,6 +119,7 @@ public sealed class EventDto
 
     public static EventDto From(LogEvent e) => new()
     {
+        Id = e.Id,
         TimestampUtc = e.TimestampUtc,
         Level = e.Level,
         Source = e.Source,
@@ -155,6 +158,9 @@ public sealed class ListEventsParams
 {
     public int Limit { get; set; } = 200;
     public DateTime? SinceUtc { get; set; }
+
+    /// <summary>When set, only events with a larger <see cref="EventDto.Id"/> are returned.</summary>
+    public long? AfterId { get; set; }
 }
 
 public sealed class UnblockParams

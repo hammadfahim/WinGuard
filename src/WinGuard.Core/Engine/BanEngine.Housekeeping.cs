@@ -35,12 +35,7 @@ public sealed partial class BanEngine
                     continue;
                 }
 
-                if (!_offenseCounts.TryGetValue(ip, out var existing) || existing < record.Count)
-                {
-                    _offenseCounts[ip] = record.Count;
-                }
-
-                _offenseLastUtc[ip] = record.LastUtc;
+                _offenses.Seed(ip, record.Count, record.LastUtc);
             }
 
             _logger.LogInformation(
@@ -59,9 +54,7 @@ public sealed partial class BanEngine
         try
         {
             var now = NowUtc();
-            var snapshot = _offenseCounts.ToDictionary(
-                kv => kv.Key,
-                kv => new OffenseRecord(kv.Value, _offenseLastUtc.TryGetValue(kv.Key, out var last) ? last : now));
+            var snapshot = _offenses.Snapshot(now);
             await _store.SetSettingAsync(
                 OffenseCountsSettingKey,
                 JsonSerializer.Serialize(snapshot),
@@ -72,8 +65,6 @@ public sealed partial class BanEngine
             _logger.LogWarning(ex, "Could not persist offense counts; escalation may reset on restart.");
         }
     }
-
-    private sealed record OffenseRecord(int Count, DateTime LastUtc);
 
     private async Task HousekeepCoreAsync(CancellationToken ct)
     {
@@ -104,7 +95,7 @@ public sealed partial class BanEngine
             // The escalation quiet period starts when the ban ENDS, not when the offense
             // was recorded — otherwise a 7d/30d ban would outlive its own offense record
             // and tier escalation would silently reset (E-M2 pruning interaction).
-            _offenseLastUtc[ban.IpAddress] = now;
+            _offenses.Touch(ban.IpAddress, now);
             offensesTouched = true;
 
             _logger.LogInformation("Unbanned {Ip} (ban expired).", ban.IpAddress);
@@ -145,14 +136,7 @@ public sealed partial class BanEngine
         }
 
         // Trim the in-memory RDP de-dup window.
-        foreach (var key in _recentRdp.Keys.ToList())
-        {
-            _recentRdp[key].RemoveAll(e => (now - e.TimestampUtc).Duration() > TimeSpan.FromTicks(RdpDedupWindow.Ticks * 2));
-            if (_recentRdp[key].Count == 0)
-            {
-                _recentRdp.Remove(key);
-            }
-        }
+        _rdpDedup.Trim(now);
 
         // Prune stale offense counts (review E-M2): no active ban and no offense within
         // ExpireTime x 4; rewrite the persisted blob when anything was removed.
@@ -161,17 +145,8 @@ public sealed partial class BanEngine
             var activeForPrune = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
             var activeIps = new HashSet<string>(activeForPrune.Select(b => b.IpAddress), StringComparer.Ordinal);
             var offenseCutoff = now - TimeSpan.FromTicks(settings.ExpireTime.Ticks * 4);
-            var stale = _offenseCounts.Keys
-                .Where(ip => !activeIps.Contains(ip) &&
-                             (!_offenseLastUtc.TryGetValue(ip, out var last) || last < offenseCutoff))
-                .ToList();
-            foreach (var ip in stale)
-            {
-                _offenseCounts.Remove(ip);
-                _offenseLastUtc.Remove(ip);
-            }
-
-            if (stale.Count > 0)
+            var removed = _offenses.PruneStale(activeIps, offenseCutoff);
+            if (removed > 0)
             {
                 await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
             }

@@ -19,6 +19,7 @@ public sealed class FakeStore : IStore
         [ListKind.Blacklist] = new List<string>(),
     };
     private readonly List<LogEvent> _events = new();
+    private long _nextEventId;
     private readonly Dictionary<string, string> _settings = new(StringComparer.Ordinal);
 
     /// <summary>Number of times <see cref="InitializeAsync"/> was called.</summary>
@@ -210,18 +211,20 @@ public sealed class FakeStore : IStore
     {
         lock (_gate)
         {
-            _events.Add(Clone(logEvent));
+            var copy = Clone(logEvent);
+            copy.Id = ++_nextEventId;
+            _events.Add(copy);
         }
 
         return Task.CompletedTask;
     }
 
-    public Task<IReadOnlyList<LogEvent>> GetEventsAsync(int limit, DateTime? sinceUtc = null, CancellationToken ct = default)
+    public Task<IReadOnlyList<LogEvent>> GetEventsAsync(int limit, DateTime? sinceUtc = null, long? afterId = null, CancellationToken ct = default)
     {
         lock (_gate)
         {
             IReadOnlyList<LogEvent> result = _events
-                .Where(e => sinceUtc is null || e.TimestampUtc >= sinceUtc.Value)
+                .Where(e => (sinceUtc is null || e.TimestampUtc >= sinceUtc.Value) && (afterId is null || e.Id > afterId.Value))
                 .OrderByDescending(e => e.TimestampUtc)
                 .Take(limit)
                 .Select(Clone)
