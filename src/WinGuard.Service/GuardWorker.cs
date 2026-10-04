@@ -125,7 +125,7 @@ public sealed class GuardWorker : BackgroundService
         RdpCoreTsDetector => true,
         MsSqlDetector => true,
         FtpLogDetector => true, // polls always; gated by Ftp.Enabled each cycle (hot-enable)
-        CustomLogDetector => settings.CustomSources.Any(source => source.Enabled),
+        CustomLogDetector => true, // loop re-reads sources every cycle (hot-add)
         _ => true,
     };
 }
