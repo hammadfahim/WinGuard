@@ -103,6 +103,7 @@ public sealed class LogFileTailer
                     // or newly written file is read fully.
                     cursor.Offset = 0;
                     cursor.Pending = string.Empty;
+                    cursor.Decoder.Reset();
                 }
 
                 var available = length - cursor.Offset;
@@ -121,7 +122,8 @@ public sealed class LogFileTailer
                 }
 
                 cursor.Offset += read;
-                var chunk = Encoding.UTF8.GetString(buffer, 0, read);
+                // Stateful decoder: a multi-byte character split across two reads is not corrupted.
+                var chunk = new string(DecodeChars(cursor.Decoder, buffer, read));
                 if (cursor.Pending.Length == 0 && chunk.Length > 0 && chunk[0] == '\uFEFF')
                 {
                     chunk = chunk[1..];
@@ -236,8 +238,16 @@ public sealed class LogFileTailer
         return files;
     }
 
+    private static char[] DecodeChars(Decoder decoder, byte[] buffer, int count)
+    {
+        var chars = new char[decoder.GetCharCount(buffer, 0, count, flush: false)];
+        var written = decoder.GetChars(buffer, 0, count, chars, 0, flush: false);
+        return written == chars.Length ? chars : chars[..written];
+    }
+
     private sealed class FileCursor
     {
+        public Decoder Decoder = new UTF8Encoding(false).GetDecoder();
         public long Offset;
         public string Pending = string.Empty;
         public bool Initialized;

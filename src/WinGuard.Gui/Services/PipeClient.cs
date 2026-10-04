@@ -77,6 +77,7 @@ public sealed class PipeClient : IDisposable
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(RequestTimeout);
 
+            IpcResponse response;
             try
             {
                 var writer = _writer ?? throw new IOException("Pipe writer unavailable.");
@@ -89,20 +90,23 @@ public sealed class PipeClient : IDisposable
                     throw new IOException("The WinGuard service closed the connection.");
                 }
 
-                var response = JsonSerializer.Deserialize<IpcResponse>(line, IpcJson.Options)
+                response = JsonSerializer.Deserialize<IpcResponse>(line, IpcJson.Options)
                     ?? throw new IOException("Malformed response from the WinGuard service.");
-                if (!response.Ok)
-                {
-                    throw new InvalidOperationException(response.Error ?? "The WinGuard service reported an error.");
-                }
-
-                return response;
             }
             catch (Exception)
             {
                 SetConnected(false);
                 throw;
             }
+
+            // A service-reported error is a healthy round trip: surface it without dropping
+            // the connection (which would flicker the UI and escalate the reconnect backoff).
+            if (!response.Ok)
+            {
+                throw new InvalidOperationException(response.Error ?? "The WinGuard service reported an error.");
+            }
+
+            return response;
         }
         finally
         {

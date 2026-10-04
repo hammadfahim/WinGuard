@@ -65,6 +65,29 @@ public sealed class WinGuardSettings
     /// <summary>Basic sanity clamps applied after loading from DB/IPC.</summary>
     public void Normalize()
     {
+        // Persisted/IPC JSON may carry explicit nulls; never let them crash startup or the engine.
+        Rdp ??= new();
+        MsSql ??= new();
+        Ftp ??= new();
+        CustomSources ??= [];
+        Ftp.Sources ??= [];
+        MsSql.IgnoreMessagePatterns ??= [];
+        Rdp.ExclusionRules ??= [];
+        BlockedPorts ??= [];
+        BanTiers ??= [];
+
+        // DateTime + TimeSpan overflows past year 9999, which would abort the ban; cap durations.
+        var maxSane = TimeSpan.FromDays(3650);
+        if (MaxBanDuration <= TimeSpan.Zero)
+        {
+            MaxBanDuration = Defaults.MaxBanDuration;
+        }
+
+        if (MaxBanDuration > maxSane)
+        {
+            MaxBanDuration = maxSane;
+        }
+
         FailedLoginThreshold = Math.Max(1, FailedLoginThreshold);
         MaxAddressesPerRule = Math.Clamp(MaxAddressesPerRule, 1, Defaults.MaxAddressesPerRule);
         if (CountWindow <= TimeSpan.Zero)
@@ -85,7 +108,7 @@ public sealed class WinGuardSettings
         BanTiers = BanTiers is { Length: > 0 } ? BanTiers : (TimeSpan[])Defaults.BanTiers.Clone();
 
         // Drop non-positive tiers (bad IPC input); fall back to defaults when none survive.
-        var positiveTiers = BanTiers.Where(t => t > TimeSpan.Zero).ToArray();
+        var positiveTiers = BanTiers.Where(t => t > TimeSpan.Zero).Select(t => t > maxSane ? maxSane : t).ToArray();
         BanTiers = positiveTiers.Length > 0 ? positiveTiers : (TimeSpan[])Defaults.BanTiers.Clone();
 
         // BlockedPorts tokens reach the firewall LocalPorts property: keep only "port" or
