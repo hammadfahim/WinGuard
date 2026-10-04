@@ -1,0 +1,21 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <Provider Name="Microsoft-Windows-RemoteDesktopServices-RdpCoreTS" Guid="{F42D2527-52B2-4A45-8F7D-1DB2A1F6A9A0}" />
+    <EventID>140</EventID>
+    <Version>0</Version>
+    <Level>2</Level>
+    <Task>4</Task>
+    <Opcode>13</Opcode>
+    <Keywords>0x4000000000000000</Keywords>
+    <TimeCreated SystemTime="2026-10-04T09:20:11.4567890Z" />
+    <EventRecordID>3121</EventRecordID>
+    <Correlation />
+    <Execution ProcessID="2312" ThreadID="4420" />
+    <Channel>Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational</Channel>
+    <Computer>VPS-01.example.com</Computer>
+    <Security />
+  </System>
+  <EventData>
+    <Data Name="IPString">198.51.100.23</Data>
+  </EventData>
+</Event>

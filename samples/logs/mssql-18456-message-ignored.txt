@@ -1,0 +1,1 @@
+Login failed for user 'app_user'. Reason: Failed to open the explicitly specified database 'missing_db'. [CLIENT: 10.0.0.42]

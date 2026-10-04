@@ -1,0 +1,24 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <Provider Name="MSSQLSERVER" Guid="{6819F7BF-3B10-4E03-9FBE-2C46E0B62C7D}" />
+    <EventID Qualifiers="49152">18456</EventID>
+    <Version>0</Version>
+    <Level>0</Level>
+    <Task>4</Task>
+    <Opcode>0</Opcode>
+    <Keywords>0x8080000000000000</Keywords>
+    <TimeCreated SystemTime="2026-10-04T09:30:45.0000000Z" />
+    <EventRecordID>77120</EventRecordID>
+    <Correlation />
+    <Execution ProcessID="4208" ThreadID="9020" />
+    <Channel>Application</Channel>
+    <Computer>DB-01.example.com</Computer>
+    <Security />
+  </System>
+  <EventData>
+    <Data>sa</Data>
+    <Data>
+      <Binary>1845600000000000000000000000000000000000000000000000000000000000</Binary>
+    </Data>
+  </EventData>
+</Event>

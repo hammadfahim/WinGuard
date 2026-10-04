@@ -1,0 +1,11 @@
+bin/
+obj/
+publish/
+dist/
+*.user
+.vs/
+.idea/
+TestResults/
+installer/Output/
+*.log
+!samples/logs/*.log

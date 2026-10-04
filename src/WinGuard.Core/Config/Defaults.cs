@@ -1,0 +1,34 @@
+namespace WinGuard.Core.Config;
+
+/// <summary>Default values per PLAN.md §5/§7/§10. The defaults ARE the required presets (24h / 7d / 30d tiers).</summary>
+public static class Defaults
+{
+    public const int FailedLoginThreshold = 5;
+    public static readonly TimeSpan CountWindow = TimeSpan.FromMinutes(10);
+    public static readonly TimeSpan ExpireTime = TimeSpan.FromDays(1);
+    public static readonly TimeSpan[] BanTiers =
+    [
+        TimeSpan.FromHours(24),
+        TimeSpan.FromDays(7),
+        TimeSpan.FromDays(30),
+    ];
+    public static readonly TimeSpan MaxBanDuration = TimeSpan.FromDays(365);
+    public static readonly TimeSpan HousekeepingInterval = TimeSpan.FromSeconds(15);
+    public static readonly TimeSpan FtpPollInterval = TimeSpan.FromSeconds(3);
+
+    /// <summary>Windows Firewall practical limit of addresses per rule; batch into WinGuard_Block_0001, ...</summary>
+    public const int MaxAddressesPerRule = 1000;
+
+    public const string RuleNamePrefix = "WinGuard_Block_";
+    public const string ServiceName = "WinGuardService";
+    public const string ServiceDisplayName = "WinGuard Service";
+    public const string ServiceDescription = "WinGuard - blocks brute-force attackers in the firewall";
+    public const string DataFolderName = "WinGuard";
+
+    public static string DataFolder =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), DataFolderName);
+
+    public static string DatabasePath => Path.Combine(DataFolder, "winguard.db");
+
+    public static string LogFolder => Path.Combine(DataFolder, "Logs");
+}

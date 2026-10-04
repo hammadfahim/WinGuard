@@ -1,0 +1,10 @@
+#Software: Microsoft Internet Information Services 10.0
+#Version: 1.0
+#Date: 2026-10-04 09:00:00
+#Fields: date time c-ip cs-username s-ip s-port cs-method cs-uri-stem sc-status sc-substatus sc-win32-status time-taken
+2026-10-04 09:00:01 203.0.113.9 - 10.0.0.5 21 USER admin 331 0 0 0
+2026-10-04 09:00:05 203.0.113.9 admin 10.0.0.5 21 PASS - 530 0 0 16
+2026-10-04 09:00:12 203.0.113.9 admin 10.0.0.5 21 PASS - 530 0 0 15
+2026-10-04 09:00:20 203.0.113.9 admin 10.0.0.5 21 PASS - 230 0 0 30
+2026-10-04 09:01:03 198.51.100.44 - 10.0.0.5 21 USER bob 331 0 0 0
+2026-10-04 09:01:09 198.51.100.44 bob 10.0.0.5 21 PASS - 530 0 0 14

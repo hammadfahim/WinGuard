@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+    <!-- WinForms is enabled only for the system-tray NotifyIcon (PLAN.md §9). -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>winguard-gui</AssemblyName>
+    <RootNamespace>WinGuard.Gui</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WinGuard.Core\WinGuard.Core.csproj" />
+  </ItemGroup>
+
+</Project>
