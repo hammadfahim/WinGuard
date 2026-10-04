@@ -41,9 +41,11 @@ is **log/event based only** and uses the built-in Windows Firewall API.
   effect. The GUI surfaces a warning if it is stopped.
 - **Logon-failure auditing** for RDP detection:
   ```powershell
-  auditpol /set /subcategory:"Logon" /success:enable /failure:enable
+  auditpol /set /subcategory:"{0CCE9215-69AE-11D9-BED3-505054503030}" /success:enable /failure:enable
   ```
-  The installer offers to enable this (checked by default) and the GUI verifies it.
+  The GUID is the locale-independent audit subcategory ID; the English name `Logon`
+  silently fails on German/French/Japanese/… Windows. The installer offers to enable
+  this (checked by default) and the GUI verifies it.
 - **For MS SQL detection only:** SQL Server *login auditing* must include failed logins
   (SSMS → Server Properties → Security → Login auditing → *Failed logins only* or both),
   then restart the instance. WinGuard cannot toggle this remotely and documents how to
@@ -64,8 +66,9 @@ target server. Only building from source needs the .NET 10 SDK.
    failure auditing.
 3. Launch **WinGuard** from the Start menu or desktop to open the dashboard.
 
-Uninstall removes the service and its firewall rules and offers to delete or keep the
-database and logs in `%ProgramData%\WinGuard`.
+Uninstall stops and removes the service and deletes its `WinGuard_Block_*` firewall
+rules, then offers to delete or keep the database and logs in `%ProgramData%\WinGuard`.
+Silent uninstalls skip the prompt and keep the data folder.
 
 ### Option 2 — Portable zip
 
@@ -99,7 +102,8 @@ dotnet publish src/WinGuard.Service/WinGuard.Service.csproj -c Release -r win-x6
   -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -o publish/service
 
 dotnet publish src/WinGuard.Gui/WinGuard.Gui.csproj -c Release -r win-x64 `
-  -p:PublishSingleFile=true -p:SelfContained=true -p:PublishTrimmed=false -o publish/gui
+  -p:PublishSingleFile=true -p:SelfContained=true `
+  -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false -o publish/gui
 ```
 
 The service executable is `publish/service/winguard-svc.exe`; the GUI is
@@ -169,6 +173,19 @@ case-insensitive. An event is dropped when any rule matches.
 **Lists** accept single IPs and CIDR ranges (`10.0.0.0/8`, `2001:db8::/32`). The whitelist
 always wins over the blacklist and over any pending ban. The server's own addresses and
 loopback are auto-whitelisted at startup to prevent self-lockout.
+
+### Limitations
+
+- **Enabling a disabled engine requires a service restart.** Engines that are disabled
+  when the WinGuard service starts are not started at all; toggling one on in the GUI
+  afterwards needs a WinGuard service restart to activate. Disabling an engine takes
+  effect immediately.
+- **Custom log sources share the FTP poll interval.** A single `Ftp.PollInterval`
+  (default 3 s) drives the IIS/FileZilla tailers and every custom source; there is no
+  per-source interval.
+- **List prefixes shorter than `/8` are rejected.** Whitelist/blacklist entries such as
+  `0.0.0.0/0` (or any CIDR prefix `< 8`) are refused by the GUI/IPC as a self-lockout
+  footgun; use an explicit range instead.
 
 ## Command line
 

@@ -214,16 +214,31 @@ public sealed class BanEngineTests
     // ---------- RDP de-dup (4625 + 140) ----------
 
     [Fact]
-    public async Task Rdp_failures_one_second_apart_are_counted_once()
+    public async Task Rdp_4625_and_140_one_second_apart_are_counted_once()
     {
         await using var h = await EngineHarness.StartAsync(T0);
         const string ip = "203.0.113.61";
 
-        await h.ProcessAsync(h.Fail(ip, ProtocolSource.Rdp));
+        await h.ProcessAsync(h.Fail(ip, ProtocolSource.Rdp, detector: "4625"));
         h.Time.Advance(TimeSpan.FromSeconds(1));
-        await h.ProcessAsync(h.Fail(ip, ProtocolSource.Rdp));
+        await h.ProcessAsync(h.Fail(ip, ProtocolSource.Rdp, detector: "140"));
 
         Assert.Single(h.Store.FailedLogins);
+    }
+
+    [Fact]
+    public async Task Rdp_failures_from_the_same_detector_one_second_apart_are_counted_twice()
+    {
+        // Regression (review E-M1): two DISTINCT 4625 attempts must both count — de-dup
+        // merges only cross-detector (4625 + 140) pairs describing the same attempt.
+        await using var h = await EngineHarness.StartAsync(T0);
+        const string ip = "203.0.113.64";
+
+        await h.ProcessAsync(h.Fail(ip, ProtocolSource.Rdp, detector: "4625"));
+        h.Time.Advance(TimeSpan.FromSeconds(1));
+        await h.ProcessAsync(h.Fail(ip, ProtocolSource.Rdp, detector: "4625"));
+
+        Assert.Equal(2, h.Store.FailedLogins.Count);
     }
 
     [Fact]
@@ -232,9 +247,9 @@ public sealed class BanEngineTests
         await using var h = await EngineHarness.StartAsync(T0);
         const string ip = "203.0.113.62";
 
-        await h.ProcessAsync(h.Fail(ip, ProtocolSource.Rdp));
+        await h.ProcessAsync(h.Fail(ip, ProtocolSource.Rdp, detector: "4625"));
         h.Time.Advance(TimeSpan.FromSeconds(3));
-        await h.ProcessAsync(h.Fail(ip, ProtocolSource.Rdp));
+        await h.ProcessAsync(h.Fail(ip, ProtocolSource.Rdp, detector: "140"));
 
         Assert.Equal(2, h.Store.FailedLogins.Count);
     }
@@ -320,6 +335,52 @@ public sealed class BanEngineTests
         Assert.Contains(h.Store.Events, e => e.Message.StartsWith("MANUAL UNBLOCK", StringComparison.Ordinal));
     }
 
+    // ---------- offense-count durability / clean slate ----------
+
+    [Fact]
+    public async Task Offense_escalation_survives_an_engine_restart()
+    {
+        // Review ruling (topic #1): escalation must survive service restarts — offense
+        // counts persist in the settings blob and are merged at startup.
+        const string ip = "203.0.113.120";
+        await using var h1 = await EngineHarness.StartAsync(T0);
+        await SendThresholdAsync(h1, ip);
+        AssertTier(await h1.Store.GetBanAsync(ip), 1, TimeSpan.FromHours(24));
+
+        // Let the 24h ban expire (stay within ExpireTime x 4 so the count is not stale-pruned).
+        h1.Time.Advance(TimeSpan.FromHours(25));
+        await h1.Engine.HousekeepOnceAsync();
+        Assert.Null(await h1.Store.GetBanAsync(ip));
+        await h1.DisposeAsync();
+
+        // Simulate a service restart against the same database.
+        await using var h2 = await EngineHarness.StartAsync(h1.Time.UtcNow + TimeSpan.FromMinutes(1), store: h1.Store);
+        await SendThresholdAsync(h2, ip);
+
+        AssertTier(await h2.Store.GetBanAsync(ip), 2, TimeSpan.FromDays(7));
+    }
+
+    [Fact]
+    public async Task Manual_unban_resets_escalation()
+    {
+        // Review E-M4/S-M7: an admin unban gives the IP a clean slate (offense #1 next time).
+        const string ip = "203.0.113.121";
+        await using var h = await EngineHarness.StartAsync(T0);
+
+        await SendThresholdAsync(h, ip);                       // offense 1 -> 24h
+        h.Time.Advance(TimeSpan.FromHours(25));
+        await h.Engine.HousekeepOnceAsync();                   // expired + removed
+        await SendThresholdAsync(h, ip);                       // offense 2 -> 7d
+        AssertTier(await h.Store.GetBanAsync(ip), 2, TimeSpan.FromDays(7));
+
+        await h.Engine.UnbanAsync(ip);
+        Assert.DoesNotContain(h.Store.FailedLogins, f => f.IpAddress == ip);
+
+        h.Time.Advance(TimeSpan.FromMinutes(5));
+        await SendThresholdAsync(h, ip);                       // clean slate -> offense 1
+        AssertTier(await h.Store.GetBanAsync(ip), 1, TimeSpan.FromHours(24));
+    }
+
     // ---------- helpers ----------
 
     private static async Task SendThresholdAsync(EngineHarness h, string ip)
@@ -348,13 +409,14 @@ public sealed class BanEngineTests
 /// <summary>Wires a <see cref="BanEngine"/> to its fakes and disposes it at test end.</summary>
 internal sealed class EngineHarness : IAsyncDisposable
 {
-    private EngineHarness(DateTimeOffset now, WinGuardSettings settings)
+    private EngineHarness(DateTimeOffset now, WinGuardSettings settings, FakeStore? store)
     {
         Time = new FakeTimeProvider(now);
         Settings = settings;
+        Store = store ?? new FakeStore();
     }
 
-    public FakeStore Store { get; } = new();
+    public FakeStore Store { get; }
 
     public FakeFirewall Firewall { get; } = new();
 
@@ -367,7 +429,8 @@ internal sealed class EngineHarness : IAsyncDisposable
     public static async Task<EngineHarness> StartAsync(
         DateTimeOffset now,
         Action<WinGuardSettings>? configure = null,
-        Func<FakeStore, Task>? seed = null)
+        Func<FakeStore, Task>? seed = null,
+        FakeStore? store = null)
     {
         var settings = new WinGuardSettings
         {
@@ -377,7 +440,7 @@ internal sealed class EngineHarness : IAsyncDisposable
         };
         configure?.Invoke(settings);
 
-        var harness = new EngineHarness(now, settings);
+        var harness = new EngineHarness(now, settings, store);
         if (seed is not null)
         {
             await seed(harness.Store);
@@ -398,13 +461,15 @@ internal sealed class EngineHarness : IAsyncDisposable
         string ip,
         ProtocolSource source = ProtocolSource.MsSql,
         string? user = "test-user",
-        DateTime? at = null) => new()
+        DateTime? at = null,
+        string? detector = null) => new()
         {
             IpAddress = ip,
             Source = source,
             UserName = user,
             TimestampUtc = at ?? Time.UtcNow.UtcDateTime,
             RawLog = $"failed login for {ip}",
+            Detector = detector,
         };
 
     public Task ProcessAsync(FailedLogin failed) => Engine.ProcessAsync(failed, CancellationToken.None);

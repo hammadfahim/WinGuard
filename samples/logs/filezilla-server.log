@@ -6,3 +6,4 @@
 (000002) 2026-10-04 09:06:40 - (not logged in) (192.0.2.99)> USER test
 (000002) 2026-10-04 09:06:55 - (not logged in) (192.0.2.99)> 530 Login or password incorrect!
 (000003) 2026-10-04 09:07:10 - admin (198.51.100.7)> 230 Logged on
+(000004) 2026-10-04 09:07:20 - bob (203.0.113.55)> 530 Login or password incorrect!

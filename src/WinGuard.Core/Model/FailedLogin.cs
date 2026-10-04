@@ -15,6 +15,14 @@ public sealed class FailedLogin
     /// <summary>Which engine observed the failure.</summary>
     public ProtocolSource Source { get; set; }
 
+    /// <summary>
+    /// Fine-grained detector identity within a <see cref="Source"/> (e.g. "4625" vs "140"
+    /// for RDP, "iis-ftp" vs "filezilla" for FTP, the source name for custom logs).
+    /// Used for 4625/140 de-duplication (only cross-detector pairs describe the same
+    /// attempt) and diagnostics. Not persisted.
+    /// </summary>
+    public string? Detector { get; set; }
+
     /// <summary>When the failure happened, in UTC.</summary>
     public DateTime TimestampUtc { get; set; }
 

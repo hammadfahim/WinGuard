@@ -34,7 +34,11 @@ public interface IStore
     // ---- bans ----
     Task<BanEntry?> GetBanAsync(string ip, CancellationToken ct = default);
 
-    /// <summary>All bans that are permanent or not yet expired.</summary>
+    /// <summary>
+    /// All bans that are permanent or not yet expired. NOTE: implementations filter with
+    /// the wall clock — use this for status/startup/reconcile views only. Expiry processing
+    /// must use <see cref="GetDueBansAsync"/> so the engine's TimeProvider stays authoritative.
+    /// </summary>
     Task<IReadOnlyList<BanEntry>> GetActiveBansAsync(CancellationToken ct = default);
 
     /// <summary>
@@ -60,6 +64,9 @@ public interface IStore
 
     /// <summary>Newest-first, capped at <paramref name="limit"/>.</summary>
     Task<IReadOnlyList<LogEvent>> GetEventsAsync(int limit, DateTime? sinceUtc = null, CancellationToken ct = default);
+
+    /// <summary>Forget events older than the given UTC time (retention housekeeping; the events table must not grow unbounded).</summary>
+    Task PruneEventsAsync(DateTime olderThanUtc, CancellationToken ct = default);
 
     // ---- settings ----
     Task<IReadOnlyDictionary<string, string>> GetAllSettingsAsync(CancellationToken ct = default);

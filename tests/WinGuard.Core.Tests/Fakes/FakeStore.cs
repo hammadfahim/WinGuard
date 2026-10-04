@@ -230,6 +230,16 @@ public sealed class FakeStore : IStore
         }
     }
 
+    public Task PruneEventsAsync(DateTime olderThanUtc, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            _events.RemoveAll(e => e.TimestampUtc < olderThanUtc);
+        }
+
+        return Task.CompletedTask;
+    }
+
     public Task<IReadOnlyDictionary<string, string>> GetAllSettingsAsync(CancellationToken ct = default)
     {
         lock (_gate)

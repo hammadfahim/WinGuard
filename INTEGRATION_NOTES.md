@@ -106,7 +106,223 @@ packages. Confirms A's and B's signatures matched its usage exactly (good omen).
 - Store init + settings load happen before host.RunAsync. ✔
 - GuardWorker: channel SingleReader, per-detector failure isolation. ✔
 
-## Agent D — GUI (pending)
+## Agent D — GUI (COMPLETED)
+Files: full WPF app under src/WinGuard.Gui/ — App, MainWindow (left nav, 5 views via
+ContentControl+DataTemplates, theme toggle, connection pill, close-to-tray),
+Views/{Dashboard,BlockedIps,EventLog,Settings,Lists}, ViewModels (12), Services
+{PipeClient (JSON-lines, 5 s timeout, 2 s reconnect loop), TrayIconService (runtime-drawn
+shield, NotifyIcon), StatusPoller (2 s DispatcherTimer)}, Themes/{Dark,Light}, converters.
+csproj edit (sole owner): `<Using Remove>` for WinForms/Drawing implicit usings that
+collide with WPF types. **Compiled first try, 0 warnings.**
+- Deviations: SendAsync (not CallAsync) — internal only; Custom tile toggles all
+  CustomSources[*].Enabled (no global Custom flag — matches settings model);
+  SqlAuditingHint not shown in banner (would always display); right-click selects row
+  for context commands. All benign.
+
+---
+
+# RESOLUTIONS (Phase 2 integration, commit 6b7b491)
+
+- **RECONCILE #1 (expired-ban visibility): FIXED.** Added `IStore.GetDueBansAsync(nowUtc)`
+  (SqliteStore: `is_permanent = 0 AND expires_utc <= $now`; FakeStore mirrors; engine
+  housekeeping uses it — engine TimeProvider authoritative). Production auto-unban +
+  UNBANNED events + row deletion now work with the real store.
+- **RECONCILE #2 (list load timing): OK as built.** StartAsync reloads lists; tests pass.
+- **RECONCILE #3 (wildcard semantics): FIXED in test.** Anchored glob semantics kept
+  (B correct); test case "a*a" vs "administrator" flipped to false + positive case added.
+- **RECONCILE #4 (BlacklistAdd): FIXED.** Single-IP blacklist entries now ban immediately
+  (permanent, note "blacklist"); CIDRs apply at detection time; whitelist-wins conflicts
+  logged, not errors.
+- **RECONCILE #5 (hot-toggle): FIXED.** All three event-log detectors now gate per event
+  on Enabled (+ UseRdpCoreTsFallback). Enabling a startup-disabled engine still requires
+  service restart (MVP, document in README). List mutations via IPC call
+  HousekeepOnceAsync for instant matcher reload.
+- Build fixes during integration: NamedPipeServerStream 5-arg overload + PipeTransmissionMode.Byte;
+  `using WinGuard.Core.Detection` in PipeServer; MsSqlDetector TryFormatDescription takes
+  EventRecord (casts to EventLogRecord); WindowsFirewall dynamic→typed `List<RuleBatch>`
+  binding + RuleBatch rule handles as fields (ref-able); nullable fixes (TryRemove KVP
+  overload, WindowsIdentity null-guard).
+- **Status: `dotnet build WinGuard.sln -c Release` = 0 warnings / 0 errors;
+  `dotnet test --filter Category!=Integration` = 92/92 passed; `winguard-svc --help` OK.**
+
+# Phase 3 review topics (open questions for reviewers)
+1. Offense-count/escalation durability across service restarts (in-memory map; expired
+   ban rows deleted per PLAN §5) — acceptable for MVP or persist offense counts?
+2. Pipe authorization = connect-time impersonation check (Admins/LocalSystem/services,
+   fail-closed), not a pipe DACL (zero-new-packages constraint) — sufficient?
+3. LogFileTailer reads unseen files from offset 0 (1 MB/cycle cap) — mass-ban risk on
+   fresh installs over legacy logs; add "skip to end on first sight"?
+4. Custom sources reuse FtpPollInterval (no own interval setting).
+5. GetStatus `Running` = startup success (enabling at runtime needs restart).
+
+---
+
+# Phase 3 findings log
+
+## Reviewer 2 — deepseek-v4-pro (engine correctness) — DONE
+Verdict: no CRITICAL; _gate concurrency model sound; reconcile race-free (i4); expiry
+ordering correct + self-healing (i5); ToDb/FromDb "o"-format round-trip sound (i6);
+window boundaries correct (i1-i3).
+
+- **M1 (MAJOR): RDP de-dup is a global 1-per-2s rate limit, not 4625↔140 pair merge.**
+  Two DISTINCT 4625 attempts ≤2 s apart → second suppressed → attacker needs ~9 real
+  attempts to reach threshold 5. Fix plan: add discriminator (FailedLogin.Detector =
+  "4625"/"140"), suppress ONLY across different detectors; move de-dup to an in-memory
+  recent-events map (no schema change; store rows lack the discriminator). Update the
+  two de-dup tests (h.Fail must set Detector; same-detector 1 s apart now counts twice —
+  add that case).
+- **M2 (MAJOR): _offenseCounts never pruned → unbounded growth.** Fix with ruling (c)
+  pruning below.
+- **M3 (MAJOR-arch): SqliteStore.GetActiveBansAsync uses wall clock.** Harmless in prod
+  (TimeProvider.System); expiry loop already uses GetDueBansAsync and runs BEFORE
+  reconcile. ACCEPT option (b): document in IStore XML comment (status/startup/reconcile
+  use only).
+- **M4 (MAJOR): UnbanAsync doesn't clear _offenseCounts → escalation resumes after
+  manual unban.** Fix: remove entry + re-save persisted blob.
+- **RULING topic #1 = option (c): persist offense counts in settings table under key
+  "offense_counts"** (JSON blob {"ip": {count, lastUtc}}): load+merge (max) at StartAsync,
+  save after each ban/unban change, prune entries with no active ban and
+  lastUtc < now − ExpireTime×4 during housekeeping. Zero schema changes.
+- m1 (MinValue clamp — unreachable): leave; m2 (FakeTimeProvider no CreateTimer):
+  document limitation; m3/m4/m5: no action.
+
+## Reviewer 1 — glm-5.3 (security) — DONE
+Verdict: NO critical holes (IP validation solid, SQL parameterized, no XXE, pipe writes
+OS-restricted). "Not safe to ship as-is; safe as MVP after focused hardening."
+Ship conditions: M1, M3, M4, M6 + M2 (Groups-SID/DACL option, keeps GUI non-elevated per
+PLAN §9) — then M5, M7, N1-N6 promptly.
+
+### FIX CHECKLIST (Phase 3b)
+- **S-M1 (2 lines):** PipeServer.IsAuthorized — DELETE LocalService/NetworkService
+  branches; keep SYSTEM + Administrators only (PLAN §8).
+- **S-M2:** (a) Authorize: replace IsInRole with identity.Groups contains
+  Administrators SID (S-1-5-32-544) or LocalSystem SID (S-1-5-18) — works for
+  UAC-filtered tokens (deny-only SID still in Groups); (b) pipe DACL via P/Invoke:
+  ConvertStringSecurityDescriptorToSecurityDescriptor SDDL
+  `D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)` + CreateNamedPipeW w/ SECURITY_ATTRIBUTES
+  + PIPE_REJECT_REMOTE_CLIENTS, wrap handle in NamedPipeServerStream(SafePipeHandle,...)
+  — removes Everyone/Anonymous read (kills N2 flood) and lets non-elevated admin GUI
+  connect (plan-compliant; NOT the elevate-GUI shortcut).
+- **S-M3 (topic #3 ruling = fix):** (1) LogFileTailer: first-sight cursor = end-of-file
+  (rotation-shrink still resets to 0); (2) FtpLogDetector.TryParseIisLine: parse
+  date+time columns (UTC per W3C convention) into TimestampUtc (fallback now);
+  TryParseFileZillaLine: parse leading `(nnnnnn) yyyy-MM-dd HH:mm:ss` as LOCAL →
+  ToUniversalTime. Custom keeps now-stamp (skip-to-end covers replay). Engine's rolling
+  window then discards any stale replays for free.
+- **S-M4:** installer [UninstallRun]/[Code]: wait for service STOPPED (sc query loop)
+  BEFORE --clear-firewall; Program.cs --clear-firewall: after ClearAll, verify
+  ListBlocked() empty → exit non-zero otherwise; WindowsFirewall.ClearAll: track failure
+  (return/throw-flag) so exit code is honest.
+- **S-M5:** installer [Run]: icacls "%ProgramData%\WinGuard" /inheritance:r /grant:r
+  SYSTEM:F Administrators:F (after [Dirs]); SqliteStore init: best-effort
+  SetNamedSecurityInfo P/Invoke same SDDL (try/catch, log).
+- **S-M6 (1 line + tests):** IpMatcher.TryNormalize: `if (address.IsIPv4MappedToIPv6)
+  address = address.MapToIPv4();` before final ToString. Tests: ::ffff:203.0.113.5,
+  0:0:0:0:0:ffff:203.0.113.5 → "203.0.113.5"; whitelist match across forms.
+- **S-M7:** PipeServer Unblock+AlsoWhitelist: add whitelist row → HousekeepOnceAsync →
+  UnbanAsync (mirror WhitelistAdd). BanEngine.UnbanAsync: also
+  _store.ClearFailedLoginsAsync(ip) + _offenseCounts.Remove + persist (clean slate;
+  merges with E-M4).
+- **S-N1:** CustomLogDetector: cached `new Regex(pattern, CultureInvariant,
+  TimeSpan.FromSeconds(2))` per source; catch RegexMatchTimeoutException → skip+warn.
+- **S-N2:** rejection logging rate-limited (1/100 + counter summary); FileLoggerProvider:
+  delete files >30 d, skip writes past ~10 MB/day-file (log once).
+- **S-N3:** PipeServer: max line 1 MB (bounded read loop, disconnect on overflow);
+  ListEvents Limit clamp ≤1000; WinGuardSettings.Normalize: BlockedPorts tokens must
+  match ^\d+(-\d+)?$ (drop invalid), BanTiers positive-only (drop ≤0).
+- **S-N4:** IStore += PruneEventsAsync(olderThanUtc); SqliteStore DELETE events WHERE
+  ts_utc < $before; FakeStore mirror; HousekeepCoreAsync prunes events older than 30 d
+  (const DefaultEventRetentionDays=30).
+- **S-N5 (DEFER):** firewall batch caching — document as known limitation (throughput
+  under storm), post-MVP.
+- **S-N6:** release.yml: add sha256 assets (Get-FileHash → .sha256 files uploaded);
+  SHA-pin actions if verifiable SHAs obtainable, else keep tags + PLAN M7 comment.
+- **S-INFO:** persist list values in TryParseCidr-normalized form; remove dead PipeName
+  from appsettings.json; reject list prefixes shorter than /8 (footgun: 0.0.0.0/0) with
+  clear IPC error; document /0 guard. Topics #4/#5 agreed as built → README: document
+  enable-needs-restart + shared custom poll interval.
+
+### Cross-review synthesis
+- Topic #1: deepseek ruling (c) persist offense_counts in settings WINS over glm's
+  "acceptable for MVP" — implement (c) (also fixes E-M2 growth via pruning).
+- Topic #3: both agree → fix per S-M3.
+
+## Reviewer 3 — qwen3.8-max (detection/packaging) — DONE
+Verdict: detection fidelity vs real formats verified correct across the board (XPaths,
+field extraction, W3C header-driven columns, FileZilla markers, exclusion semantics,
+TolerateQueryErrors fallback call). Two CRITICAL release-pipeline bugs + installer gaps.
+
+### FIX CHECKLIST (Phase 3b, detection/packaging)
+- **P-C1 (CRITICAL):** release.yml GUI publish += `-p:IncludeNativeLibrariesForSelfExtract=true`
+  (else WPF native DLLs stay loose; installer packages exe only → GUI crashes at launch).
+- **P-C2 (CRITICAL):** release.yml ISCC path: `"${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"`
+  (pwsh doesn't expand `$env:ProgramFiles(x86)` — inherited from PLAN §14).
+- **P-M1:** README: document enable-needs-service-restart limitation + custom sources
+  share Ftp.PollInterval + /8 list-prefix guard.
+- **P-M2:** = S-M3 (tailer skip-to-end + line-timestamp parsing) — consolidated.
+- **P-M3:** iss upgrade path: PrepareToInstall stops existing service + waits; sc create
+  only when absent; sc start after.
+- **P-M4:** auditpol subcategory → locale-independent GUID
+  `{0CCE9215-69AE-11D9-BED3-505054503030}` (iss + README).
+- **P-m1:** FileZilla "(not logged in)" → UserName null; support bare-name `user (ip)>`
+  shape; test asserts.
+- **P-m2 (=S-N1):** custom regex: 2 s match timeout, cached per source; invalid pattern
+  → LogWarning once/source, skip.
+- **P-m3 (topic #4 ruling):** CustomLogDetector honors settings().Ftp.PollInterval
+  (fallback Defaults.FtpPollInterval); shared interval accepted for MVP.
+- **P-m4:** iss uninstall: silent-mode guard on data prompt; DelTree moved to
+  usPostUninstall (after service stopped/deleted).
+- **P-m5:** RdpCoreTS 140: positional first-Data fallback when IPString name missing.
+- **P-m6:** iss ArchitecturesAllowed/InstallIn64BitMode → x64compatible (Inno 6.3+).
+- **S-N6:** release.yml: sha256 checksums for assets; SHA-pin actions before going
+  public (PLAN M7) — comment for now.
+- **PLAN.md errata (append-only §18):** C1, C2, auditpol GUID.
+
+### Execution split (Phase 3b)
+- Fixer agent 1 (deepseek-v4.1-flash): Detection D1-D9 (tailer skip-to-end + option,
+  FTP/FileZilla timestamp parsing, FileZilla username, 140 fallback, Detector
+  discriminator stamps, custom regex timeout/poll interval, tests, samples README).
+- Fixer agent 2 (deepseek-v4.1-flash): installer/CI/docs I1-I10 above.
+- Me (integrator): FailedLogin.Detector ✔, IStore.PruneEventsAsync (+Sqlite/Fake),
+  IpMatcher mapped-IPv4, BanEngine (detector-aware dedup, offense_counts persistence
+  per ruling (c), UnbanAsync clean slate, event pruning), WinGuardSettings.Normalize
+  validation, PipeServer (auth SIDs, DACL P/Invoke + reject remote, Unblock ordering,
+  line cap, Limit clamp, list normalization + /8 guard), Program/WindowsFirewall honest
+  --clear-firewall exit, FileLoggerProvider retention, appsettings PipeName removal,
+  BanEngine/IpMatcher test updates. Then: full build + tests + commit.
+
+---
+
+# Phase 3b COMPLETE — all fixes landed
+
+## Integrator additions beyond the checklists
+- **IIS #Fields header pre-read** (fixer-agent note #1): skip-to-end would starve the
+  W3C column order for existing files → FtpLogDetector now pre-reads the last 64 KB of
+  each IIS log once per run to recover the active `#Fields:` header.
+- **Escalation quiet-period semantics**: stale-offense pruning (ExpireTime×4) now counts
+  from ban END, not ban issue (expiry refreshes _offenseLastUtc) — otherwise 7d/30d bans
+  would outlive their own offense record. Caught by Tier_escalation test.
+- **auditpol localization** (fixer note #3): PipeServer query switched to the Logon
+  subcategory GUID + locale-independent numeric "Setting Value" parse (bit 2 = failure);
+  GUI warning text uses the GUID form.
+- **Uninstall MsgBox silent-gating** (fixer note #2) + README GUI publish flag (note #4).
+
+## Live smoke-test findings (winguard-svc --console, non-elevated)
+- ✅ Pipe server (P/Invoke secured DACL) listens; firewall COM enumeration works; all
+  detectors subscribe or degrade gracefully; engine starts; 105/105 tests green.
+- 🐛 FIXED: `Host.CreateApplicationBuilder(Args = [])` dropped CLI config →
+  `--DatabasePath` now honored (verb filtered out before the command-line provider).
+- 🐛 FIXED (silent no-op!): `SetNamedSecurityInfo` was passed the whole security
+  descriptor instead of the extracted DACL (returned 0, changed nothing). Now via
+  `GetSecurityDescriptorDacl`; SDDL hardened to `D:PAI(...)` (protected, no inheritance,
+  mirrors installer icacls /inheritance:r); failure paths raised Debug→Warning.
+  Verified live: explicit SY+BA ACEs applied.
+
+## Deferred (documented, post-MVP)
+- S-N5 firewall batch caching (throughput under distributed storm).
+- Action SHA-pinning (PLAN M7, before repo goes public) — comment added in release.yml;
+  sha256 checksum assets ARE generated now.
+- Offense-count regex-cache pruning in CustomLogDetector (harmless growth on edits).
 
 ## Agent E — Tests + Installer + CI (COMPLETED)
 Files: tests/WinGuard.Core.Tests/** (Fakes, TestData, Detection/*, Engine/*, Store/*,

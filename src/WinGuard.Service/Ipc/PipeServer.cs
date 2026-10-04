@@ -5,6 +5,8 @@ using System.IO.Pipes;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using WinGuard.Core.Abstractions;
@@ -22,13 +24,15 @@ namespace WinGuard.Service.Ipc;
 /// sequentially, dispatching every <see cref="IpcMethods"/> method against the shared store, ban
 /// engine and settings holder.
 /// <para>
-/// <b>Access control:</b> the pipe is created with <see cref="NamedPipeServerStream"/> only (the
-/// <c>System.IO.Pipes.AccessControl</c> package that provides <c>NamedPipeServerStreamAcl</c> /
-/// <c>PipeSecurity</c> is intentionally NOT referenced). Instead, immediately after a client
-/// connects, the server impersonates the caller with <see cref="NamedPipeServerStream.RunAsClient"/>
-/// and rejects anyone who is not a local administrator, LocalSystem, LocalService or NetworkService.
-/// Errors while determining the identity fail closed (the connection is rejected). This enforces the
-/// PLAN.md §8 "Administrators + LocalSystem only" intent without adding a package.
+/// <b>Access control:</b> the pipe is created with an explicit DACL — SYSTEM and Administrators
+/// full control, Authenticated Users read/write — plus <c>PIPE_REJECT_REMOTE_CLIENTS</c> and
+/// first-instance anti-squatting, via P/Invoke (<c>PipeSecurity</c> lives in the
+/// System.IO.Pipes.AccessControl package, which is intentionally not referenced). Every
+/// connection is additionally authorized by impersonating the client
+/// (<see cref="NamedPipeServerStream.RunAsClient"/>): only LocalSystem and members of the
+/// Administrators group — checked by group SID so the non-elevated GUI's UAC-filtered token
+/// is recognized — are accepted; everything else fails closed. This enforces the PLAN.md §8
+/// "Administrators + LocalSystem only" intent (reviews S-M1/S-M2).
 /// </para>
 /// </summary>
 public sealed class PipeServer : BackgroundService
@@ -44,6 +48,8 @@ public sealed class PipeServer : BackgroundService
 
     private int _nextClientId;
     private DateTime _startedUtc;
+    private long _rejectedConnections;
+    private bool _firstPipeInstanceCreated;
 
     /// <summary>Creates the pipe server.</summary>
     /// <param name="store">Persistence (single-writer state).</param>
@@ -82,12 +88,7 @@ public sealed class PipeServer : BackgroundService
             NamedPipeServerStream? pipe = null;
             try
             {
-                pipe = new NamedPipeServerStream(
-                    PipeConstants.PipeName,
-                    PipeDirection.InOut,
-                    NamedPipeServerStream.MaxAllowedServerInstances,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
+                pipe = CreateSecuredPipe();
 
                 await pipe.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
             }
@@ -106,7 +107,16 @@ public sealed class PipeServer : BackgroundService
 
             if (!Authorize(pipe, out var clientName))
             {
-                _logger.LogWarning("Rejected named-pipe connection from unauthorized identity {Client}.", clientName);
+                // Rate-limited logging: a local connect loop must not exhaust the disk (review S-N2).
+                var rejected = Interlocked.Increment(ref _rejectedConnections);
+                if (rejected == 1 || rejected % 100 == 0)
+                {
+                    _logger.LogWarning(
+                        "Rejected unauthorized named-pipe connection from {Client} (total rejected: {Count}).",
+                        clientName,
+                        rejected);
+                }
+
                 pipe.Dispose();
                 continue;
             }
@@ -160,15 +170,31 @@ public sealed class PipeServer : BackgroundService
 
     private static bool IsAuthorized(WindowsIdentity identity)
     {
-        if (identity.User is { } sid
-            && (sid.IsWellKnown(WellKnownSidType.LocalSystemSid)
-                || sid.IsWellKnown(WellKnownSidType.LocalServiceSid)
-                || sid.IsWellKnown(WellKnownSidType.NetworkServiceSid)))
+        // PLAN §8: Administrators + LocalSystem ONLY. Service accounts (LocalService /
+        // NetworkService) are NOT trusted: any third-party service running under them
+        // must not be able to unban attackers or rewrite policy (review S-M1).
+        if (identity.User is { } sid && sid.IsWellKnown(WellKnownSidType.LocalSystemSid))
         {
             return true;
         }
 
-        return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+        // Group-SID check instead of IsInRole: under UAC Admin Approval Mode the
+        // non-elevated GUI token carries Administrators as a *deny-only* SID, which
+        // IsInRole reports as false. Deny-only SIDs never appear in non-admin tokens,
+        // so membership in Groups still proves the user is an administrator (review S-M2).
+        if (identity.Groups is { } groups)
+        {
+            var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+            foreach (var group in groups)
+            {
+                if (group is SecurityIdentifier groupSid && groupSid.Equals(admins))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private async Task HandleClientAsync(NamedPipeServerStream pipe, CancellationToken ct)
@@ -176,9 +202,11 @@ public sealed class PipeServer : BackgroundService
         try
         {
             using (pipe)
-            using (var reader = new StreamReader(pipe, new UTF8Encoding(false), detectEncodingFromByteOrderMarks: false, bufferSize: 4096, leaveOpen: false))
             using (var writer = new StreamWriter(pipe, new UTF8Encoding(false), bufferSize: 4096, leaveOpen: false) { AutoFlush = true, NewLine = "\n" })
             {
+                // Bounded reader: ReadLineAsync has no length cap; a runaway or hostile
+                // client could force unbounded (LOH) allocations (review S-N3).
+                var reader = new BoundedLineReader(pipe, _logger);
                 while (!ct.IsCancellationRequested)
                 {
                     string? line;
@@ -327,7 +355,7 @@ public sealed class PipeServer : BackgroundService
 
     private async Task<List<EventDto>> ListEventsAsync(ListEventsParams parameters, CancellationToken ct)
     {
-        var limit = parameters.Limit <= 0 ? 200 : parameters.Limit;
+        var limit = Math.Clamp(parameters.Limit <= 0 ? 200 : parameters.Limit, 1, 1000);
         var events = await _store.GetEventsAsync(limit, parameters.SinceUtc, ct).ConfigureAwait(false);
         return events.Select(EventDto.From).ToList();
     }
@@ -351,13 +379,16 @@ public sealed class PipeServer : BackgroundService
             return IpcResponse.Fail(request.Id, "Invalid IP address.");
         }
 
-        await _engine.UnbanAsync(ip, ct).ConfigureAwait(false);
         if (parameters.AlsoWhitelist)
         {
+            // Whitelist FIRST and reload the engine matcher, so an in-flight attack cannot
+            // re-ban the IP in the window before the next housekeeping pass (review S-M7).
             await _store.AddToListAsync(ListKind.Whitelist, ip, ct).ConfigureAwait(false);
             await _store.RemoveFromListAsync(ListKind.Blacklist, ip, ct).ConfigureAwait(false);
+            await _engine.HousekeepOnceAsync(ct).ConfigureAwait(false);
         }
 
+        await _engine.UnbanAsync(ip, ct).ConfigureAwait(false);
         return IpcResponse.Success(request.Id, null);
     }
 
@@ -376,12 +407,11 @@ public sealed class PipeServer : BackgroundService
     private async Task<IpcResponse> WhitelistAddAsync(IpcRequest request, CancellationToken ct)
     {
         var parameters = Params<ListValueParams>(request);
-        if (!IpMatcher.TryParseCidr(parameters.Value, out _))
+        if (!TryNormalizeListValue(request, parameters.Value, out var value, out var failure))
         {
-            return IpcResponse.Fail(request.Id, "Invalid IP or CIDR value.");
+            return failure!;
         }
 
-        var value = parameters.Value.Trim();
         await _store.AddToListAsync(ListKind.Whitelist, value, ct).ConfigureAwait(false);
 
         // Reload the engine's in-memory matcher so the new entry takes effect immediately.
@@ -399,12 +429,11 @@ public sealed class PipeServer : BackgroundService
     private async Task<IpcResponse> BlacklistAddAsync(IpcRequest request, CancellationToken ct)
     {
         var parameters = Params<ListValueParams>(request);
-        if (!IpMatcher.TryParseCidr(parameters.Value, out _))
+        if (!TryNormalizeListValue(request, parameters.Value, out var value, out var failure))
         {
-            return IpcResponse.Fail(request.Id, "Invalid IP or CIDR value.");
+            return failure!;
         }
 
-        var value = parameters.Value.Trim();
         await _store.AddToListAsync(ListKind.Blacklist, value, ct).ConfigureAwait(false);
 
         // Reload the engine's in-memory matcher so the new entry takes effect immediately.
@@ -431,12 +460,12 @@ public sealed class PipeServer : BackgroundService
     private async Task<IpcResponse> ListRemoveAsync(IpcRequest request, CancellationToken ct)
     {
         var parameters = Params<ListRemoveParams>(request);
-        if (string.IsNullOrWhiteSpace(parameters.Value))
+        if (!TryNormalizeListValue(request, parameters.Value, out var value, out var failure))
         {
-            return IpcResponse.Fail(request.Id, "A list value is required.");
+            return failure!;
         }
 
-        await _store.RemoveFromListAsync(parameters.Kind, parameters.Value.Trim(), ct).ConfigureAwait(false);
+        await _store.RemoveFromListAsync(parameters.Kind, value, ct).ConfigureAwait(false);
 
         // Reload the engine's in-memory matcher so the removal takes effect immediately.
         await _engine.HousekeepOnceAsync(ct).ConfigureAwait(false);
@@ -494,7 +523,7 @@ public sealed class PipeServer : BackgroundService
         var warnings = new List<string>();
         if (!auditEnabled)
         {
-            warnings.Add("Logon failure auditing is disabled; RDP 4625 events will not be recorded. Enable it with: auditpol /set /subcategory:\"Logon\" /success:enable /failure:enable");
+            warnings.Add("Logon failure auditing is disabled; RDP 4625 events will not be recorded. Enable it with: auditpol /set /subcategory:\"{0CCE9215-69AE-11D9-BED3-505054503030}\" /success:enable /failure:enable (the GUID form also works on localized Windows)");
         }
 
         if (!firewallRunning)
@@ -529,7 +558,9 @@ public sealed class PipeServer : BackgroundService
                 CreateNoWindow = true,
             };
             startInfo.ArgumentList.Add("/get");
-            startInfo.ArgumentList.Add("/subcategory:Logon");
+            // Locale-independent subcategory GUID for "Logon" — the English name fails on
+            // localized Windows (review P-M4).
+            startInfo.ArgumentList.Add("/subcategory:{0CCE9215-69AE-11D9-BED3-505054503030}");
             startInfo.ArgumentList.Add("/r");
 
             using var process = Process.Start(startInfo);
@@ -563,6 +594,7 @@ public sealed class PipeServer : BackgroundService
         var header = SplitCsvLine(lines[0]);
         var subcategoryIndex = FindColumn(header, "Subcategory");
         var inclusionIndex = FindColumn(header, "Inclusion Setting");
+        var settingValueIndex = FindColumn(header, "Setting Value");
 
         for (var i = 1; i < lines.Length; i++)
         {
@@ -572,10 +604,20 @@ public sealed class PipeServer : BackgroundService
                 continue;
             }
 
-            if (subcategoryIndex >= 0 && subcategoryIndex < cells.Length
-                && !cells[subcategoryIndex].Trim().Equals("Logon", StringComparison.OrdinalIgnoreCase))
+            // The query is scoped by the locale-independent Logon subcategory GUID, so every
+            // data row belongs to Logon regardless of its localized display name; only skip
+            // structurally malformed rows.
+            if (subcategoryIndex >= cells.Length)
             {
                 continue;
+            }
+
+            // Prefer the numeric Setting Value (0=none,1=success,2=failure,3=both): it is
+            // locale-independent, unlike the "Failure" text.
+            if (settingValueIndex >= 0 && settingValueIndex < cells.Length
+                && int.TryParse(cells[settingValueIndex].Trim(), out var settingValue))
+            {
+                return (settingValue & 2) != 0;
             }
 
             var inclusion = inclusionIndex >= 0 && inclusionIndex < cells.Length
@@ -677,4 +719,237 @@ public sealed class PipeServer : BackgroundService
 
     private static string Version =>
         typeof(PipeServer).Assembly.GetName().Version?.ToString() ?? "0.0.0";
+
+    // ---- list value handling ----
+
+    /// <summary>
+    /// Validates and normalizes a whitelist/blacklist entry (single IP or CIDR). Rejects
+    /// prefixes shorter than /8: e.g. 0.0.0.0/0 would disable all banning (whitelist) or
+    /// ban the entire internet at detection time (blacklist).
+    /// </summary>
+    private static bool TryNormalizeListValue(IpcRequest request, string raw, out string value, out IpcResponse? failure)
+    {
+        value = string.Empty;
+        failure = null;
+
+        if (!IpMatcher.TryParseCidr(raw, out var network))
+        {
+            failure = IpcResponse.Fail(request.Id, "Invalid IP or CIDR value.");
+            return false;
+        }
+
+        if (network.PrefixLength < 8)
+        {
+            failure = IpcResponse.Fail(request.Id, "Prefixes shorter than /8 are rejected: too broad for a host-protection list.");
+            return false;
+        }
+
+        // Persist the canonical form so remove/lookups match what was added.
+        value = IpMatcher.TryNormalize(raw, out var single) ? single : network.ToString();
+        return true;
+    }
+
+    // ---- secured pipe creation (review S-M2) ----
+
+    private const int MaxLineBytes = 1024 * 1024;
+    private const int SecurityDescriptorRevision = 1;
+    private const int PipeUnlimitedInstances = 255;
+    private const int PipeAccessDuplex = 0x00000003;
+    private const int FileFlagOverlapped = 0x40000000;
+    private const int PipeFirstPipeInstance = 0x00080000;
+    private const int PipeTypeByte = 0x00000000;
+    private const int PipeReadmodeByte = 0x00000000;
+    private const int PipeWait = 0x00000000;
+    private const int PipeRejectRemoteClients = 0x00000008;
+    private const int ErrorAccessDenied = 5;
+
+    /// <summary>
+    /// SYSTEM + Administrators full control; Authenticated Users read/write so the
+    /// non-elevated (UAC-filtered) admin GUI can submit requests — identity is still
+    /// verified per connection in <see cref="Authorize"/>. No Everyone/Anonymous access.
+    /// </summary>
+    private const string PipeSddl = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)";
+
+    private NamedPipeServerStream CreateSecuredPipe()
+    {
+        var openMode = PipeAccessDuplex | FileFlagOverlapped;
+        if (!_firstPipeInstanceCreated)
+        {
+            // Fail instead of silently adding an instance to a squatted pipe name.
+            openMode |= PipeFirstPipeInstance;
+        }
+
+        var pipeMode = PipeTypeByte | PipeReadmodeByte | PipeWait | PipeRejectRemoteClients;
+
+        if (!TryCreateSecurityDescriptor(PipeSddl, out var securityDescriptor))
+        {
+            _logger.LogWarning(
+                "Could not build the pipe security descriptor; falling back to the OS default DACL " +
+                "(non-elevated GUI connections may be rejected by the OS).");
+            return new NamedPipeServerStream(
+                PipeConstants.PipeName,
+                PipeDirection.InOut,
+                NamedPipeServerStream.MaxAllowedServerInstances,
+                PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous);
+        }
+
+        try
+        {
+            var securityAttributes = new SecurityAttributes
+            {
+                nLength = Marshal.SizeOf<SecurityAttributes>(),
+                lpSecurityDescriptor = securityDescriptor,
+                bInheritHandle = false,
+            };
+
+            var handle = NativeMethods.CreateNamedPipe(
+                @"\\.\pipe\" + PipeConstants.PipeName,
+                openMode,
+                pipeMode,
+                PipeUnlimitedInstances,
+                4096,
+                4096,
+                0,
+                ref securityAttributes);
+
+            if (handle.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                if (!_firstPipeInstanceCreated && error == ErrorAccessDenied)
+                {
+                    _logger.LogError(
+                        "The pipe name \\\\.\\pipe\\{Pipe} is already in use by another process " +
+                        "(possible name squatting); WinGuard IPC cannot start.",
+                        PipeConstants.PipeName);
+                }
+
+                throw new IOException($"CreateNamedPipe failed with Win32 error {error}.");
+            }
+
+            _firstPipeInstanceCreated = true;
+            return new NamedPipeServerStream(PipeDirection.InOut, isAsync: true, isConnected: false, handle);
+        }
+        finally
+        {
+            if (securityDescriptor != IntPtr.Zero)
+            {
+                // The pipe object keeps its own copy of the descriptor.
+                NativeMethods.LocalFree(securityDescriptor);
+            }
+        }
+    }
+
+    private static bool TryCreateSecurityDescriptor(string sddl, out IntPtr securityDescriptor)
+    {
+        securityDescriptor = IntPtr.Zero;
+        try
+        {
+            return NativeMethods.ConvertStringSecurityDescriptorToSecurityDescriptor(
+                       sddl, SecurityDescriptorRevision, out securityDescriptor, IntPtr.Zero)
+                   && securityDescriptor != IntPtr.Zero;
+        }
+        catch (Exception)
+        {
+            securityDescriptor = IntPtr.Zero;
+            return false;
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes
+    {
+        public int nLength;
+        public IntPtr lpSecurityDescriptor;
+        public bool bInheritHandle;
+    }
+
+    private static class NativeMethods
+    {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        internal static extern SafePipeHandle CreateNamedPipe(
+            string lpName,
+            int dwOpenMode,
+            int dwPipeMode,
+            int nMaxInstances,
+            int nOutBufferSize,
+            int nInBufferSize,
+            int nDefaultTimeOut,
+            ref SecurityAttributes lpSecurityAttributes);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
+            string stringSecurityDescriptor,
+            int stringSDRevision,
+            out IntPtr securityDescriptor,
+            IntPtr securityDescriptorSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern IntPtr LocalFree(IntPtr hMem);
+    }
+
+    /// <summary>UTF-8 line reader with a hard per-line byte cap (review S-N3).</summary>
+    private sealed class BoundedLineReader
+    {
+        private readonly Stream _stream;
+        private readonly ILogger _logger;
+        private readonly byte[] _buffer = new byte[8192];
+        private readonly MemoryStream _line = new();
+        private int _start;
+        private int _count;
+
+        public BoundedLineReader(Stream stream, ILogger logger)
+        {
+            _stream = stream;
+            _logger = logger;
+        }
+
+        /// <summary>
+        /// Reads the next '\n'-terminated line (a trailing '\r' is trimmed). Returns null at
+        /// EOF; throws <see cref="IOException"/> when a line exceeds <see cref="MaxLineBytes"/>.
+        /// </summary>
+        public async Task<string?> ReadLineAsync(CancellationToken ct)
+        {
+            while (true)
+            {
+                if (_start >= _count)
+                {
+                    _count = await _stream.ReadAsync(_buffer.AsMemory(0, _buffer.Length), ct).ConfigureAwait(false);
+                    _start = 0;
+                    if (_count == 0)
+                    {
+                        return _line.Length == 0 ? null : TakeLine();
+                    }
+                }
+
+                var newline = Array.IndexOf(_buffer, (byte)'\n', _start, _count - _start);
+                var end = newline >= 0 ? newline : _count;
+                if (end > _start)
+                {
+                    _line.Write(_buffer, _start, end - _start);
+                    _start = end;
+                    if (_line.Length > MaxLineBytes)
+                    {
+                        _logger.LogWarning("IPC client exceeded the {Cap}-byte line cap; disconnecting it.", MaxLineBytes);
+                        _line.SetLength(0);
+                        throw new IOException($"IPC line exceeded the {MaxLineBytes}-byte cap.");
+                    }
+                }
+
+                if (newline >= 0)
+                {
+                    _start++; // consume '\n'
+                    return TakeLine();
+                }
+            }
+        }
+
+        private string TakeLine()
+        {
+            var text = Encoding.UTF8.GetString(_line.GetBuffer(), 0, (int)_line.Length);
+            _line.SetLength(0);
+            return text.EndsWith('\r') ? text[..^1] : text;
+        }
+    }
 }

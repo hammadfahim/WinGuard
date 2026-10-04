@@ -96,7 +96,7 @@ public sealed partial class DashboardViewModel : ObservableObject
 
         if (!prereqs.AuditLogonFailureEnabled)
         {
-            Warnings.Add("Windows failed-logon auditing is disabled. Run: auditpol /set /subcategory:\"Logon\" /success:enable /failure:enable");
+            Warnings.Add("Windows failed-logon auditing is disabled. Run: auditpol /set /subcategory:\"{0CCE9215-69AE-11D9-BED3-505054503030}\" /success:enable /failure:enable (the GUID form also works on localized Windows)");
         }
 
         if (!prereqs.FirewallServiceRunning)

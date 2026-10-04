@@ -51,12 +51,61 @@ public sealed class FileLoggerProvider : ILoggerProvider
             var path = Path.Combine(_directory, $"winguard-{DateTime.Now:yyyyMMdd}.log");
             lock (_gate)
             {
+                SweepRetention();
+
+                // Daily size cap: never let logging (e.g. a connection-rejection loop)
+                // exhaust the disk (review S-N2).
+                var info = new FileInfo(path);
+                if (info.Exists && info.Length >= MaxFileBytes)
+                {
+                    return;
+                }
+
                 File.AppendAllText(path, line);
             }
         }
         catch (Exception)
         {
             // Never let a logging failure propagate into the service.
+        }
+    }
+
+    private const long MaxFileBytes = 10 * 1024 * 1024;
+    private const int RetentionDays = 30;
+
+    private DateTime _lastRetentionSweep = DateTime.MinValue;
+
+    /// <summary>Deletes winguard-*.log files older than <see cref="RetentionDays"/> (once per day). Call under _gate.</summary>
+    private void SweepRetention()
+    {
+        var today = DateTime.Now.Date;
+        if ((today - _lastRetentionSweep).TotalHours < 24)
+        {
+            return;
+        }
+
+        _lastRetentionSweep = today;
+        try
+        {
+            var cutoff = today.AddDays(-RetentionDays);
+            foreach (var file in Directory.GetFiles(_directory, "winguard-*.log"))
+            {
+                try
+                {
+                    if (File.GetLastWriteTime(file) < cutoff)
+                    {
+                        File.Delete(file);
+                    }
+                }
+                catch (Exception)
+                {
+                    // Best effort per file.
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Best effort.
         }
     }
 

@@ -146,11 +146,17 @@ public sealed class RdpCoreTsDetector : IDetector
             return false;
         }
 
-        var eventData = root.Element(ns + "EventData");
-        var rawIp = eventData?
-            .Elements(ns + "Data")
+        var dataElements = root.Element(ns + "EventData")?.Elements(ns + "Data").ToList();
+        var rawIp = dataElements?
             .FirstOrDefault(data => string.Equals((string?)data.Attribute("Name"), "IPString", StringComparison.OrdinalIgnoreCase))
             ?.Value;
+
+        if (string.IsNullOrEmpty(rawIp))
+        {
+            // Some RdpCoreTS builds emit event 140 with a single unnamed Data element; fall back
+            // to the first positional value when the named IPString field is absent (or empty).
+            rawIp = dataElements?.FirstOrDefault()?.Value;
+        }
 
         if (!IpMatcher.TryNormalize(rawIp, out var ip))
         {
@@ -162,6 +168,7 @@ public sealed class RdpCoreTsDetector : IDetector
             IpAddress = ip,
             UserName = null,
             Source = ProtocolSource.Rdp,
+            Detector = "140",
             TimestampUtc = ParseSystemTime(system, ns),
             RawLog = $"EventID=140 RdpCoreTS connection failure ip={ip}",
         };

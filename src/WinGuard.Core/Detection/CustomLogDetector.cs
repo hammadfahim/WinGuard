@@ -13,14 +13,27 @@ namespace WinGuard.Core.Detection;
 /// (or folder + glob) and applies the source's regex. A regex match yields one
 /// <see cref="FailedLogin"/>; the regex must capture a named group <c>ipaddress</c> and may capture
 /// an optional named group <c>username</c>. Tailing uses the shared <see cref="LogFileTailer"/> so
-/// only appended lines are evaluated. The failure timestamp is the poller's current UTC time.
+/// only appended lines are evaluated. The failure timestamp is the poller's current UTC time
+/// (the regex has no guaranteed timestamp capture). Each pattern is compiled once with a 2-second
+/// match timeout; an invalid pattern is logged once and its source skipped, and a match timeout is
+/// logged once per source and the line skipped.
 /// </summary>
 public sealed class CustomLogDetector : IDetector
 {
+    /// <summary>Fallback detector discriminator for a custom source without a configured name.</summary>
+    public const string DefaultDetectorName = "custom";
+
+    private static readonly TimeSpan RegexTimeout = TimeSpan.FromSeconds(2);
+
     private readonly Func<WinGuardSettings> _settingsAccessor;
     private readonly ILogger<CustomLogDetector> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly LogFileTailer _tailer = new();
+
+    // Compiled pattern cache keyed by (source name, pattern); a null value marks a known-bad source.
+    private readonly Dictionary<(string Source, string Pattern), Regex?> _regexCache = new();
+    private readonly HashSet<string> _invalidWarnedSources = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _timeoutWarnedSources = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Creates the detector.</summary>
     /// <param name="settingsAccessor">Returns the current live settings.</param>
@@ -56,7 +69,10 @@ public sealed class CustomLogDetector : IDetector
     /// <summary>
     /// Applies <paramref name="regexPattern"/> to one log line. The named group <c>ipaddress</c> is
     /// required and must normalize to a valid IP; the optional named group <c>username</c> becomes
-    /// the user. At most one failure is produced per line.
+    /// the user. At most one failure is produced per line. An invalid pattern or a match timeout
+    /// returns <see langword="false"/> without throwing; <see cref="FailedLogin.Detector"/> defaults
+    /// to <see cref="DefaultDetectorName"/> when the call is made outside a named source (the live
+    /// loop overwrites it with the source's name).
     /// </summary>
     /// <param name="line">A single log line.</param>
     /// <param name="regexPattern">Regex with named groups <c>ipaddress</c> and optional <c>username</c>.</param>
@@ -69,16 +85,39 @@ public sealed class CustomLogDetector : IDetector
             return false;
         }
 
-        Match match;
+        Regex regex;
         try
         {
-            match = Regex.Match(line, regexPattern);
+            regex = new Regex(
+                regexPattern,
+                RegexOptions.Compiled | RegexOptions.CultureInvariant,
+                RegexTimeout);
         }
         catch (ArgumentException)
         {
             return false;
         }
 
+        try
+        {
+            return TryMatch(regex, line, out failed);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            failed = null;
+            return false;
+        }
+    }
+
+    private static bool TryMatch(Regex regex, string line, out FailedLogin? failed)
+    {
+        failed = null;
+        if (string.IsNullOrEmpty(line))
+        {
+            return false;
+        }
+
+        var match = regex.Match(line);
         if (!match.Success)
         {
             return false;
@@ -98,6 +137,7 @@ public sealed class CustomLogDetector : IDetector
             IpAddress = ip,
             UserName = user,
             Source = ProtocolSource.Custom,
+            Detector = DefaultDetectorName,
             TimestampUtc = DateTime.UtcNow,
             RawLog = line.Trim(),
         };
@@ -120,9 +160,15 @@ public sealed class CustomLogDetector : IDetector
                     _logger.LogWarning(ex, "Custom log detector poll cycle failed.");
                 }
 
+                // Custom sources share the FTP poll interval (PLAN.md §4.5; phase-3 topic #4
+                // ruling): read it live each cycle so a settings change takes effect, falling
+                // back to the default when it is not positive.
+                var interval = settings.Ftp.PollInterval > TimeSpan.Zero
+                    ? settings.Ftp.PollInterval
+                    : Defaults.FtpPollInterval;
                 try
                 {
-                    await Task.Delay(Defaults.FtpPollInterval, _timeProvider, ct).ConfigureAwait(false);
+                    await Task.Delay(interval, _timeProvider, ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -148,13 +194,23 @@ public sealed class CustomLogDetector : IDetector
                 continue;
             }
 
+            // Invalid patterns are reported once and the whole source is skipped for this cycle.
+            if (!TryGetSourceRegex(source, out var regex) || regex is null)
+            {
+                continue;
+            }
+
+            var detectorName = DisplayName(source);
             foreach (var file in LogFileTailer.ResolveFiles(source.PathGlob, "*"))
             {
                 activeFiles.Add(file);
                 foreach (var line in _tailer.ReadNewLines(file))
                 {
-                    if (TryParseLine(line, source.Regex, out var failure) && failure is not null)
+                    if (TryParseForSource(line, source, regex, out var failure) && failure is not null)
                     {
+                        failure.Detector = detectorName;
+                        // Custom regexes have no guaranteed timestamp capture, so the ingest
+                        // (poll) time is authoritative for this engine.
                         failure.TimestampUtc = _timeProvider.GetUtcNow().UtcDateTime;
                         if (!sink.Writer.TryWrite(failure))
                         {
@@ -167,6 +223,69 @@ public sealed class CustomLogDetector : IDetector
 
         _tailer.Prune(activeFiles);
     }
+
+    /// <summary>
+    /// Returns the cached compiled regex for a source, compiling it on first use. An invalid
+    /// pattern is remembered as null, logged once, and reported as unavailable so the source is
+    /// skipped instead of silently swallowed.
+    /// </summary>
+    private bool TryGetSourceRegex(CustomLogSource source, out Regex? regex)
+    {
+        var key = (source.Name ?? string.Empty, source.Regex);
+        if (_regexCache.TryGetValue(key, out regex))
+        {
+            return regex is not null;
+        }
+
+        try
+        {
+            regex = new Regex(
+                source.Regex,
+                RegexOptions.Compiled | RegexOptions.CultureInvariant,
+                RegexTimeout);
+            _regexCache[key] = regex;
+            return true;
+        }
+        catch (ArgumentException ex)
+        {
+            _regexCache[key] = null;
+            if (_invalidWarnedSources.Add(DisplayName(source)))
+            {
+                _logger.LogWarning(ex, "Custom log source {Source} has an invalid regex; skipping it.", DisplayName(source));
+            }
+
+            regex = null;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Runs a cached regex against one line, converting a match timeout into a skipped line and a
+    /// rate-limited (once per source) warning instead of propagating the exception.
+    /// </summary>
+    private bool TryParseForSource(string line, CustomLogSource source, Regex regex, out FailedLogin? failure)
+    {
+        try
+        {
+            return TryMatch(regex, line, out failure);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            failure = null;
+            if (_timeoutWarnedSources.Add(DisplayName(source)))
+            {
+                _logger.LogWarning(
+                    "Custom log source {Source} regex exceeded the {Timeout}s match timeout; skipping the line.",
+                    DisplayName(source),
+                    RegexTimeout.TotalSeconds);
+            }
+
+            return false;
+        }
+    }
+
+    private static string DisplayName(CustomLogSource source) =>
+        string.IsNullOrWhiteSpace(source.Name) ? DefaultDetectorName : source.Name;
 
     private static string? NormalizeOptional(string? value)
     {

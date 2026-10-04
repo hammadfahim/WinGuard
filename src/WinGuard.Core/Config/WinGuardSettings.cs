@@ -83,6 +83,19 @@ public sealed class WinGuardSettings
         }
 
         BanTiers = BanTiers is { Length: > 0 } ? BanTiers : (TimeSpan[])Defaults.BanTiers.Clone();
+
+        // Drop non-positive tiers (bad IPC input); fall back to defaults when none survive.
+        var positiveTiers = BanTiers.Where(t => t > TimeSpan.Zero).ToArray();
+        BanTiers = positiveTiers.Length > 0 ? positiveTiers : (TimeSpan[])Defaults.BanTiers.Clone();
+
+        // BlockedPorts tokens reach the firewall LocalPorts property: keep only "port" or
+        // "start-end" numeric forms so garbage can't break rule creation.
+        BlockedPorts = BlockedPorts
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Select(p => p.Trim())
+            .Where(p => System.Text.RegularExpressions.Regex.IsMatch(p, @"^\d+(-\d+)?$"))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 }
 

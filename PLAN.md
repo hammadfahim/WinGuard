@@ -676,3 +676,20 @@ action versions are being retired on runners (Sep 2026) — use current major ve
 - How it works (detect → count → firewall block → auto-expire), the 24h/7d/30d tiers.
 - Configuration (thresholds, lists, exclusions, FTP log paths).
 - Build from source. License (MIT). Clean-room/trademark disclaimer re: RdpGuard.
+
+---
+
+## 18. Errata (found during implementation)
+
+- **§13 (Build & packaging):** the GUI publish command must also pass
+  `-p:IncludeNativeLibrariesForSelfExtract=true` (the service command already does).
+  Without it the WPF native libraries stay loose next to the single-file EXE and the
+  installed GUI crashes at launch.
+- **§14 (GitHub Actions):** the Inno Setup ISCC invocation must be written
+  `& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" ...` in PowerShell.
+  `"$env:ProgramFiles(x86)\..."` expands only `$env:ProgramFiles` and leaves a literal
+  `(x86)`, producing a `CommandNotFound` error on every release.
+- **§16 (Key facts):** the logon audit subcategory should be set with the
+  locale-independent GUID `{0CCE9215-69AE-11D9-BED3-505054503030}` rather than the
+  English name `"Logon"`; the English name silently fails on German/French/Japanese/…
+  Windows.

@@ -11,6 +11,7 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
+      # PLAN M7: pin all actions to commit SHAs before making the repo public.
       - uses: actions/checkout@v5
       - uses: actions/setup-dotnet@v5
         with:
@@ -29,7 +30,8 @@ jobs:
 
       - name: Publish GUI
         run: dotnet publish src/WinGuard.Gui/WinGuard.Gui.csproj -c Release -r win-x64
-             -p:PublishSingleFile=true -p:SelfContained=true -p:PublishTrimmed=false
+             -p:PublishSingleFile=true -p:SelfContained=true
+             -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false
              -p:Version=${{ steps.ver.outputs.v }} -o publish/gui
 
       - name: Stage installer inputs
@@ -44,7 +46,7 @@ jobs:
       - name: Build installer (Inno Setup)
         shell: pwsh
         run: |
-          & "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe" `
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
             /DMyAppVersion=${{ steps.ver.outputs.v }} installer/winguard.iss
         # Inno Setup 6 is preinstalled on windows-latest runners.
         # Fallback if a future image drops it:
@@ -55,9 +57,19 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path publish/service/*,publish/gui/* -DestinationPath dist/WinGuard-portable-win-x64.zip
 
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem installer/Output/WinGuard-Setup-*.exe | Select-Object -First 1
+          "$((Get-FileHash $setup.FullName -Algorithm SHA256).Hash.ToLower())  $($setup.Name)" |
+            Set-Content "dist/$($setup.Name).sha256"
+          "$((Get-FileHash dist/WinGuard-portable-win-x64.zip -Algorithm SHA256).Hash.ToLower())  WinGuard-portable-win-x64.zip" |
+            Set-Content "dist/WinGuard-portable-win-x64.zip.sha256"
+
       - name: Create GitHub Release + upload assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
             installer/Output/WinGuard-Setup-*.exe
             dist/WinGuard-portable-win-x64.zip
+            dist/*.sha256

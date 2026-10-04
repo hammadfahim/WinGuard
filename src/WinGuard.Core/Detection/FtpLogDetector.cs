@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
@@ -15,12 +16,20 @@ namespace WinGuard.Core.Detection;
 /// It polls <see cref="FtpSettings.Sources"/> every <see cref="FtpSettings.PollInterval"/> using
 /// the shared <see cref="LogFileTailer"/>, parsing only newly appended lines. IIS lines are
 /// flagged when <c>cs-method == PASS</c> and <c>sc-status == 530</c>; FileZilla lines are flagged
-/// on <c>"530 Login or password incorrect!"</c>. The failure timestamp is the poller's current UTC
-/// time because the timestamps embedded in these heterogeneous log formats are unreliable.
+/// on <c>"530 Login or password incorrect!"</c>. The failure timestamp comes from the log line
+/// itself: IIS W3C <c>date</c>+<c>time</c> columns are UTC, and the FileZilla leading
+/// <c>(nnnnnn) yyyy-MM-dd HH:mm:ss</c> stamp is local time converted to UTC. Only when the
+/// line carries no parseable timestamp does the parser fall back to <see cref="DateTime.UtcNow"/>.
 /// </para>
 /// </summary>
 public sealed class FtpLogDetector : IDetector
 {
+    /// <summary>Detector discriminator stamped on failures parsed from IIS W3C logs.</summary>
+    public const string IisDetectorName = "iis-ftp";
+
+    /// <summary>Detector discriminator stamped on failures parsed from FileZilla Server logs.</summary>
+    public const string FileZillaDetectorName = "filezilla";
+
     private static readonly string[] DefaultW3cFields =
     [
         "date", "time", "c-ip", "cs-username", "s-ip", "s-port", "cs-method", "cs-uri-stem",
@@ -28,7 +37,11 @@ public sealed class FtpLogDetector : IDetector
     ];
 
     private static readonly Regex FileZillaLoginRegex = new(
-        @"\((?<user>[^()]+)\)\s*\((?<ip>[^()]+)\)>",
+        @"(?:\((?<parenUser>[^()]*)\)\s*)?(?<bareUser>[^\s()]+)?\s*\((?<ip>[^()]+)\)>",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex FileZillaTimestampRegex = new(
+        @"^\s*\(\d+\)\s+(?<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex ParenthesizedRegex = new(
@@ -136,16 +149,19 @@ public sealed class FtpLogDetector : IDetector
             IpAddress = ip,
             UserName = NormalizeOptional(Get("cs-username")),
             Source = ProtocolSource.Ftp,
-            TimestampUtc = DateTime.UtcNow,
+            Detector = IisDetectorName,
+            TimestampUtc = ParseIisTimestamp(Get("date"), Get("time")),
             RawLog = trimmed,
         };
         return true;
     }
 
     /// <summary>
-    /// Parses one FileZilla Server log line, extracting the session IP from the last
-    /// <c>(address)</c> token before <c>'&gt;'</c> and the user from the <c>(name (ip)&gt;</c> shape.
-    /// Only lines containing <c>"530 Login or password incorrect!"</c> match.
+    /// Parses one FileZilla Server log line. The session IP is the last <c>(address)</c> token
+    /// before <c>'&gt;'</c>; the user is an optional token immediately before that address, which
+    /// is either <c>(name)</c> (e.g. <c>(not logged in)</c>, which maps to a null user) or a bare
+    /// name after login (e.g. <c>admin (ip)&gt;</c>). Only lines containing
+    /// <c>"530 Login or password incorrect!"</c> match.
     /// </summary>
     /// <param name="line">A single FileZilla log line.</param>
     /// <param name="failed">The parsed failure when the method returns <see langword="true"/>.</param>
@@ -169,7 +185,9 @@ public sealed class FtpLogDetector : IDetector
         if (match.Success)
         {
             rawIp = match.Groups["ip"].Value;
-            user = NormalizeOptional(match.Groups["user"].Value);
+            var parenUser = match.Groups["parenUser"].Success ? match.Groups["parenUser"].Value : null;
+            var bareUser = match.Groups["bareUser"].Success ? match.Groups["bareUser"].Value : null;
+            user = NormalizeFileZillaUser(parenUser) ?? NormalizeFileZillaUser(bareUser);
         }
         else
         {
@@ -186,7 +204,8 @@ public sealed class FtpLogDetector : IDetector
             IpAddress = ip,
             UserName = user,
             Source = ProtocolSource.Ftp,
-            TimestampUtc = DateTime.UtcNow,
+            Detector = FileZillaDetectorName,
+            TimestampUtc = ParseFileZillaTimestamp(trimmed),
             RawLog = trimmed,
         };
         return true;
@@ -247,6 +266,11 @@ public sealed class FtpLogDetector : IDetector
             foreach (var file in files)
             {
                 activeFiles.Add(file);
+                if (source.Kind != FtpServerKind.FileZilla)
+                {
+                    EnsureFieldsHeaderPreRead(file);
+                }
+
                 foreach (var line in _tailer.ReadNewLines(file))
                 {
                     if (source.Kind == FtpServerKind.FileZilla)
@@ -284,7 +308,11 @@ public sealed class FtpLogDetector : IDetector
 
     private void Emit(Channel<FailedLogin> sink, FailedLogin failure)
     {
-        failure.TimestampUtc = _timeProvider.GetUtcNow().UtcDateTime;
+        // The log line's own timestamp is authoritative: IIS W3C date+time are UTC and the
+        // FileZilla leading stamp is local time converted to UTC by the parser. The parser only
+        // falls back to DateTime.UtcNow when the line carries no parseable timestamp. The poller
+        // clock is deliberately NOT stamped here, so tail lag or replays cannot distort the
+        // BanEngine's rolling count window.
         if (!sink.Writer.TryWrite(failure))
         {
             _logger.LogWarning("FTP detector could not write to the sink channel (closed).");
@@ -301,6 +329,57 @@ public sealed class FtpLogDetector : IDetector
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// The tailer skips existing content the first time it sees a file, so the
+    /// <c>#Fields:</c> header IIS wrote earlier is never streamed to us. Pre-read the file's
+    /// tail (last 64 KB) once to recover the active column order; without this, servers with
+    /// a custom W3C field selection would be parsed with <see cref="DefaultW3cFields"/> and
+    /// could silently mis-detect (integrator fix for the skip-to-end interaction).
+    /// </summary>
+    private void EnsureFieldsHeaderPreRead(string file)
+    {
+        if (_fieldsHeaders.ContainsKey(file))
+        {
+            return;
+        }
+
+        try
+        {
+            using var stream = new FileStream(
+                file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            const int tailBytes = 64 * 1024;
+            if (stream.Length == 0)
+            {
+                return;
+            }
+
+            var length = (int)Math.Min(stream.Length, tailBytes);
+            stream.Seek(-length, SeekOrigin.End);
+            var buffer = new byte[length];
+            var read = stream.Read(buffer, 0, length);
+            var text = System.Text.Encoding.UTF8.GetString(buffer, 0, read);
+
+            string? lastHeader = null;
+            foreach (var line in text.Split('\n'))
+            {
+                if (line.TrimStart().StartsWith("#Fields:", StringComparison.OrdinalIgnoreCase))
+                {
+                    lastHeader = line.Trim();
+                }
+            }
+
+            if (lastHeader is not null)
+            {
+                _fieldsHeaders[file] = lastHeader;
+                _logger.LogDebug("Pre-read the W3C fields header for {File}.", file);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not pre-read the W3C fields header for {File}; using the default column order.", file);
+        }
     }
 
     private static string[] ParseFields(string? fieldsHeaderLine)
@@ -351,5 +430,65 @@ public sealed class FtpLogDetector : IDetector
 
         var trimmed = value.Trim();
         return trimmed == "-" ? null : trimmed;
+    }
+
+    /// <summary>
+    /// Parses the W3C <c>date</c>+<c>time</c> columns as a UTC timestamp. W3C/ IIS FTP logs
+    /// record UTC; an unparsable or missing pair falls back to <see cref="DateTime.UtcNow"/>.
+    /// </summary>
+    private static DateTime ParseIisTimestamp(string? date, string? time)
+    {
+        if (!string.IsNullOrWhiteSpace(date)
+            && !string.IsNullOrWhiteSpace(time)
+            && DateTime.TryParseExact(
+                $"{date.Trim()} {time.Trim()}",
+                "yyyy-MM-dd HH:mm:ss",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out var parsed))
+        {
+            return DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+        }
+
+        return DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// Parses the leading FileZilla <c>(nnnnnn) yyyy-MM-dd HH:mm:ss</c> stamp as local time and
+    /// converts it to UTC. A missing/unparsable stamp falls back to <see cref="DateTime.UtcNow"/>.
+    /// </summary>
+    private static DateTime ParseFileZillaTimestamp(string line)
+    {
+        var match = FileZillaTimestampRegex.Match(line);
+        if (match.Success
+            && DateTime.TryParseExact(
+                match.Groups["ts"].Value,
+                "yyyy-MM-dd HH:mm:ss",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var parsed))
+        {
+            return DateTime.SpecifyKind(parsed, DateTimeKind.Local).ToUniversalTime();
+        }
+
+        return DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// Normalizes a FileZilla user token: <c>-</c> and the pre-login marker
+    /// <c>"(not logged in)"</c> (with or without its parentheses, case-insensitive) mean no user.
+    /// </summary>
+    private static string? NormalizeFileZillaUser(string? value)
+    {
+        var normalized = NormalizeOptional(value);
+        if (normalized is null)
+        {
+            return null;
+        }
+
+        return normalized.Equals("not logged in", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("(not logged in)", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : normalized;
     }
 }

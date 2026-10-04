@@ -20,6 +20,7 @@ public sealed class MsSqlDetectorTests
         Assert.Equal("203.0.113.77", failed!.IpAddress);
         Assert.Equal("sa", failed.UserName);
         Assert.Equal(ProtocolSource.MsSql, failed.Source);
+        Assert.Equal("18456", failed.Detector);
     }
 
     [Fact]

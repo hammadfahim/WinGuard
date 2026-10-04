@@ -43,7 +43,7 @@ internal static class Program
                     case "--clear-firewall":
                         return ClearFirewall();
                     case "--console":
-                        return await RunHostAsync(console: true).ConfigureAwait(false);
+                        return await RunHostAsync(args, console: true).ConfigureAwait(false);
                     case "--help":
                     case "-h":
                     case "/?":
@@ -55,7 +55,7 @@ internal static class Program
                 }
             }
 
-            return await RunHostAsync(console: false).ConfigureAwait(false);
+            return await RunHostAsync(args, console: false).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -66,11 +66,16 @@ internal static class Program
 
     // ---- service host ----
 
-    private static async Task<int> RunHostAsync(bool console)
+    private static async Task<int> RunHostAsync(string[] args, bool console)
     {
         var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
         {
-            Args = [],
+            // Pass configuration-relevant args through (e.g. --DatabasePath <path>);
+            // the --console verb itself is filtered so the command-line provider only
+            // sees well-formed --key value pairs.
+            Args = args
+                .Where(a => !string.Equals(a, "--console", StringComparison.OrdinalIgnoreCase))
+                .ToArray(),
             ContentRootPath = AppContext.BaseDirectory,
         });
 
@@ -251,7 +256,13 @@ internal static class Program
     private static int ClearFirewall()
     {
         var firewall = new WindowsFirewall(NullLogger<WindowsFirewall>.Instance);
-        firewall.ClearAll();
+        if (!firewall.TryClearAll(out var error))
+        {
+            // Honest failure signal: the uninstaller warns when rules may remain (review S-M4).
+            Console.Error.WriteLine($"Failed to remove WinGuard firewall rules: {error}");
+            return 1;
+        }
+
         Console.WriteLine("Removed all WinGuard firewall rules.");
         return 0;
     }

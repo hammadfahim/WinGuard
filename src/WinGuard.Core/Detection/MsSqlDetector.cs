@@ -181,6 +181,7 @@ public sealed class MsSqlDetector : IDetector
             IpAddress = ip,
             UserName = user,
             Source = ProtocolSource.MsSql,
+            Detector = "18456",
             TimestampUtc = ParseSystemTime(system, ns),
             RawLog = BuildRawLog(formattedMessage, ip, user),
         };

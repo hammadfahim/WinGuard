@@ -110,6 +110,13 @@ public sealed class IpMatcher
             address = new IPAddress(address.GetAddressBytes());
         }
 
+        if (address.IsIPv4MappedToIPv6)
+        {
+            // Canonicalize ::ffff:a.b.c.d to plain IPv4 so whitelist/bans/firewall see a
+            // single identity per address (a mapped form must not bypass an IPv4 whitelist).
+            address = address.MapToIPv4();
+        }
+
         normalized = address.ToString().ToLowerInvariant();
         return true;
     }

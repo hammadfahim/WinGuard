@@ -252,16 +252,41 @@ public sealed class WindowsFirewall : IFirewall
     /// <inheritdoc />
     public void ClearAll()
     {
+        if (!TryClearAll(out var error))
+        {
+            _logger.LogError("Failed to clear WinGuard firewall rules: {Error}", error);
+        }
+    }
+
+    /// <summary>
+    /// Like <see cref="ClearAll"/> but reports failure instead of swallowing it: returns
+    /// <see langword="false"/> when the COM call failed OR WinGuard_Block_* rules are still
+    /// present afterwards. The <c>--clear-firewall</c> CLI uses this to exit non-zero so the
+    /// uninstaller can warn instead of orphaning permanent blocks (review S-M4).
+    /// </summary>
+    public bool TryClearAll(out string? error)
+    {
+        error = null;
         lock (_gate)
         {
             try
             {
                 dynamic policy = CreatePolicy();
                 ClearAllLocked(policy);
+
+                List<RuleBatch> remaining = LoadBatches(policy);
+                if (remaining.Count > 0)
+                {
+                    error = $"{remaining.Count} WinGuard_Block_* rule(s) are still present after the clear attempt.";
+                    return false;
+                }
+
+                return true;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to clear WinGuard firewall rules.");
+                error = ex.Message;
+                return false;
             }
         }
     }

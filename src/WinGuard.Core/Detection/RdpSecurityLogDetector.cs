@@ -161,6 +161,7 @@ public sealed class RdpSecurityLogDetector : IDetector
             IpAddress = ip,
             UserName = user,
             Source = ProtocolSource.Rdp,
+            Detector = "4625",
             TimestampUtc = ParseSystemTime(system, ns),
             RawLog = BuildRawLog(eventData, ip, user),
         };

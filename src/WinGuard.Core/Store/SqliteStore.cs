@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.InteropServices;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using WinGuard.Core.Abstractions;
@@ -417,6 +418,20 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
             ct).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
+    public async Task PruneEventsAsync(DateTime olderThanUtc, CancellationToken ct = default)
+    {
+        await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText = "DELETE FROM events WHERE ts_utc < $before;";
+                cmd.Parameters.AddWithValue("$before", ToDb(olderThanUtc));
+                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            },
+            ct).ConfigureAwait(false);
+    }
+
     // ---- settings ----
 
     /// <inheritdoc />
@@ -509,6 +524,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
         if (!string.IsNullOrEmpty(directory))
         {
             Directory.CreateDirectory(directory);
+            TryHardenDirectoryAcl(directory);
         }
 
         var connection = new SqliteConnection(_connectionString);
@@ -537,6 +553,115 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = sql;
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Best-effort ACL hardening of the data directory (review S-M5): only SYSTEM and
+    /// Administrators keep access, so a local standard user cannot pre-create or tamper
+    /// with the database (e.g. seeding a whitelist) while it is absent. Only applied to
+    /// the production location under %ProgramData%; failures are logged and never block
+    /// startup. The installer applies the same ACL via icacls.
+    /// </summary>
+    private void TryHardenDirectoryAcl(string directoryPath)
+    {
+        try
+        {
+            var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            if (string.IsNullOrEmpty(programData)
+                || !directoryPath.StartsWith(programData, StringComparison.OrdinalIgnoreCase))
+            {
+                // Not the production location (e.g. unit tests on temp files): leave ACLs alone.
+                return;
+            }
+
+            // "P" = protected DACL (no inheritance, mirrors the installer's
+            // icacls /inheritance:r); SYSTEM + Administrators full control only.
+            if (!AclInterop.ConvertStringSecurityDescriptorToSecurityDescriptor(
+                    "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", 1, out var securityDescriptor, IntPtr.Zero)
+                || securityDescriptor == IntPtr.Zero)
+            {
+                _logger.LogWarning(
+                    "Could not build the data-directory security descriptor (Win32 error {Error}); " +
+                    "ACL hardening skipped — the installer's icacls step is the fallback.",
+                    Marshal.GetLastWin32Error());
+                return;
+            }
+
+            try
+            {
+                // SetNamedSecurityInfo wants the DACL itself, not the security descriptor —
+                // passing the SD pointer silently no-ops (verified live), so extract first.
+                if (!AclInterop.GetSecurityDescriptorDacl(securityDescriptor, out var daclPresent, out var dacl, out _)
+                    || !daclPresent || dacl == IntPtr.Zero)
+                {
+                    _logger.LogWarning(
+                        "Could not extract the DACL from the security descriptor (Win32 error {Error}); " +
+                        "data-directory ACL hardening skipped.",
+                        Marshal.GetLastWin32Error());
+                    return;
+                }
+
+                var result = AclInterop.SetNamedSecurityInfo(
+                    directoryPath,
+                    AclInterop.SeFileObject,
+                    AclInterop.DaclSecurityInformation,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    dacl,
+                    IntPtr.Zero);
+                if (result != 0)
+                {
+                    _logger.LogWarning(
+                        "SetNamedSecurityInfo on {Directory} returned Win32 error {Error}; " +
+                        "data-directory ACL hardening was not applied.",
+                        directoryPath,
+                        result);
+                }
+            }
+            finally
+            {
+                AclInterop.LocalFree(securityDescriptor);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not harden the WinGuard data directory ACL.");
+        }
+    }
+
+    private static class AclInterop
+    {
+        internal const uint SeFileObject = 1;
+        internal const uint DaclSecurityInformation = 0x00000004;
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
+            string stringSecurityDescriptor,
+            int stringSDRevision,
+            out IntPtr securityDescriptor,
+            IntPtr securityDescriptorSize);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetSecurityDescriptorDacl(
+            IntPtr securityDescriptor,
+            [MarshalAs(UnmanagedType.Bool)] out bool daclPresent,
+            out IntPtr dacl,
+            [MarshalAs(UnmanagedType.Bool)] out bool daclDefaulted);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        internal static extern uint SetNamedSecurityInfo(
+            string objectName,
+            uint objectType,
+            uint securityInfo,
+            IntPtr owner,
+            IntPtr group,
+            IntPtr dacl,
+            IntPtr sacl);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern IntPtr LocalFree(IntPtr hMem);
     }
 
     private static FailedLogin ReadFailedLogin(SqliteDataReader reader) => new()

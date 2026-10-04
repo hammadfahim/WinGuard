@@ -31,6 +31,7 @@ public sealed class CustomLogDetectorTests
             new[] { "jsmith", "admin", "root" },
             failures.Select(f => f.UserName));
         Assert.All(failures, f => Assert.Equal(ProtocolSource.Custom, f.Source));
+        Assert.All(failures, f => Assert.Equal(CustomLogDetector.DefaultDetectorName, f.Detector));
     }
 
     [Fact]
@@ -39,6 +40,16 @@ public sealed class CustomLogDetectorTests
         var line = TestData.ReadLines("custom-app.log")[0]; // "LOGIN OK ..."
 
         Assert.False(CustomLogDetector.TryParseLine(line, Regex, out var failed));
+        Assert.Null(failed);
+    }
+
+    [Fact]
+    public void Invalid_regex_returns_false_without_throwing()
+    {
+        // Unterminated character class: the Regex constructor throws ArgumentException internally.
+        const string invalid = "(?<ipaddress>[unterminated";
+
+        Assert.False(CustomLogDetector.TryParseLine("LOGIN FAILED ip=203.0.113.99", invalid, out var failed));
         Assert.Null(failed);
     }
 }

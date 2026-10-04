@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using WinGuard.Core.Abstractions;
@@ -30,10 +31,17 @@ public sealed class BanEngine
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _lifecycle = new();
 
-    // Offense counts survive an expired-then-removed ban row within this process run, so
-    // tier escalation keeps working across ban cycles (the schema stores it only on the
-    // active ban; see final report / PLAN §5 step 7).
+    // Offense counts drive tier escalation (24h -> 7d -> 30d). They survive expired-then-
+    // deleted ban rows in memory AND across service restarts via a settings-table blob
+    // (key "offense_counts") — review ruling: escalation must survive monthly reboots.
+    private const string OffenseCountsSettingKey = "offense_counts";
+    private const int DefaultEventRetentionDays = 30;
+
     private readonly Dictionary<string, int> _offenseCounts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTime> _offenseLastUtc = new(StringComparer.Ordinal);
+
+    // Recent RDP failures per IP for detector-aware 4625/140 de-dup (accessed under _gate).
+    private readonly Dictionary<string, List<(string? Detector, DateTime TimestampUtc)>> _recentRdp = new(StringComparer.Ordinal);
 
     private IpMatcher _matcher = new(Array.Empty<string>(), Array.Empty<string>());
     private bool _listsLoaded;
@@ -85,7 +93,12 @@ public sealed class BanEngine
                 {
                     _offenseCounts[ban.IpAddress] = ban.OffenseCount;
                 }
+
+                _offenseLastUtc[ban.IpAddress] = ban.BannedAtUtc;
             }
+
+            // Merge offense counts persisted in the settings blob (survives restarts).
+            await LoadPersistedOffenseCountsAsync(ct).ConfigureAwait(false);
 
             if (settings.ClearBansOnStartup)
             {
@@ -111,6 +124,9 @@ public sealed class BanEngine
                 }
 
                 _offenseCounts.Clear();
+                _offenseLastUtc.Clear();
+                _recentRdp.Clear();
+                await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
                 await TryAddEventAsync(null, null, "Cleared bans on startup (ClearBansOnStartup).", ct).ConfigureAwait(false);
             }
             else
@@ -295,6 +311,8 @@ public sealed class BanEngine
 
             await _store.UpsertBanAsync(ban, ct).ConfigureAwait(false);
             _offenseCounts[normalized] = offense;
+            _offenseLastUtc[normalized] = now;
+            await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
             TryFirewall(() => _firewall.Block(normalized), "block", normalized);
 
             var message = isPermanent
@@ -336,6 +354,20 @@ public sealed class BanEngine
             }
 
             TryFirewall(() => _firewall.Unblock(normalized), "unblock", normalized);
+
+            // Clean slate (review E-M4/S-M7): a manual unban resets escalation and drops
+            // the IP's counter rows, so a re-offense starts at tier 1.
+            _offenseCounts.Remove(normalized);
+            _offenseLastUtc.Remove(normalized);
+            await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
+            try
+            {
+                await _store.ClearFailedLoginsAsync(normalized, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Manual unblock: failed to clear failed logins for {Ip}.", normalized);
+            }
 
             await TryAddEventAsync(new LogEvent
             {
@@ -452,10 +484,11 @@ public sealed class BanEngine
             return;
         }
 
-        // RDP de-dup: 4625 and RdpCoreTS 140 describe the same attempt (PLAN §4.2).
-        if (failed.Source == ProtocolSource.Rdp && await IsRdpDuplicateAsync(ip, failed.TimestampUtc, ct).ConfigureAwait(false))
+        // RDP de-dup: merge only cross-detector 4625+140 pairs describing the SAME attempt
+        // (PLAN §4.2). Same-detector events within the window are distinct attempts.
+        if (failed.Source == ProtocolSource.Rdp && IsRdpDuplicateAndRecord(ip, failed.Detector, failed.TimestampUtc))
         {
-            _logger.LogDebug("Skipping duplicate RDP failure for {Ip}.", ip);
+            _logger.LogDebug("Skipping duplicate RDP failure for {Ip} (detector {Detector}).", ip, failed.Detector);
             return;
         }
 
@@ -485,6 +518,8 @@ public sealed class BanEngine
 
             await _store.UpsertBanAsync(permanentBan, ct).ConfigureAwait(false);
             _offenseCounts[ip] = offense;
+            _offenseLastUtc[ip] = now;
+            await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
             TryFirewall(() => _firewall.Block(ip), "block", ip);
             await TryAddEventAsync(new LogEvent
             {
@@ -552,6 +587,8 @@ public sealed class BanEngine
 
         await _store.UpsertBanAsync(ban, ct).ConfigureAwait(false);
         _offenseCounts[ip] = nextOffense;
+        _offenseLastUtc[ip] = now;
+        await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
         TryFirewall(() => _firewall.Block(ip), "block", ip);
         await _store.ClearFailedLoginsAsync(ip, ct).ConfigureAwait(false);
 
@@ -566,27 +603,102 @@ public sealed class BanEngine
         }, ct).ConfigureAwait(false);
     }
 
-    private async Task<bool> IsRdpDuplicateAsync(string ip, DateTime timestampUtc, CancellationToken ct)
+    /// <summary>
+    /// RDP de-dup (PLAN §4.2): Security 4625 and RdpCoreTS 140 can both describe the SAME
+    /// login attempt. Only CROSS-detector pairs within <see cref="RdpDedupWindow"/> are
+    /// merged; two events from the same detector are distinct attempts and always count
+    /// (review E-M1: the old store-based check rate-limited all RDP failures to 1 per 2 s).
+    /// In-memory by design: a pair arrives seconds apart in the same process, and the
+    /// failed_logins schema carries no detector identity. Call under _gate.
+    /// </summary>
+    private bool IsRdpDuplicateAndRecord(string ip, string? detector, DateTime timestampUtc)
     {
-        var since = timestampUtc - RdpDedupWindow;
-        if (since < DateTime.MinValue)
+        if (!_recentRdp.TryGetValue(ip, out var recent))
         {
-            since = DateTime.MinValue;
+            recent = [];
+            _recentRdp[ip] = recent;
         }
 
-        FailedLogin? recent;
+        var duplicate = false;
+        foreach (var (seenDetector, seenTimestamp) in recent)
+        {
+            if (!string.Equals(seenDetector, detector, StringComparison.Ordinal) &&
+                Math.Abs((seenTimestamp - timestampUtc).TotalSeconds) <= RdpDedupWindow.TotalSeconds)
+            {
+                duplicate = true;
+                break;
+            }
+        }
+
+        // Keep the window bounded: entries older than 2x the window can never match again.
+        recent.RemoveAll(e => Math.Abs((e.TimestampUtc - timestampUtc).TotalSeconds) > RdpDedupWindow.TotalSeconds * 2);
+        recent.Add((detector, timestampUtc));
+        return duplicate;
+    }
+
+    /// <summary>Restores offense counts from the settings blob, merging with the active-ban seed (max wins).</summary>
+    private async Task LoadPersistedOffenseCountsAsync(CancellationToken ct)
+    {
         try
         {
-            recent = await _store.GetRecentFailedLoginAsync(ip, ProtocolSource.Rdp, since, ct).ConfigureAwait(false);
+            var all = await _store.GetAllSettingsAsync(ct).ConfigureAwait(false);
+            if (!all.TryGetValue(OffenseCountsSettingKey, out var json) || string.IsNullOrWhiteSpace(json))
+            {
+                return;
+            }
+
+            var persisted = JsonSerializer.Deserialize<Dictionary<string, OffenseRecord>>(json);
+            if (persisted is null)
+            {
+                return;
+            }
+
+            foreach (var (ip, record) in persisted)
+            {
+                if (record is null || record.Count <= 0)
+                {
+                    continue;
+                }
+
+                if (!_offenseCounts.TryGetValue(ip, out var existing) || existing < record.Count)
+                {
+                    _offenseCounts[ip] = record.Count;
+                }
+
+                _offenseLastUtc[ip] = record.LastUtc;
+            }
+
+            _logger.LogInformation(
+                "Restored {Count} persisted offense count(s); tier escalation survives restarts.",
+                persisted.Count);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "RDP de-dup lookup failed for {Ip}; processing normally.", ip);
-            return false;
+            _logger.LogWarning(ex, "Could not load persisted offense counts; escalation starts from active bans only.");
         }
-
-        return recent is not null && Math.Abs((recent.TimestampUtc - timestampUtc).TotalSeconds) <= RdpDedupWindow.TotalSeconds;
     }
+
+    /// <summary>Persists the offense-count map so escalation survives service restarts (review ruling, topic #1).</summary>
+    private async Task SaveOffenseCountsAsync(CancellationToken ct)
+    {
+        try
+        {
+            var now = NowUtc();
+            var snapshot = _offenseCounts.ToDictionary(
+                kv => kv.Key,
+                kv => new OffenseRecord(kv.Value, _offenseLastUtc.TryGetValue(kv.Key, out var last) ? last : now));
+            await _store.SetSettingAsync(
+                OffenseCountsSettingKey,
+                JsonSerializer.Serialize(snapshot),
+                ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not persist offense counts; escalation may reset on restart.");
+        }
+    }
+
+    private sealed record OffenseRecord(int Count, DateTime LastUtc);
 
     private async Task HousekeepCoreAsync(CancellationToken ct)
     {
@@ -595,6 +707,7 @@ public sealed class BanEngine
         var dueBans = await _store.GetDueBansAsync(now, ct).ConfigureAwait(false);
 
         // Expire due bans (the engine's clock is authoritative; the store must not pre-filter).
+        var offensesTouched = false;
         foreach (var ban in dueBans)
         {
             if (ban.IsPermanent || ban.ExpiresUtc > now)
@@ -613,6 +726,12 @@ public sealed class BanEngine
                 _logger.LogError(ex, "Housekeeping failed to remove expired ban {Ip}.", ban.IpAddress);
             }
 
+            // The escalation quiet period starts when the ban ENDS, not when the offense
+            // was recorded — otherwise a 7d/30d ban would outlive its own offense record
+            // and tier escalation would silently reset (E-M2 pruning interaction).
+            _offenseLastUtc[ban.IpAddress] = now;
+            offensesTouched = true;
+
             _logger.LogInformation("Unbanned {Ip} (ban expired).", ban.IpAddress);
             await TryAddEventAsync(new LogEvent
             {
@@ -624,6 +743,11 @@ public sealed class BanEngine
             }, ct).ConfigureAwait(false);
         }
 
+        if (offensesTouched)
+        {
+            await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
+        }
+
         // Forget stale counters.
         var expireBefore = now - settings.ExpireTime;
         try
@@ -633,6 +757,53 @@ public sealed class BanEngine
         catch (Exception ex)
         {
             _logger.LogError(ex, "Housekeeping failed to prune stale failed logins.");
+        }
+
+        // Event retention (review S-N4): keep the events table bounded.
+        try
+        {
+            await _store.PruneEventsAsync(now - TimeSpan.FromDays(DefaultEventRetentionDays), ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Housekeeping failed to prune old events.");
+        }
+
+        // Trim the in-memory RDP de-dup window.
+        foreach (var key in _recentRdp.Keys.ToList())
+        {
+            _recentRdp[key].RemoveAll(e => (now - e.TimestampUtc).Duration() > TimeSpan.FromTicks(RdpDedupWindow.Ticks * 2));
+            if (_recentRdp[key].Count == 0)
+            {
+                _recentRdp.Remove(key);
+            }
+        }
+
+        // Prune stale offense counts (review E-M2): no active ban and no offense within
+        // ExpireTime x 4; rewrite the persisted blob when anything was removed.
+        try
+        {
+            var activeForPrune = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
+            var activeIps = new HashSet<string>(activeForPrune.Select(b => b.IpAddress), StringComparer.Ordinal);
+            var offenseCutoff = now - TimeSpan.FromTicks(settings.ExpireTime.Ticks * 4);
+            var stale = _offenseCounts.Keys
+                .Where(ip => !activeIps.Contains(ip) &&
+                             (!_offenseLastUtc.TryGetValue(ip, out var last) || last < offenseCutoff))
+                .ToList();
+            foreach (var ip in stale)
+            {
+                _offenseCounts.Remove(ip);
+                _offenseLastUtc.Remove(ip);
+            }
+
+            if (stale.Count > 0)
+            {
+                await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Housekeeping failed to prune stale offense counts.");
         }
 
         await ReloadListsCoreAsync(ct).ConfigureAwait(false);

@@ -23,6 +23,7 @@ public sealed class RdpSecurityLogDetectorTests
         Assert.Equal("203.0.113.45", failed!.IpAddress);
         Assert.Equal("administrator", failed.UserName);
         Assert.Equal(ProtocolSource.Rdp, failed.Source);
+        Assert.Equal("4625", failed.Detector);
         Assert.Equal(ExpectedTimestamp.Ticks, failed.TimestampUtc.Ticks);
         Assert.Equal(DateTimeKind.Utc, failed.TimestampUtc.Kind);
         Assert.False(string.IsNullOrWhiteSpace(failed.RawLog));

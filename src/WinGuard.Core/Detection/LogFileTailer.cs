@@ -12,6 +12,13 @@ namespace WinGuard.Core.Detection;
 /// straddles a read boundary is retained and completed on the next cycle, so callers only
 /// ever see whole lines.
 /// </para>
+/// <para>
+/// On first sight of a file the cursor is positioned at the file's current length
+/// (skip-to-end), so a service restart never replays historical failures found in an
+/// existing log file. Rotation/truncation still resets the offset to 0 so the newly
+/// rotated file is read fully. Set <see cref="ProcessExistingContent"/> (or the
+/// constructor flag) to read pre-existing content on first sight, for tests/tooling.
+/// </para>
 /// </summary>
 public sealed class LogFileTailer
 {
@@ -25,11 +32,25 @@ public sealed class LogFileTailer
     private readonly object _gate = new();
     private readonly Dictionary<string, FileCursor> _cursors = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// When <see langword="false"/> (the default), the first time a file is seen its cursor is
+    /// positioned at the end of the file, so only content appended after the tailer started is
+    /// read: a restart never replays historical failures. When <see langword="true"/>, the whole
+    /// existing file is read on first sight (tests/tooling only).
+    /// </summary>
+    public bool ProcessExistingContent { get; }
+
     /// <summary>Creates a tailer that reads at most <paramref name="maxBytesPerCycle"/> bytes per file per call.</summary>
     /// <param name="maxBytesPerCycle">Per-file read cap; values &lt;= 0 fall back to the default.</param>
-    public LogFileTailer(int maxBytesPerCycle = DefaultMaxBytesPerCycle)
+    /// <param name="processExistingContent">
+    /// <see langword="false"/> (default) skips to the end of each file when it is first seen so a
+    /// service restart never replays historical failures; <see langword="true"/> reads existing
+    /// content from the start of the file (tests/tooling).
+    /// </param>
+    public LogFileTailer(int maxBytesPerCycle = DefaultMaxBytesPerCycle, bool processExistingContent = false)
     {
         _maxBytesPerCycle = maxBytesPerCycle > 0 ? maxBytesPerCycle : DefaultMaxBytesPerCycle;
+        ProcessExistingContent = processExistingContent;
     }
 
     /// <summary>
@@ -63,9 +84,23 @@ public sealed class LogFileTailer
                     FileShare.ReadWrite | FileShare.Delete);
 
                 var length = stream.Length;
-                if (length < cursor.Offset)
+                if (!cursor.Initialized)
                 {
-                    // File shrank: rotated or truncated. Start again from byte 0.
+                    cursor.Initialized = true;
+                    if (!ProcessExistingContent)
+                    {
+                        // First sight of the file and we are not reading history: skip to the end
+                        // so a restart never replays historical failures (PLAN.md §4.4; phase-3
+                        // topic #3 ruling). Rotation below still resets to 0 for new content.
+                        cursor.Offset = length;
+                        cursor.Pending = string.Empty;
+                        return lines;
+                    }
+                }
+                else if (length < cursor.Offset)
+                {
+                    // File shrank: rotated or truncated. Start again from byte 0 so the rotated
+                    // or newly written file is read fully.
                     cursor.Offset = 0;
                     cursor.Pending = string.Empty;
                 }
@@ -205,5 +240,6 @@ public sealed class LogFileTailer
     {
         public long Offset;
         public string Pending = string.Empty;
+        public bool Initialized;
     }
 }

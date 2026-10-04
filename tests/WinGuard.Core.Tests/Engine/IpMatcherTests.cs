@@ -16,6 +16,9 @@ public sealed class IpMatcherTests
     [InlineData("[::1]", "::1")]
     [InlineData("[2001:DB8::1]:3389", "2001:db8::1")]
     [InlineData("2001:DB8::1", "2001:db8::1")]
+    [InlineData("::ffff:203.0.113.5", "203.0.113.5")]
+    [InlineData("0:0:0:0:0:ffff:203.0.113.5", "203.0.113.5")]
+    [InlineData("[::ffff:203.0.113.5]:3389", "203.0.113.5")]
     public void TryNormalize_accepts_and_normalizes(string raw, string expected)
     {
         Assert.True(IpMatcher.TryNormalize(raw, out var normalized));
@@ -130,5 +133,17 @@ public sealed class IpMatcherTests
         Assert.True(matcher.IsWhitelisted("1.2.3.4"));
         Assert.False(matcher.IsBlacklisted("8.8.8.8"));
         Assert.False(matcher.IsWhitelisted("8.8.8.8"));
+    }
+
+    [Fact]
+    public void Whitelist_ipv4_entry_matches_mapped_ipv6_form()
+    {
+        // Review S-M6: ::ffff:a.b.c.d must canonicalize to plain IPv4 so a whitelist
+        // entry can never be bypassed by the mapped form (PLAN §11).
+        var matcher = new IpMatcher(new[] { "203.0.113.5" }, Array.Empty<string>());
+
+        Assert.True(IpMatcher.TryNormalize("::ffff:203.0.113.5", out var normalized));
+        Assert.Equal("203.0.113.5", normalized);
+        Assert.True(matcher.IsWhitelisted(normalized));
     }
 }
