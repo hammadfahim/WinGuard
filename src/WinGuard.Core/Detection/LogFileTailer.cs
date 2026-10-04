@@ -1,4 +1,6 @@
+using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace WinGuard.Core.Detection;
 
@@ -15,8 +17,9 @@ namespace WinGuard.Core.Detection;
 /// <para>
 /// On first sight of a file the cursor is positioned at the file's current length
 /// (skip-to-end), so a service restart never replays historical failures found in an
-/// existing log file. Rotation/truncation still resets the offset to 0 so the newly
-/// rotated file is read fully. Set <see cref="ProcessExistingContent"/> (or the
+/// existing log file. A file that appears later under a source that was already being watched
+/// (the next daily log) is read from its first byte, and rotation/truncation resets the offset to
+/// 0 so the newly rotated file is read fully. Set <see cref="ProcessExistingContent"/> (or the
 /// constructor flag) to read pre-existing content on first sight, for tests/tooling.
 /// </para>
 /// </summary>
@@ -58,8 +61,15 @@ public sealed class LogFileTailer
     /// found. The trailing partial line, if any, is buffered for the next call.
     /// </summary>
     /// <param name="path">Absolute path of the log file.</param>
+    /// <param name="readFromStartIfNew">
+    /// What to do the first time this file is seen. <see langword="false"/> (default) skips to the
+    /// end: the file already existed when its source started being watched, so its content is
+    /// history. <see langword="true"/> reads it from the first byte: the caller knows the source was
+    /// already being watched, so this is a file created since (e.g. the next daily log) and all of
+    /// it is new.
+    /// </param>
     /// <returns>The newly read lines (without line terminators); empty when nothing new or unreadable.</returns>
-    public IReadOnlyList<string> ReadNewLines(string path)
+    public IReadOnlyList<string> ReadNewLines(string path, bool readFromStartIfNew = false)
     {
         var lines = new List<string>();
         if (string.IsNullOrWhiteSpace(path))
@@ -73,7 +83,9 @@ public sealed class LogFileTailer
             {
                 if (!_cursors.TryGetValue(path, out var cursor))
                 {
-                    cursor = new FileCursor();
+                    // Decided at first sight, not at first successful open: a file that was merely
+                    // locked on the first attempt must not be mistaken for a new one later.
+                    cursor = new FileCursor { FromStart = readFromStartIfNew };
                     _cursors[path] = cursor;
                 }
 
@@ -84,21 +96,25 @@ public sealed class LogFileTailer
                     FileShare.ReadWrite | FileShare.Delete);
 
                 var length = stream.Length;
-                var created = File.GetCreationTimeUtc(path);
-                if (cursor.Initialized && cursor.CreatedUtc != created)
+
+                // Rotation that replaces the file (delete or rename, then create) can leave a new
+                // file as large as the old one, which the shrink check below cannot see. The file's
+                // identity on the volume changes in that case. (Its creation time does not: NTFS
+                // "tunnels" the old creation time onto a file recreated under the same name.)
+                var identity = GetFileIdentity(stream.SafeFileHandle);
+                if (cursor.Initialized && identity is not null && cursor.Identity is not null
+                    && !string.Equals(identity, cursor.Identity, StringComparison.Ordinal))
                 {
-                    // Replaced by a new file (rotation) that may already be as large as the old
-                    // one, so the shrink check below would miss it: re-read from the start.
                     cursor.Offset = 0;
                     cursor.Pending = string.Empty;
                     cursor.Decoder.Reset();
                 }
 
-                cursor.CreatedUtc = created;
+                cursor.Identity = identity;
                 if (!cursor.Initialized)
                 {
                     cursor.Initialized = true;
-                    if (!ProcessExistingContent)
+                    if (!ProcessExistingContent && !cursor.FromStart)
                     {
                         // First sight of the file and we are not reading history: skip to the end
                         // so a restart never replays historical failures (PLAN.md §4.4; phase-3
@@ -215,6 +231,13 @@ public sealed class LogFileTailer
         }
 
         var expanded = Environment.ExpandEnvironmentVariables(pathOrGlob.Trim());
+        if (!IsLocalPath(expanded))
+        {
+            // The service runs as SYSTEM: opening a UNC path would authenticate the machine
+            // account to whatever host the path names.
+            return files;
+        }
+
         try
         {
             if (expanded.IndexOfAny(new[] { '*', '?' }) >= 0)
@@ -256,12 +279,65 @@ public sealed class LogFileTailer
         return written == chars.Length ? chars : chars[..written];
     }
 
+    /// <summary>
+    /// False for UNC and device paths (<c>\\server\share</c>, <c>\\?\</c>, <c>\\.\</c>). Log sources
+    /// must be on a local drive.
+    /// </summary>
+    public static bool IsLocalPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        var expanded = Environment.ExpandEnvironmentVariables(path.Trim());
+        return !(expanded.StartsWith(@"\\", StringComparison.Ordinal) || expanded.StartsWith("//", StringComparison.Ordinal));
+    }
+
+    /// <summary>Volume serial + file index: stable for a file's lifetime, different for its replacement.</summary>
+    private static string? GetFileIdentity(SafeFileHandle handle)
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows() && GetFileInformationByHandle(handle, out var info))
+            {
+                return $"{info.VolumeSerialNumber:x8}:{info.FileIndexHigh:x8}{info.FileIndexLow:x8}";
+            }
+        }
+        catch (Exception)
+        {
+            // Fall through: without an identity only the shrink check applies.
+        }
+
+        return null;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public long CreationTime;
+        public long LastAccessTime;
+        public long LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out ByHandleFileInformation information);
+
     private sealed class FileCursor
     {
         public Decoder Decoder = new UTF8Encoding(false).GetDecoder();
         public long Offset;
         public string Pending = string.Empty;
         public bool Initialized;
-        public DateTime CreatedUtc;
+        public bool FromStart;
+        public string? Identity;
     }
 }

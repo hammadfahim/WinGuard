@@ -44,6 +44,15 @@ public sealed partial class BanEngine
     private static readonly TimeSpan SkipEventInterval = TimeSpan.FromMinutes(5);
     private readonly Dictionary<string, DateTime> _lastSkipEventUtc = new(StringComparer.Ordinal);
 
+    // Firewall reconciliation enumerates the live firewall, so the timer loop does it at most this often.
+    private static readonly TimeSpan ReconcileInterval = TimeSpan.FromSeconds(60);
+    private DateTime _lastReconcileUtc = DateTime.MinValue;
+
+    // "Detections today" per protocol for the dashboard (own lock: read by IPC without the gate).
+    private readonly object _statsLock = new();
+    private readonly int[] _detectionsToday = new int[Enum.GetValues<ProtocolSource>().Length];
+    private DateOnly _detectionsDay;
+
     private IpMatcher _matcher = new(Array.Empty<string>(), Array.Empty<string>());
     private bool _listsLoaded;
 
@@ -137,6 +146,7 @@ public sealed partial class BanEngine
             }
 
             await ReloadListsCoreAsync(ct).ConfigureAwait(false);
+            await SeedDetectionsTodayAsync(ct).ConfigureAwait(false);
 
             StartHousekeepingLoop(ct);
             _logger.LogInformation(
@@ -233,7 +243,7 @@ public sealed partial class BanEngine
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await HousekeepCoreAsync(ct).ConfigureAwait(false);
+            await HousekeepCoreAsync(forceReconcile: true, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -249,12 +259,48 @@ public sealed partial class BanEngine
         }
     }
 
+    /// <summary>
+    /// Reloads the whitelist/blacklist matcher from the store so a list change made over IPC takes
+    /// effect immediately, without running a full housekeeping pass.
+    /// </summary>
+    public async Task ReloadListsAsync(CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await ReloadListsCoreAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Failed logins seen today (local day) for a protocol: every failure from a non-internal,
+    /// non-whitelisted address after RDP de-duplication, whether or not it led to a ban.
+    /// </summary>
+    public int GetDetectionsToday(ProtocolSource source)
+    {
+        lock (_statsLock)
+        {
+            RollDetectionsDayLocked();
+            var index = (int)source;
+            return index >= 0 && index < _detectionsToday.Length ? _detectionsToday[index] : 0;
+        }
+    }
+
     /// <summary>Manually blocks an IP (IPC <c>BlockNow</c>). Throws for invalid or whitelisted IPs.</summary>
     public async Task BanNowAsync(string ip, TimeSpan? duration, bool permanent, string? note, CancellationToken ct = default)
     {
         if (!IpMatcher.TryNormalize(ip, out var normalized))
         {
             throw new ArgumentException($"'{ip}' is not a valid IP address.", nameof(ip));
+        }
+
+        if (!IpMatcher.IsBannable(normalized))
+        {
+            throw new ArgumentException($"'{normalized}' is not a host address and cannot be blocked.", nameof(ip));
         }
 
         await _gate.WaitAsync(ct).ConfigureAwait(false);
@@ -291,7 +337,13 @@ public sealed partial class BanEngine
             }
 
             var existing = await SafeGetBanAsync(normalized, ct).ConfigureAwait(false);
-            var offense = ComputeOffense(normalized, existing);
+
+            // Re-banning an IP that is still banned (e.g. "promote to permanent") is not a new
+            // offense; only a fresh ban moves the escalation tier.
+            var stillBanned = existing is not null && (existing.IsPermanent || existing.ExpiresUtc > now);
+            var offense = stillBanned
+                ? Math.Max(Math.Max(1, existing!.OffenseCount), _offenses.GetCount(normalized))
+                : ComputeOffense(normalized, existing);
 
             var ban = new BanEntry
             {
@@ -449,6 +501,12 @@ public sealed partial class BanEngine
             return;
         }
 
+        if (!IpMatcher.IsBannable(ip))
+        {
+            _logger.LogDebug("Discarding failed login from non-host address {Ip}.", ip);
+            return;
+        }
+
         failed.IpAddress = ip;
         failed.TimestampUtc = NormalizeUtc(failed.TimestampUtc);
 
@@ -467,14 +525,39 @@ public sealed partial class BanEngine
         {
             _logger.LogDebug("Skipping whitelisted IP {Ip}.", ip);
             if (ShouldRecordSkip("w:" + ip))
-            await TryAddEventAsync(new LogEvent
             {
-                TimestampUtc = NowUtc(),
-                Level = LogEventLevel.Info,
-                Source = failed.Source,
-                IpAddress = ip,
-                Message = $"SKIPPED {ip} (whitelist)",
-            }, ct).ConfigureAwait(false);
+                await TryAddEventAsync(new LogEvent
+                {
+                    TimestampUtc = NowUtc(),
+                    Level = LogEventLevel.Info,
+                    Source = failed.Source,
+                    IpAddress = ip,
+                    Message = $"SKIPPED {ip} (whitelist)",
+                }, ct).ConfigureAwait(false);
+            }
+
+            return;
+        }
+
+        // An exclusion rule matched (RDP 4625). It is never counted, but it is remembered so the
+        // RdpCoreTS 140 event describing the same attempt is dropped too; when that 140 arrived
+        // first and was already counted, that one count is taken back.
+        if (failed.IsExcluded)
+        {
+            if (failed.Source == ProtocolSource.Rdp
+                && _rdpDedup.RecordExcluded(ip, failed.Detector, failed.TimestampUtc))
+            {
+                try
+                {
+                    await _store.RemoveLatestFailedLoginAsync(ip, ProtocolSource.Rdp, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Could not take back the counted RDP failure for excluded attempt from {Ip}.", ip);
+                }
+            }
+
+            _logger.LogDebug("Skipping excluded failure for {Ip}.", ip);
             return;
         }
 
@@ -485,6 +568,8 @@ public sealed partial class BanEngine
             _logger.LogDebug("Skipping duplicate RDP failure for {Ip} (detector {Detector}).", ip, failed.Detector);
             return;
         }
+
+        RecordDetection(failed.Source);
 
         var current = await SafeGetBanAsync(ip, ct).ConfigureAwait(false);
         var now = NowUtc();
@@ -530,21 +615,22 @@ public sealed partial class BanEngine
         {
             _logger.LogDebug("IP {Ip} is already banned; ignoring attempt.", ip);
             if (ShouldRecordSkip("b:" + ip))
-            await TryAddEventAsync(new LogEvent
             {
-                TimestampUtc = now,
-                Level = LogEventLevel.Info,
-                Source = failed.Source,
-                IpAddress = ip,
-                Message = $"SKIPPED {ip} (already banned)",
-            }, ct).ConfigureAwait(false);
+                await TryAddEventAsync(new LogEvent
+                {
+                    TimestampUtc = now,
+                    Level = LogEventLevel.Info,
+                    Source = failed.Source,
+                    IpAddress = ip,
+                    Message = $"SKIPPED {ip} (already banned)",
+                }, ct).ConfigureAwait(false);
+            }
+
             return;
         }
 
-        // 5. Record the attempt.
-        await _store.AddFailedLoginAsync(failed, ct).ConfigureAwait(false);
-
-        // 6. Count within the rolling window (per protocol, so overrides apply).
+        // 5 + 6. Record the attempt and count within the rolling window (per protocol, so
+        // overrides apply) in one store round trip.
         var window = settings.CountWindowFor(failed.Source);
         if (window <= TimeSpan.Zero)
         {
@@ -552,7 +638,7 @@ public sealed partial class BanEngine
         }
 
         var since = now - window;
-        var count = await _store.CountFailedLoginsAsync(ip, since, failed.Source, ct).ConfigureAwait(false);
+        var count = await _store.AddFailedLoginAndCountAsync(failed, since, ct).ConfigureAwait(false);
 
         // 7. Threshold crossed -> escalate and ban.
         var threshold = Math.Max(1, settings.ThresholdFor(failed.Source));
@@ -594,6 +680,66 @@ public sealed partial class BanEngine
             IpAddress = ip,
             Message = $"BLOCKED {ip} for {FormatDuration(duration)} (offense #{nextOffense})",
         }, ct).ConfigureAwait(false);
+    }
+
+    // ---- detection statistics ----
+
+    private void RecordDetection(ProtocolSource source)
+    {
+        lock (_statsLock)
+        {
+            RollDetectionsDayLocked();
+            var index = (int)source;
+            if (index >= 0 && index < _detectionsToday.Length)
+            {
+                _detectionsToday[index]++;
+            }
+        }
+    }
+
+    private void RollDetectionsDayLocked()
+    {
+        var today = DateOnly.FromDateTime(_timeProvider.GetLocalNow().DateTime);
+        if (today != _detectionsDay)
+        {
+            _detectionsDay = today;
+            Array.Clear(_detectionsToday);
+        }
+    }
+
+    /// <summary>
+    /// After a restart the in-memory counters start from the attempts still on record for today
+    /// (a lower bound: rows are deleted when a ban fires). Best effort.
+    /// </summary>
+    private async Task SeedDetectionsTodayAsync(CancellationToken ct)
+    {
+        try
+        {
+            var localNow = _timeProvider.GetLocalNow();
+            var midnightUtc = (localNow - localNow.TimeOfDay).UtcDateTime;
+            var seed = new int[_detectionsToday.Length];
+            foreach (var source in Enum.GetValues<ProtocolSource>())
+            {
+                var index = (int)source;
+                if (index >= 0 && index < seed.Length)
+                {
+                    seed[index] = await _store.CountFailedLoginsSinceAsync(midnightUtc, source, ct).ConfigureAwait(false);
+                }
+            }
+
+            lock (_statsLock)
+            {
+                RollDetectionsDayLocked();
+                for (var i = 0; i < seed.Length; i++)
+                {
+                    _detectionsToday[i] = Math.Max(_detectionsToday[i], seed[i]);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not seed today's detection counters.");
+        }
     }
 
     // ---- lists / helpers ----
@@ -760,7 +906,15 @@ public sealed partial class BanEngine
 
             try
             {
-                await HousekeepOnceAsync(ct).ConfigureAwait(false);
+                await _gate.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    await HousekeepCoreAsync(forceReconcile: false, ct).ConfigureAwait(false);
+                }
+                finally
+                {
+                    _gate.Release();
+                }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {

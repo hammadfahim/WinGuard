@@ -4,9 +4,9 @@ namespace WinGuard.Service.Logging;
 
 /// <summary>
 /// Minimal file logger provider writing to <c>%ProgramData%\WinGuard\Logs\winguard-yyyyMMdd.log</c>
-/// (PLAN.md §10). One daily file, one shared lock for the whole process, timestamp + level +
-/// category + message + exception. No external logging package is used and I/O errors never take
-/// the service down.
+/// (PLAN.md §10). One daily file kept open behind one shared lock, timestamp + level + category +
+/// message + exception. A file that reaches the size cap is rolled to <c>winguard-yyyyMMdd.1.log</c>. No external
+/// logging package is used and I/O errors never take the service down.
 /// </summary>
 public sealed class FileLoggerProvider : ILoggerProvider
 {
@@ -40,28 +40,41 @@ public sealed class FileLoggerProvider : ILoggerProvider
     /// <inheritdoc />
     public void Dispose()
     {
-        // Files are opened/closed per write, so there is nothing to release.
+        lock (_gate)
+        {
+            CloseWriter();
+        }
     }
 
     internal void Write(LogLevel level, string category, string message)
     {
         try
         {
-            var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{Level(level)}] {category}: {message}{Environment.NewLine}";
-            var path = Path.Combine(_directory, $"winguard-{DateTime.Now:yyyyMMdd}.log");
+            var now = DateTime.Now;
+            var line = $"{now:yyyy-MM-dd HH:mm:ss.fff} [{Level(level)}] {category}: {message}{Environment.NewLine}";
             lock (_gate)
             {
                 SweepRetention();
-
-                // Daily size cap: never let logging (e.g. a connection-rejection loop)
-                // exhaust the disk (review S-N2).
-                var info = new FileInfo(path);
-                if (info.Exists && info.Length >= MaxFileBytes)
+                EnsureWriter(now.Date);
+                if (_writer is null)
                 {
                     return;
                 }
 
-                File.AppendAllText(path, line);
+                // Size cap: when the day's file is full it becomes "<name>.1.log" (replacing an
+                // earlier one) and a fresh file is started, so a log flood can use at most twice
+                // the cap per day and the most recent entries — including errors — are never lost.
+                if (_bytesWritten >= MaxFileBytes)
+                {
+                    Rotate(now.Date);
+                    if (_writer is null)
+                    {
+                        return;
+                    }
+                }
+
+                _writer.Write(line);
+                _bytesWritten += System.Text.Encoding.UTF8.GetByteCount(line);
             }
         }
         catch (Exception)
@@ -71,6 +84,74 @@ public sealed class FileLoggerProvider : ILoggerProvider
     }
 
     private const long MaxFileBytes = 10 * 1024 * 1024;
+
+    // The day's file stays open (one buffered writer) instead of being opened and closed per line.
+    private StreamWriter? _writer;
+    private DateTime _writerDate;
+    private long _bytesWritten;
+
+    private string PathFor(DateTime date) => Path.Combine(_directory, $"winguard-{date:yyyyMMdd}.log");
+
+    private void EnsureWriter(DateTime date)
+    {
+        if (_writer is not null && _writerDate == date)
+        {
+            return;
+        }
+
+        CloseWriter();
+        try
+        {
+            var stream = new FileStream(PathFor(date), FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+            _bytesWritten = stream.Length;
+            _writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+            _writerDate = date;
+        }
+        catch (Exception)
+        {
+            _writer = null;
+        }
+    }
+
+    private void Rotate(DateTime date)
+    {
+        CloseWriter();
+        try
+        {
+            var rolled = Path.Combine(_directory, $"winguard-{date:yyyyMMdd}.1.log");
+            File.Move(PathFor(date), rolled, overwrite: true);
+        }
+        catch (Exception)
+        {
+            // Could not roll (file in use elsewhere): start over in place rather than stop logging.
+            try
+            {
+                File.Delete(PathFor(date));
+            }
+            catch (Exception)
+            {
+                // Keep appending to the oversized file as a last resort.
+            }
+        }
+
+        EnsureWriter(date);
+        _bytesWritten = 0;
+    }
+
+    private void CloseWriter()
+    {
+        try
+        {
+            _writer?.Dispose();
+        }
+        catch (Exception)
+        {
+            // Ignore.
+        }
+
+        _writer = null;
+    }
+
     private const int RetentionDays = 30;
 
     private DateTime _lastRetentionSweep = DateTime.MinValue;

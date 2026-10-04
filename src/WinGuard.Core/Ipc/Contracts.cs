@@ -12,6 +12,13 @@ namespace WinGuard.Core.Ipc;
 public static class PipeConstants
 {
     public const string PipeName = "WinGuard";
+
+    /// <summary>
+    /// Bumped whenever a request, response or DTO changes shape. The service reports it in
+    /// <see cref="ServiceStatusDto.ProtocolVersion"/> so a GUI from another release can say so
+    /// instead of misbehaving.
+    /// </summary>
+    public const int ProtocolVersion = 2;
 }
 
 /// <summary>Method names used in <see cref="IpcRequest.Method"/>.</summary>
@@ -70,6 +77,9 @@ public sealed class ServiceStatusDto
 {
     public bool ServiceRunning { get; set; }
     public string Version { get; set; } = string.Empty;
+
+    /// <summary>The service's <see cref="PipeConstants.ProtocolVersion"/> (0 from releases before it existed).</summary>
+    public int ProtocolVersion { get; set; }
     public DateTime StartedUtc { get; set; }
     public int ActiveBans { get; set; }
     public List<EngineStatusDto> Engines { get; set; } = [];
@@ -144,10 +154,6 @@ public sealed class PrereqsDto
 
     /// <summary>RdpCoreTS/Operational channel exists and is enabled.</summary>
     public bool RdpCoreTsChannelEnabled { get; set; }
-
-    /// <summary>Always-present documentation hint about SQL Server login auditing.</summary>
-    public string SqlAuditingHint { get; set; } =
-        "MS SQL detection requires 'Failed logins only' (or both) login auditing in SSMS server properties, then an instance restart.";
 
     public List<string> Warnings { get; set; } = [];
 }

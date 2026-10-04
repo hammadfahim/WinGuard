@@ -75,18 +75,24 @@ public sealed class FakeStore : IStore
         }
     }
 
-    public Task<FailedLogin?> GetRecentFailedLoginAsync(string ip, ProtocolSource source, DateTime sinceUtc, CancellationToken ct = default)
+    public async Task<int> AddFailedLoginAndCountAsync(FailedLogin failed, DateTime sinceUtc, CancellationToken ct = default)
+    {
+        await AddFailedLoginAsync(failed, ct);
+        return await CountFailedLoginsAsync(failed.IpAddress, sinceUtc, failed.Source, ct);
+    }
+
+    public Task RemoveLatestFailedLoginAsync(string ip, ProtocolSource source, CancellationToken ct = default)
     {
         lock (_gate)
         {
-            var match = _failedLogins
-                .Where(f => string.Equals(f.IpAddress, ip, StringComparison.Ordinal)
-                            && f.Source == source
-                            && f.TimestampUtc >= sinceUtc)
-                .OrderByDescending(f => f.TimestampUtc)
-                .FirstOrDefault();
-            return Task.FromResult(match is null ? null : Clone(match));
+            var index = _failedLogins.FindLastIndex(f => string.Equals(f.IpAddress, ip, StringComparison.Ordinal) && f.Source == source);
+            if (index >= 0)
+            {
+                _failedLogins.RemoveAt(index);
+            }
         }
+
+        return Task.CompletedTask;
     }
 
     public Task ClearFailedLoginsAsync(string ip, CancellationToken ct = default)

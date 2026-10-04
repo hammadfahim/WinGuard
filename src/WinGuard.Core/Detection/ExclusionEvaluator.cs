@@ -43,6 +43,53 @@ public static class ExclusionEvaluator
     }
 
     /// <summary>
+    /// Evaluates only the rules whose every condition tests the <c>IpAddress</c> field. Used for
+    /// events that carry nothing but an IP (RdpCoreTS 140): rules about user names or logon types
+    /// cannot be judged from such an event and are skipped rather than guessed.
+    /// </summary>
+    /// <param name="ip">The client IP of the event.</param>
+    /// <param name="rules">The configured exclusion rules.</param>
+    public static bool IsExcludedByIpOnlyRules(string ip, IEnumerable<string>? rules)
+    {
+        if (rules is null || string.IsNullOrWhiteSpace(ip))
+        {
+            return false;
+        }
+
+        var eventData = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["IpAddress"] = ip };
+        foreach (var rule in rules)
+        {
+            if (!string.IsNullOrWhiteSpace(rule) && IsIpOnlyRule(rule) && RuleMatches(eventData, rule))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsIpOnlyRule(string rule)
+    {
+        foreach (var rawCondition in rule.Split(','))
+        {
+            var condition = rawCondition.Trim();
+            var equals = condition.IndexOf('=');
+            if (equals <= 0)
+            {
+                return false;
+            }
+
+            var field = condition[..(condition[equals - 1] == '!' ? equals - 1 : equals)].Trim();
+            if (!string.Equals(field, "IpAddress", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Wildcard match where <c>'*'</c> matches any run of characters (including none).
     /// The comparison is case-insensitive; all other characters match literally.
     /// </summary>

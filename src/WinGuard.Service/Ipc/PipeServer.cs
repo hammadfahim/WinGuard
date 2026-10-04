@@ -25,13 +25,12 @@ namespace WinGuard.Service.Ipc;
 /// engine and settings holder.
 /// <para>
 /// <b>Access control:</b> the pipe is created with an explicit DACL — SYSTEM and Administrators
-/// full control, Authenticated Users read/write — plus <c>PIPE_REJECT_REMOTE_CLIENTS</c> and
-/// first-instance anti-squatting, via P/Invoke (<c>PipeSecurity</c> lives in the
-/// System.IO.Pipes.AccessControl package, which is intentionally not referenced). Every
+/// only — plus <c>PIPE_REJECT_REMOTE_CLIENTS</c> and first-instance anti-squatting, via P/Invoke
+/// (<c>PipeSecurity</c> lives in the System.IO.Pipes.AccessControl package, which is intentionally
+/// not referenced). No other account can open the pipe or create another instance of it. Every
 /// connection is additionally authorized by impersonating the client
-/// (<see cref="NamedPipeServerStream.RunAsClient"/>): only LocalSystem and members of the
-/// Administrators group — checked by group SID so the non-elevated GUI's UAC-filtered token
-/// is recognized — are accepted; everything else fails closed. This enforces the PLAN.md §8
+/// (<see cref="NamedPipeServerStream.RunAsClient"/>): only LocalSystem and elevated
+/// administrators are accepted; everything else fails closed. This enforces the PLAN.md §8
 /// "Administrators + LocalSystem only" intent (reviews S-M1/S-M2).
 /// </para>
 /// </summary>
@@ -179,23 +178,10 @@ public sealed partial class PipeServer : BackgroundService
             return true;
         }
 
-        // Group-SID check instead of IsInRole: under UAC Admin Approval Mode the
-        // non-elevated GUI token carries Administrators as a *deny-only* SID, which
-        // IsInRole reports as false. Deny-only SIDs never appear in non-admin tokens,
-        // so membership in Groups still proves the user is an administrator (review S-M2).
-        if (identity.Groups is { } groups)
-        {
-            var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-            foreach (var group in groups)
-            {
-                if (group is SecurityIdentifier groupSid && groupSid.Equals(admins))
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
+        // Only an ELEVATED administrator: IsInRole is true when the Administrators group is
+        // enabled in the token. Under UAC a non-elevated process of an admin user carries that
+        // group as deny-only and is refused, which is why the GUI's manifest requests elevation.
+        return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
     }
 
     private async Task HandleClientAsync(NamedPipeServerStream pipe, CancellationToken ct)
@@ -322,7 +308,6 @@ public sealed partial class PipeServer : BackgroundService
     {
         var settings = _settings.Current;
         var bans = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
-        var sinceUtc = LocalMidnightUtc();
 
         var engines = new List<EngineStatusDto>();
         foreach (var source in KnownSources)
@@ -333,7 +318,7 @@ public sealed partial class PipeServer : BackgroundService
                 Name = NameFor(source),
                 Enabled = IsEnabled(source, settings),
                 Running = _state.IsRunning(source),
-                DetectionsToday = await _store.CountFailedLoginsSinceAsync(sinceUtc, source, ct).ConfigureAwait(false),
+                DetectionsToday = _engine.GetDetectionsToday(source),
                 ActiveBans = bans.Count(ban => ban.Source == source),
             });
         }
@@ -342,6 +327,7 @@ public sealed partial class PipeServer : BackgroundService
         {
             ServiceRunning = true,
             Version = Version,
+            ProtocolVersion = PipeConstants.ProtocolVersion,
             StartedUtc = _startedUtc,
             ActiveBans = bans.Count,
             Engines = engines,
@@ -386,7 +372,7 @@ public sealed partial class PipeServer : BackgroundService
             // re-ban the IP in the window before the next housekeeping pass (review S-M7).
             await _store.AddToListAsync(ListKind.Whitelist, ip, ct).ConfigureAwait(false);
             await _store.RemoveFromListAsync(ListKind.Blacklist, ip, ct).ConfigureAwait(false);
-            await _engine.HousekeepOnceAsync(ct).ConfigureAwait(false);
+            await _engine.ReloadListsAsync(ct).ConfigureAwait(false);
         }
 
         await _engine.UnbanAsync(ip, ct).ConfigureAwait(false);
@@ -416,7 +402,7 @@ public sealed partial class PipeServer : BackgroundService
         await _store.AddToListAsync(ListKind.Whitelist, value, ct).ConfigureAwait(false);
 
         // Reload the engine's in-memory matcher so the new entry takes effect immediately.
-        await _engine.HousekeepOnceAsync(ct).ConfigureAwait(false);
+        await _engine.ReloadListsAsync(ct).ConfigureAwait(false);
 
         // A whitelisted single host should immediately stop being blocked.
         if (IpMatcher.TryNormalize(value, out var ip))
@@ -450,7 +436,7 @@ public sealed partial class PipeServer : BackgroundService
         await _store.AddToListAsync(ListKind.Blacklist, value, ct).ConfigureAwait(false);
 
         // Reload the engine's in-memory matcher so the new entry takes effect immediately.
-        await _engine.HousekeepOnceAsync(ct).ConfigureAwait(false);
+        await _engine.ReloadListsAsync(ct).ConfigureAwait(false);
 
         // A blacklisted single host is blocked right away (RdpGuard-style). CIDR ranges
         // take effect at detection time via PLAN §5 step 3. A whitelisted IP is refused
@@ -459,7 +445,7 @@ public sealed partial class PipeServer : BackgroundService
         {
             try
             {
-                await _engine.BanNowAsync(ip, null, permanent: true, "blacklist", ct).ConfigureAwait(false);
+                await _engine.BanNowAsync(ip, null, permanent: true, BlacklistNote, ct).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -481,7 +467,26 @@ public sealed partial class PipeServer : BackgroundService
         await _store.RemoveFromListAsync(parameters.Kind, value, ct).ConfigureAwait(false);
 
         // Reload the engine's in-memory matcher so the removal takes effect immediately.
-        await _engine.HousekeepOnceAsync(ct).ConfigureAwait(false);
+        await _engine.ReloadListsAsync(ct).ConfigureAwait(false);
+
+        // Taking an entry off the blacklist also lifts the permanent bans it created, unless
+        // another blacklist entry still covers the address. Manual bans are left alone.
+        if (parameters.Kind == ListKind.Blacklist)
+        {
+            var removed = new IpMatcher([], [value]);
+            var remaining = new IpMatcher([], await _store.GetListAsync(ListKind.Blacklist, ct).ConfigureAwait(false));
+            foreach (var ban in await _store.GetActiveBansAsync(ct).ConfigureAwait(false))
+            {
+                if (ban.IsPermanent
+                    && string.Equals(ban.Note, BlacklistNote, StringComparison.OrdinalIgnoreCase)
+                    && removed.IsBlacklisted(ban.IpAddress)
+                    && !remaining.IsBlacklisted(ban.IpAddress))
+                {
+                    await _engine.UnbanAsync(ban.IpAddress, ct).ConfigureAwait(false);
+                }
+            }
+        }
+
         return IpcResponse.Success(request.Id, null);
     }
 
@@ -491,6 +496,13 @@ public sealed partial class PipeServer : BackgroundService
         if (parameters.Settings is null)
         {
             return IpcResponse.Fail(request.Id, "Settings payload is required.");
+        }
+
+        parameters.Settings.Normalize();
+        var problems = SettingsValidator.Validate(parameters.Settings);
+        if (problems.Count > 0)
+        {
+            return IpcResponse.Fail(request.Id, string.Join(" ", problems));
         }
 
         await _settings.ApplyAsync(parameters.Settings, ct).ConfigureAwait(false);
@@ -528,15 +540,11 @@ public sealed partial class PipeServer : BackgroundService
         _ => false,
     };
 
-    private DateTime LocalMidnightUtc()
-    {
-        var localNow = _timeProvider.GetLocalNow();
-        var localMidnight = localNow.Date;
-        return TimeZoneInfo.ConvertTimeToUtc(localMidnight, TimeZoneInfo.Local);
-    }
+    /// <summary>Note stored on bans created from the blacklist (matches the engine's own note).</summary>
+    private const string BlacklistNote = "blacklist";
 
     private static string Version =>
-        typeof(PipeServer).Assembly.GetName().Version?.ToString() ?? "0.0.0";
+        typeof(PipeServer).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
 
     // ---- list value handling ----
 
@@ -576,9 +584,13 @@ public sealed partial class PipeServer : BackgroundService
             return false;
         }
 
-        if (network.PrefixLength < 8)
+        var isIPv6 = network.BaseAddress.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6;
+        var minimumPrefix = isIPv6 ? 32 : 8;
+        if (network.PrefixLength < minimumPrefix)
         {
-            failure = IpcResponse.Fail(request.Id, "Prefixes shorter than /8 are rejected: too broad for a host-protection list.");
+            failure = IpcResponse.Fail(
+                request.Id,
+                $"Prefixes shorter than /{minimumPrefix} are rejected for {(isIPv6 ? "IPv6" : "IPv4")}: too broad for a host-protection list.");
             return false;
         }
 

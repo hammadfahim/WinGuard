@@ -1,24 +1,22 @@
 using System.Collections.Concurrent;
+using WinGuard.Core.Abstractions;
 using WinGuard.Core.Model;
 
 namespace WinGuard.Service;
 
 /// <summary>
-/// Small shared runtime state published by <see cref="GuardWorker"/> and consumed by
-/// <see cref="Ipc.PipeServer"/> for the per-engine <c>Running</c> flag. A detector is marked
-/// running once its <c>StartAsync</c> completed without throwing (a dead/absent channel leaves it
-/// not-running, which the dashboard surfaces as a warning).
+/// Shared runtime state published by <see cref="GuardWorker"/> and consumed by
+/// <see cref="Ipc.PipeServer"/> for the per-engine <c>Running</c> flag. The flag is read live from
+/// the detectors, so a subscription that failed or died shows as not running on the dashboard.
 /// </summary>
 public sealed class DetectorRuntimeState
 {
-    private readonly ConcurrentDictionary<ProtocolSource, bool> _running = new();
+    private readonly ConcurrentBag<IDetector> _detectors = [];
 
-    /// <summary>Marks whether the detector(s) for a protocol started successfully.</summary>
-    /// <param name="source">Protocol source.</param>
-    /// <param name="running">True when at least one detector for the source subscribed successfully.</param>
-    public void SetRunning(ProtocolSource source, bool running) => _running[source] = running;
+    /// <summary>Registers a started detector.</summary>
+    public void Register(IDetector detector) => _detectors.Add(detector ?? throw new ArgumentNullException(nameof(detector)));
 
-    /// <summary>True when at least one detector for the protocol started successfully.</summary>
+    /// <summary>True when at least one detector for the protocol is really watching its source.</summary>
     /// <param name="source">Protocol source.</param>
-    public bool IsRunning(ProtocolSource source) => _running.TryGetValue(source, out var running) && running;
+    public bool IsRunning(ProtocolSource source) => _detectors.Any(d => d.Source == source && d.IsRunning);
 }

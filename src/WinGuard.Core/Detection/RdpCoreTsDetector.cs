@@ -19,7 +19,7 @@ namespace WinGuard.Core.Detection;
 /// against the matching 4625.
 /// </summary>
 [SupportedOSPlatform("windows")]
-public sealed class RdpCoreTsDetector : IDetector
+public sealed class RdpCoreTsDetector : EventLogDetectorBase
 {
     /// <summary>Event log channel this detector watches.</summary>
     public const string ChannelName = "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational";
@@ -36,64 +36,52 @@ public sealed class RdpCoreTsDetector : IDetector
         """;
 
     private readonly Func<WinGuardSettings> _settingsAccessor;
-    private readonly ILogger<RdpCoreTsDetector> _logger;
-    private EventLogWatcher? _watcher;
 
     /// <summary>Creates the detector.</summary>
     /// <param name="settingsAccessor">Returns the current live settings.</param>
     /// <param name="logger">Logger for subscription/parse diagnostics.</param>
-    /// <param name="timeProvider">Clock abstraction; defaults to <see cref="TimeProvider.System"/>.</param>
+    /// <param name="timeProvider">Accepted for API symmetry; the event's own SystemTime stamps the record.</param>
     public RdpCoreTsDetector(
         Func<WinGuardSettings> settingsAccessor,
         ILogger<RdpCoreTsDetector> logger,
         TimeProvider? timeProvider = null)
+        : base(logger)
     {
         _settingsAccessor = settingsAccessor;
-        _logger = logger;
-        // The failure's own SystemTime is authoritative for this event-log engine; the injected
-        // TimeProvider is accepted for API symmetry but is not used to stamp parsed records.
         _ = timeProvider;
     }
 
     /// <inheritdoc />
-    public ProtocolSource Source => ProtocolSource.Rdp;
+    public override ProtocolSource Source => ProtocolSource.Rdp;
 
     /// <inheritdoc />
-    public string Name => "RDP (RdpCoreTS 140)";
+    public override string Name => "RDP (RdpCoreTS 140)";
 
     /// <inheritdoc />
-    public Task StartAsync(Channel<FailedLogin> sink, CancellationToken ct)
+    protected override string LogChannel => ChannelName;
+
+    /// <inheritdoc />
+    protected override IReadOnlyList<(string Query, bool TolerateQueryErrors)> Queries => [(SubscriptionXPath, true)];
+
+    /// <inheritdoc />
+    protected override bool IsEnabled()
     {
-        // Subscribe regardless of settings: OnEventRecord honors the live flags per event.
-        try
-        {
-            var query = new EventLogQuery(ChannelName, PathType.LogName, SubscriptionXPath)
-            {
-                TolerateQueryErrors = true,
-            };
-            var watcher = new EventLogWatcher(query);
-            try
-            {
-                watcher.EventRecordWritten += (_, args) => OnEventRecord(args, sink);
-                watcher.Enabled = true;
-            }
-            catch
-            {
-                watcher.Dispose();
-                throw;
-            }
+        var rdp = _settingsAccessor().Rdp;
+        return rdp.Enabled && rdp.UseRdpCoreTsFallback;
+    }
 
-            _watcher = watcher;
-            ct.Register(DisposeWatcher);
-            _logger.LogInformation("Subscribed to the {Channel} channel for event 140.", ChannelName);
-        }
-        catch (Exception ex)
+    /// <inheritdoc />
+    protected override FailedLogin? Parse(EventRecord record)
+    {
+        if (!TryParse(record.ToXml(), out var failed) || failed is null)
         {
-            // Channel may be absent when the RDP role is not installed: degrade gracefully.
-            _logger.LogError(ex, "RdpCoreTS 140 detector could not subscribe to {Channel}; fallback detection is inactive.", ChannelName);
+            return null;
         }
 
-        return Task.CompletedTask;
+        // A 140 event carries only the IP, so only IP-based exclusion rules can be applied here;
+        // rules about user names or logon types are applied through the matching 4625 event.
+        failed.IsExcluded = ExclusionEvaluator.IsExcludedByIpOnlyRules(failed.IpAddress, _settingsAccessor().Rdp.ExclusionRules);
+        return failed;
     }
 
     /// <summary>
@@ -167,64 +155,6 @@ public sealed class RdpCoreTsDetector : IDetector
             RawLog = $"EventID=140 RdpCoreTS connection failure ip={ip}",
         };
         return true;
-    }
-
-    private void OnEventRecord(EventRecordWrittenEventArgs args, Channel<FailedLogin> sink)
-    {
-        // Live toggle: honor Rdp.Enabled + UseRdpCoreTsFallback per event, not only at subscribe time.
-        var current = _settingsAccessor();
-        if (!current.Rdp.Enabled || !current.Rdp.UseRdpCoreTsFallback)
-        {
-            return;
-        }
-
-        try
-        {
-            var record = args.EventRecord;
-            if (record is null)
-            {
-                if (args.EventException is not null)
-                {
-                    _logger.LogDebug(args.EventException, "RdpCoreTS 140 subscription reported an event error.");
-                }
-
-                return;
-            }
-
-            string xml;
-            using (record)
-            {
-                xml = record.ToXml();
-            }
-
-            if (TryParse(xml, out var failed) && failed is not null
-                && !sink.Writer.TryWrite(failed))
-            {
-                _logger.LogWarning("RdpCoreTS 140 detector could not write to the sink channel (closed).");
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to process a RdpCoreTS 140 event record.");
-        }
-    }
-
-    private void DisposeWatcher()
-    {
-        try
-        {
-            var watcher = _watcher;
-            _watcher = null;
-            if (watcher is not null)
-            {
-                watcher.Enabled = false;
-                watcher.Dispose();
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Error while disposing the RdpCoreTS 140 watcher.");
-        }
     }
 
     private static DateTime ParseSystemTime(XElement system, XNamespace ns) => DetectorUtil.ParseSystemTime(system, ns);

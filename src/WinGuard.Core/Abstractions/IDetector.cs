@@ -15,5 +15,11 @@ public interface IDetector
     /// <summary>Human-readable name for status/logs (e.g. "RDP (Security 4625)").</summary>
     string Name { get; }
 
+    /// <summary>
+    /// True while the detector is really watching its source (subscription alive / poll loop
+    /// running). A detector whose subscription failed reports false so the dashboard can show it.
+    /// </summary>
+    bool IsRunning { get; }
+
     Task StartAsync(Channel<FailedLogin> sink, CancellationToken ct);
 }

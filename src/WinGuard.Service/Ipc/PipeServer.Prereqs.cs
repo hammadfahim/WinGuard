@@ -45,9 +45,8 @@ public sealed partial class PipeServer
         string? channelWarning = null;
         try
         {
-            var configuration = new EventLogConfiguration(
-                RdpCoreTsDetector.ChannelName,
-                new EventLogSession());
+            using var session = new EventLogSession();
+            using var configuration = new EventLogConfiguration(RdpCoreTsDetector.ChannelName, session);
             dto.RdpCoreTsChannelEnabled = configuration.IsEnabled;
         }
         catch (Exception ex)
@@ -106,8 +105,25 @@ public sealed partial class PipeServer
                 return false;
             }
 
-            var output = await process.StandardOutput.ReadToEndAsync(ct).ConfigureAwait(false);
-            await process.WaitForExitAsync(ct).ConfigureAwait(false);
+            string output;
+            try
+            {
+                output = await process.StandardOutput.ReadToEndAsync(ct).ConfigureAwait(false);
+                await process.WaitForExitAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (Exception)
+                {
+                    // Already gone.
+                }
+
+                throw;
+            }
 
             // Tolerate UTF-16 output on some builds.
             output = output.Replace("\0", string.Empty);

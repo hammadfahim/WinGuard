@@ -66,7 +66,7 @@ public sealed partial class BanEngine
         }
     }
 
-    private async Task HousekeepCoreAsync(CancellationToken ct)
+    private async Task HousekeepCoreAsync(bool forceReconcile, CancellationToken ct)
     {
         var settings = _settingsAccessor();
         var now = NowUtc();
@@ -157,7 +157,14 @@ public sealed partial class BanEngine
         }
 
         await ReloadListsCoreAsync(ct).ConfigureAwait(false);
-        await ReconcileFirewallCoreAsync(ct).ConfigureAwait(false);
+
+        // Expiry above already unblocked what is due; the full firewall comparison is only a
+        // self-heal against outside changes, so the timer loop runs it at most once a minute.
+        if (forceReconcile || (now - _lastReconcileUtc).Duration() >= ReconcileInterval)
+        {
+            _lastReconcileUtc = now;
+            await ReconcileFirewallCoreAsync(ct).ConfigureAwait(false);
+        }
     }
 
     private async Task ReconcileFirewallCoreAsync(CancellationToken ct)
