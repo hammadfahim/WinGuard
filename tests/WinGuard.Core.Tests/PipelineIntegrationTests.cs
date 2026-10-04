@@ -48,13 +48,13 @@ public class PipelineIntegrationTests
             await detector.StartAsync(channel, cts.Token);
             var engineTask = engine.RunAsync(channel.Reader, cts.Token);
 
-            await Task.Delay(700); // let the tailer take its skip-to-end cursor
-            await File.AppendAllTextAsync(log, string.Concat(Enumerable.Repeat("Failed login from 203.0.113.9\n", 3)));
-
-            var deadline = DateTime.UtcNow.AddSeconds(15);
+            // No fixed sleep: lines written before the tailer has taken its skip-to-end position
+            // are (correctly) ignored, so keep appending until the ban shows up.
+            var deadline = DateTime.UtcNow.AddSeconds(20);
             while (DateTime.UtcNow < deadline && !firewall.Blocked.Contains("203.0.113.9"))
             {
-                await Task.Delay(100);
+                await File.AppendAllTextAsync(log, string.Concat(Enumerable.Repeat("Failed login from 203.0.113.9\n", 3)));
+                await Task.Delay(400);
             }
 
             Assert.Contains("203.0.113.9", firewall.Blocked);
