@@ -24,6 +24,9 @@ public sealed class StatusPoller : IDisposable
     /// <summary>Set by the shell when the Blocked IPs view is on screen (forces a ban refresh each tick).</summary>
     public bool BansViewActive { get; set; }
 
+    /// <summary>When true (window hidden/minimized) ticks do nothing, saving IPC and CPU.</summary>
+    public bool Paused { get; set; }
+
     /// <summary>Raised when a fresh service status snapshot arrives.</summary>
     public event Action<ServiceStatusDto>? StatusUpdated;
 
@@ -62,7 +65,7 @@ public sealed class StatusPoller : IDisposable
 
     private async void OnTick(object? sender, EventArgs e)
     {
-        if (_busy)
+        if (_busy || Paused)
         {
             return;
         }

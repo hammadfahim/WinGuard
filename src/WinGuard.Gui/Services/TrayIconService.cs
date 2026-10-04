@@ -15,6 +15,8 @@ public sealed class TrayIconService : IDisposable
     private readonly NotifyIcon _notifyIcon;
     private readonly Icon _icon;
     private readonly IntPtr _iconHandle;
+    private readonly Icon _offlineIcon;
+    private readonly IntPtr _offlineHandle;
     private bool _disposed;
 
     /// <summary>Raised when the user asks to show the main window.</summary>
@@ -26,8 +28,10 @@ public sealed class TrayIconService : IDisposable
     /// <summary>Creates the tray icon and its context menu on the current (UI) thread.</summary>
     public TrayIconService()
     {
-        _iconHandle = CreateShieldIconHandle();
+        _iconHandle = CreateShieldIconHandle(Color.FromArgb(59, 130, 246));
         _icon = Icon.FromHandle(_iconHandle);
+        _offlineHandle = CreateShieldIconHandle(Color.FromArgb(120, 120, 130));
+        _offlineIcon = Icon.FromHandle(_offlineHandle);
 
         var menu = new ContextMenuStrip();
         var showItem = new ToolStripMenuItem("Show WinGuard");
@@ -42,10 +46,22 @@ public sealed class TrayIconService : IDisposable
         {
             Icon = _icon,
             Visible = true,
-            Text = "WinGuard",
+            Text = "WinGuard - connecting...",
             ContextMenuStrip = menu,
         };
         _notifyIcon.DoubleClick += (_, _) => ShowRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Switches the icon and tooltip between connected (blue) and service-offline (grey).</summary>
+    public void SetConnected(bool connected)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _notifyIcon.Icon = connected ? _icon : _offlineIcon;
+        _notifyIcon.Text = connected ? "WinGuard - protecting" : "WinGuard - service not running";
     }
 
     /// <inheritdoc />
@@ -61,9 +77,11 @@ public sealed class TrayIconService : IDisposable
         _notifyIcon.Dispose();
         _icon.Dispose();
         DestroyIcon(_iconHandle);
+        _offlineIcon.Dispose();
+        DestroyIcon(_offlineHandle);
     }
 
-    private static IntPtr CreateShieldIconHandle()
+    private static IntPtr CreateShieldIconHandle(Color fill)
     {
         using var bitmap = new Bitmap(32, 32);
         using (var graphics = Graphics.FromImage(bitmap))
@@ -82,7 +100,7 @@ public sealed class TrayIconService : IDisposable
                 new Point(4, 7),
             });
             shield.CloseFigure();
-            using var shieldBrush = new SolidBrush(Color.FromArgb(59, 130, 246));
+            using var shieldBrush = new SolidBrush(fill);
             graphics.FillPath(shieldBrush, shield);
 
             using var font = new Font("Segoe UI", 11f, FontStyle.Bold, GraphicsUnit.Pixel);

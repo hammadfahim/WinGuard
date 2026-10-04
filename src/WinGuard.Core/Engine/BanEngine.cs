@@ -768,7 +768,7 @@ public sealed class BanEngine
         // Event retention (review S-N4): keep the events table bounded.
         try
         {
-            await _store.PruneEventsAsync(now - TimeSpan.FromDays(DefaultEventRetentionDays), ct).ConfigureAwait(false);
+            await _store.PruneEventsAsync(now - TimeSpan.FromDays(settings.EventRetentionDays > 0 ? settings.EventRetentionDays : DefaultEventRetentionDays), ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

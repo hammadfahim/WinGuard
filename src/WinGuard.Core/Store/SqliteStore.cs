@@ -26,6 +26,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
     private readonly string _databasePath;
     private readonly string _connectionString;
     private readonly ILogger<SqliteStore> _logger;
+    private readonly TimeProvider _timeProvider;
 
     private SqliteConnection? _connection;
     private bool _initialized;
@@ -34,7 +35,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
     /// <summary>Creates a store for the given database file. <see cref="InitializeAsync"/> creates it if missing.</summary>
     /// <param name="databasePath">Absolute path to the SQLite file (directory is created as needed).</param>
     /// <param name="logger">Diagnostic logger.</param>
-    public SqliteStore(string databasePath, ILogger<SqliteStore> logger)
+    public SqliteStore(string databasePath, ILogger<SqliteStore> logger, TimeProvider? timeProvider = null)
     {
         if (string.IsNullOrWhiteSpace(databasePath))
         {
@@ -43,6 +44,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
 
         _databasePath = Path.GetFullPath(databasePath);
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _timeProvider = timeProvider ?? TimeProvider.System;
 
         _connectionString = new SqliteConnectionStringBuilder
         {
@@ -218,7 +220,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
                 await using var cmd = connection.CreateCommand();
                 cmd.CommandText =
                     "SELECT " + BanColumns + " FROM bans WHERE is_permanent = 1 OR expires_utc > $now ORDER BY banned_at_utc;";
-                cmd.Parameters.AddWithValue("$now", ToDb(DateTime.UtcNow));
+                cmd.Parameters.AddWithValue("$now", ToDb(_timeProvider.GetUtcNow().UtcDateTime));
 
                 var bans = new List<BanEntry>();
                 await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
@@ -759,6 +761,8 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
           raw TEXT
         );
         CREATE INDEX IF NOT EXISTS ix_fl_ip_ts ON failed_logins(ip, ts_utc);
+        CREATE INDEX IF NOT EXISTS ix_fl_ts ON failed_logins(ts_utc);
+        CREATE INDEX IF NOT EXISTS ix_fl_source_ts ON failed_logins(source, ts_utc);
 
         CREATE TABLE IF NOT EXISTS bans (
           ip TEXT PRIMARY KEY,
@@ -787,5 +791,8 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL
         );
+
+        CREATE INDEX IF NOT EXISTS ix_bans_expires ON bans(expires_utc);
+        CREATE INDEX IF NOT EXISTS ix_events_ts ON events(ts_utc);
         """;
 }

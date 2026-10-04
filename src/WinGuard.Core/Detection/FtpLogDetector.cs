@@ -53,6 +53,7 @@ public sealed class FtpLogDetector : IDetector
     private readonly TimeProvider _timeProvider;
     private readonly LogFileTailer _tailer = new();
     private readonly Dictionary<string, string> _fieldsHeaders = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _headerPreReadDone = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Creates the detector.</summary>
     /// <param name="settingsAccessor">Returns the current live settings.</param>
@@ -300,6 +301,8 @@ public sealed class FtpLogDetector : IDetector
         {
             _fieldsHeaders.Remove(key);
         }
+
+        _headerPreReadDone.RemoveWhere(k => !activeSet.Contains(k));
     }
 
     private void Emit(Channel<FailedLogin> sink, FailedLogin failure)
@@ -336,7 +339,8 @@ public sealed class FtpLogDetector : IDetector
     /// </summary>
     private void EnsureFieldsHeaderPreRead(string file)
     {
-        if (_fieldsHeaders.ContainsKey(file))
+        // Attempt the 64 KB tail pre-read once per file, not on every poll cycle.
+        if (_fieldsHeaders.ContainsKey(file) || !_headerPreReadDone.Add(file))
         {
             return;
         }

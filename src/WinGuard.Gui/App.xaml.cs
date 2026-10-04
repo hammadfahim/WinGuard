@@ -24,19 +24,30 @@ public partial class App : System.Windows.Application
         base.OnStartup(e);
 
         RegisterExceptionHandlers();
-        ApplyTheme(dark: true);
+        var startDark = ThemePreference.ResolveDark();
+        ApplyTheme(startDark);
 
         _pipeClient = new PipeClient();
         _pipeClient.Start();
 
         _mainViewModel = new MainViewModel(_pipeClient, Dispatcher);
-        _mainViewModel.ThemeChanged += ApplyTheme;
+        _mainViewModel.IsDarkTheme = startDark;
+        _mainViewModel.ThemeChanged += dark =>
+        {
+            ApplyTheme(dark);
+            ThemePreference.Save(dark);
+        };
 
         _mainWindow = new MainWindow { DataContext = _mainViewModel };
 
         _trayIcon = new TrayIconService();
         _trayIcon.ShowRequested += (_, _) => ShowMainWindow();
         _trayIcon.ExitRequested += (_, _) => ExitApplication();
+
+        // Poll only while the window is actually on screen.
+        _mainWindow.IsVisibleChanged += (_, _) => UpdatePolling();
+        _mainWindow.StateChanged += (_, _) => UpdatePolling();
+        _pipeClient.StateChanged += connected => Dispatcher.BeginInvoke(() => _trayIcon?.SetConnected(connected));
 
         MainWindow = _mainWindow;
         _mainWindow.Show();
@@ -70,6 +81,16 @@ public partial class App : System.Windows.Application
         }
 
         merged.Insert(0, theme);
+    }
+
+    private void UpdatePolling()
+    {
+        if (_mainWindow is null || _mainViewModel is null)
+        {
+            return;
+        }
+
+        _mainViewModel.SetWindowActive(_mainWindow.IsVisible && _mainWindow.WindowState != WindowState.Minimized);
     }
 
     private void ShowMainWindow()

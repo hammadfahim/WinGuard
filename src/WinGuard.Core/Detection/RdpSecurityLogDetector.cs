@@ -242,28 +242,9 @@ public sealed class RdpSecurityLogDetector : IDetector
         return map;
     }
 
-    private static DateTime ParseSystemTime(XElement system, XNamespace ns)
-    {
-        var value = (string?)system.Element(ns + "TimeCreated")?.Attribute("SystemTime");
-        if (!string.IsNullOrWhiteSpace(value)
-            && DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed))
-        {
-            return parsed.Kind == DateTimeKind.Utc ? parsed : parsed.ToUniversalTime();
-        }
+    private static DateTime ParseSystemTime(XElement system, XNamespace ns) => DetectorUtil.ParseSystemTime(system, ns);
 
-        return DateTime.UtcNow;
-    }
-
-    private static string? NormalizeOptional(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-
-        var trimmed = value.Trim();
-        return trimmed == "-" ? null : trimmed;
-    }
+    private static string? NormalizeOptional(string? value) => DetectorUtil.NormalizeOptional(value);
 
     private static string BuildRawLog(IReadOnlyDictionary<string, string> eventData, string ip, string? user)
     {
