@@ -68,4 +68,16 @@ public class ReviewFixesTests
             File.Delete(path);
         }
     }
+
+    [Fact]
+    public void Normalize_clamps_event_retention_days()
+    {
+        var settings = new WinGuardSettings { EventRetentionDays = 0 };
+        settings.Normalize();
+        Assert.Equal(30, settings.EventRetentionDays);
+
+        settings.EventRetentionDays = 999999;
+        settings.Normalize();
+        Assert.Equal(3650, settings.EventRetentionDays);
+    }
 }

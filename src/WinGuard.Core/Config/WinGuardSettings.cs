@@ -19,6 +19,9 @@ public sealed class WinGuardSettings
     public TimeSpan HousekeepingInterval { get; set; } = Defaults.HousekeepingInterval;
     public bool ClearBansOnStartup { get; set; }
     public bool ProcessInternalIPs { get; set; }
+
+    /// <summary>Days of event history kept before housekeeping prunes it.</summary>
+    public int EventRetentionDays { get; set; } = 30;
     public int MaxAddressesPerRule { get; set; } = Defaults.MaxAddressesPerRule;
 
     /// <summary>Empty = block all ports (1 firewall condition per IP; cheapest). Non-empty = block only these ports.</summary>
@@ -89,6 +92,7 @@ public sealed class WinGuardSettings
         }
 
         FailedLoginThreshold = Math.Max(1, FailedLoginThreshold);
+        EventRetentionDays = Math.Clamp(EventRetentionDays <= 0 ? 30 : EventRetentionDays, 1, 3650);
         MaxAddressesPerRule = Math.Clamp(MaxAddressesPerRule, 1, Defaults.MaxAddressesPerRule);
         if (CountWindow <= TimeSpan.Zero)
         {

@@ -128,7 +128,7 @@ internal static class Program
         builder.Services.AddSingleton<DetectorRuntimeState>();
 
         builder.Services.AddSingleton<IStore>(sp =>
-            new SqliteStore(resolvedDatabasePath, sp.GetRequiredService<ILogger<SqliteStore>>()));
+            new SqliteStore(resolvedDatabasePath, sp.GetRequiredService<ILogger<SqliteStore>>(), sp.GetRequiredService<TimeProvider>()));
 
         builder.Services.AddSingleton<IFirewall>(sp =>
             new WindowsFirewall(

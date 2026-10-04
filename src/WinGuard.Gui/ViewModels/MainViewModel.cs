@@ -15,6 +15,17 @@ public sealed partial class MainViewModel : ObservableObject
 {
     private readonly PipeClient _client;
     private readonly StatusPoller _poller;
+
+    /// <summary>Pauses or resumes background polling (call with false while the window is hidden).</summary>
+    public void SetWindowActive(bool active)
+    {
+        _poller.Paused = !active;
+        if (active)
+        {
+            _poller.ResetEventCursor();
+        }
+    }
+
     private readonly Dispatcher _dispatcher;
 
     /// <summary>Creates the shell and starts polling.</summary>

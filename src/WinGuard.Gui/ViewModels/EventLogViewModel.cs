@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using WinGuard.Gui.Collections;
 using WinGuard.Core.Ipc;
 
 namespace WinGuard.Gui.ViewModels;
@@ -18,7 +19,7 @@ public sealed partial class EventLogViewModel : ObservableObject
     private readonly Queue<string> _seenOrder = [];
 
     /// <summary>Rows currently visible after filtering, oldest first.</summary>
-    public ObservableCollection<EventRowViewModel> Events { get; } = [];
+    public BulkObservableCollection<EventRowViewModel> Events { get; } = new();
 
     /// <summary>Available level filter options.</summary>
     public ObservableCollection<string> LevelFilters { get; } = ["All", "Info", "Warning", "Error"];
@@ -46,8 +47,11 @@ public sealed partial class EventLogViewModel : ObservableObject
     /// <param name="events">Events from the poller.</param>
     public void AddEvents(IReadOnlyList<EventDto> events)
     {
-        foreach (var dto in events.Reverse())
+        var visibleNew = new List<EventRowViewModel>();
+        var trimmed = false;
+        for (var i = events.Count - 1; i >= 0; i--)
         {
+            var dto = events[i];
             var key = dto.TimestampUtc.Ticks.ToString() + "|" + dto.Message;
             if (!_seen.Add(key))
             {
@@ -62,20 +66,21 @@ public sealed partial class EventLogViewModel : ObservableObject
 
             var row = new EventRowViewModel(dto);
             _all.Add(row);
-            if (_all.Count > MaxEntries)
-            {
-                _all.RemoveAt(0);
-            }
-
             if (Matches(row))
             {
-                Events.Add(row);
+                visibleNew.Add(row);
             }
         }
 
-        while (Events.Count > MaxEntries)
+        if (_all.Count > MaxEntries)
         {
-            Events.RemoveAt(0);
+            _all.RemoveRange(0, _all.Count - MaxEntries);
+            trimmed = true;
+        }
+
+        if (visibleNew.Count > 0 || trimmed)
+        {
+            Events.AddRangeCapped(visibleNew, MaxEntries);
         }
 
         VisibleCount = Events.Count;
@@ -98,15 +103,7 @@ public sealed partial class EventLogViewModel : ObservableObject
 
     private void Rebuild()
     {
-        Events.Clear();
-        foreach (var row in _all)
-        {
-            if (Matches(row))
-            {
-                Events.Add(row);
-            }
-        }
-
+        Events.ReplaceAll(_all.Where(Matches));
         VisibleCount = Events.Count;
     }
 

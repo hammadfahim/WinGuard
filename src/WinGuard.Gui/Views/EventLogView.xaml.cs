@@ -48,7 +48,7 @@ public partial class EventLogView : System.Windows.Controls.UserControl
 
     private void OnCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
-        if (e.Action != NotifyCollectionChangedAction.Add)
+        if (e.Action is not (NotifyCollectionChangedAction.Add or NotifyCollectionChangedAction.Reset))
         {
             return;
         }
