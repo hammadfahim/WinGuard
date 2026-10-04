@@ -12,7 +12,7 @@ public class ReviewFixesTests
     public void Normalize_survives_null_members_and_caps_huge_durations()
     {
         var settings = JsonSerializer.Deserialize<WinGuardSettings>(
-            "{\"BlockedPorts\":null,\"Rdp\":null,\"Ftp\":null,\"CustomSources\":null,\"MaxBanDuration\":\"-1.00:00:00\",\"BanTiers\":[\"99999999.00:00:00\"]}")!;
+            "{\"BlockedPorts\":null,\"Rdp\":null,\"Ftp\":null,\"CustomSources\":null,\"MaxBanDuration\":\"-1.00:00:00\",\"BanTiers\":[\"10000000.00:00:00\"]}")!;
 
         settings.Normalize();
 
