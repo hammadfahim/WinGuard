@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Win32;
 using System.IO;
 using System.Windows;
 using System.Windows.Threading;
@@ -8,17 +9,25 @@ using WinGuard.Gui.ViewModels;
 namespace WinGuard.Gui;
 
 /// <summary>
-/// Application entry point. Composes the (small) object graph by hand — no DI container — wires the
+/// Application entry point. Builds the small object graph in a service container, wires the
 /// named-pipe client, the tray icon and the main window, applies the theme and installs global
-/// exception handlers (PLAN.md §9).
+/// exception handlers (PLAN.md §9). Only one instance runs per session: a second launch brings the
+/// first one's window to the front and exits.
 /// </summary>
 public partial class App : System.Windows.Application
 {
+    private const string InstanceMutexName = @"Local\WinGuard.Gui.Instance";
+    private const string ShowSignalName = @"Local\WinGuard.Gui.Show";
+
     private PipeClient? _pipeClient;
     private MainViewModel? _mainViewModel;
     private TrayIconService? _trayIcon;
     private MainWindow? _mainWindow;
     private ServiceProvider? _services;
+    private Mutex? _instanceMutex;
+    private EventWaitHandle? _showSignal;
+    private RegisteredWaitHandle? _showSignalWait;
+    private ThemeChoice _themeChoice = ThemeChoice.System;
     private bool _currentDark = true;
 
     /// <inheritdoc />
@@ -26,10 +35,17 @@ public partial class App : System.Windows.Application
     {
         base.OnStartup(e);
 
+        if (!TryBecomeSingleInstance())
+        {
+            Shutdown();
+            return;
+        }
+
         RegisterExceptionHandlers();
-        var startDark = ThemePreference.ResolveDark();
-        ApplyTheme(startDark);
+        _themeChoice = ThemePreference.Load();
+        ApplyTheme(ThemePreference.ResolveDark(_themeChoice));
         SystemParameters.StaticPropertyChanged += OnSystemParameterChanged;
+        SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
 
         var services = new ServiceCollection();
         services.AddSingleton<PipeClient>();
@@ -39,17 +55,18 @@ public partial class App : System.Windows.Application
         _services = services.BuildServiceProvider();
 
         _pipeClient = _services.GetRequiredService<PipeClient>();
-        _pipeClient.Start();
 
         _mainViewModel = _services.GetRequiredService<MainViewModel>();
-        _mainViewModel.IsDarkTheme = startDark;
-        _mainViewModel.ThemeChanged += dark =>
+        _mainViewModel.ThemeChoice = _themeChoice;
+        _mainViewModel.ThemeChoiceChanged += choice =>
         {
-            ApplyTheme(dark);
-            ThemePreference.Save(dark);
+            _themeChoice = choice;
+            ThemePreference.Save(choice);
+            ApplyTheme(ThemePreference.ResolveDark(choice));
         };
 
         _mainWindow = _services.GetRequiredService<MainWindow>();
+        _mainWindow.SourceInitialized += (_, _) => _mainWindow?.SetDarkTitleBar(_currentDark && !SystemParameters.HighContrast);
 
         _trayIcon = _services.GetRequiredService<TrayIconService>();
         _trayIcon.ShowRequested += (_, _) => ShowMainWindow();
@@ -62,14 +79,85 @@ public partial class App : System.Windows.Application
 
         MainWindow = _mainWindow;
         _mainWindow.Show();
+
+        // Started last, after every listener is attached, so the first connection is not missed.
+        _pipeClient.Start();
+
+        // If the service is down nothing ever "changes": settle the tray text after a moment.
+        var settle = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+        settle.Tick += (_, _) =>
+        {
+            settle.Stop();
+            _trayIcon?.SetConnected(_pipeClient?.IsConnected == true);
+        };
+        settle.Start();
     }
 
     /// <inheritdoc />
     protected override void OnExit(ExitEventArgs e)
     {
         SystemParameters.StaticPropertyChanged -= OnSystemParameterChanged;
+        SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+        _showSignalWait?.Unregister(null);
+        _showSignal?.Dispose();
         _services?.Dispose(); // disposes tray icon, view-model and pipe client
+        if (_instanceMutex is not null)
+        {
+            try
+            {
+                _instanceMutex.ReleaseMutex();
+            }
+            catch (ApplicationException)
+            {
+                // Not owned (second instance that never took it).
+            }
+
+            _instanceMutex.Dispose();
+        }
+
         base.OnExit(e);
+    }
+
+    /// <summary>
+    /// Takes the per-session instance mutex. When another instance already holds it, that instance
+    /// is asked to show its window and this one reports false.
+    /// </summary>
+    private bool TryBecomeSingleInstance()
+    {
+        try
+        {
+            var mutex = new Mutex(initiallyOwned: true, InstanceMutexName, out var createdNew);
+            if (!createdNew)
+            {
+                mutex.Dispose();
+                try
+                {
+                    using var signal = EventWaitHandle.OpenExisting(ShowSignalName);
+                    signal.Set();
+                }
+                catch (Exception)
+                {
+                    // The first instance is still starting or already exiting.
+                }
+
+                return false;
+            }
+
+            _instanceMutex = mutex;
+            _showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ShowSignalName);
+            _showSignalWait = ThreadPool.RegisterWaitForSingleObject(
+                _showSignal,
+                (_, _) => Dispatcher.BeginInvoke(ShowMainWindow),
+                null,
+                Timeout.Infinite,
+                executeOnlyOnce: false);
+            return true;
+        }
+        catch (Exception)
+        {
+            // Never let the instance check itself keep the console from starting.
+            return true;
+        }
     }
 
     /// <summary>Swaps the active theme resource dictionary (Dark.xaml / Light.xaml).</summary>
@@ -96,6 +184,23 @@ public partial class App : System.Windows.Application
         }
 
         merged.Insert(0, theme);
+        _mainWindow?.SetDarkTitleBar(dark && !SystemParameters.HighContrast);
+    }
+
+    /// <summary>Follows a Windows light/dark switch while the user's choice is "System".</summary>
+    private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
+    {
+        if (e.Category == UserPreferenceCategory.General && _themeChoice == ThemeChoice.System)
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                var dark = ThemePreference.IsSystemDark();
+                if (dark != _currentDark)
+                {
+                    ApplyTheme(dark);
+                }
+            });
+        }
     }
 
     private void OnSystemParameterChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)

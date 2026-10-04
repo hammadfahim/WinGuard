@@ -18,7 +18,10 @@ public sealed class StatusPoller : IDisposable
     private readonly DispatcherTimer _timer;
 
     private long? _lastEventId;
+    private const int PausedHeartbeatTicks = 5; // x 2 s timer = one status call every 10 s
+
     private int _tick;
+    private int _pausedTicks;
     private bool _busy;
 
     /// <summary>Set by the shell when the Blocked IPs view is on screen (forces a ban refresh each tick).</summary>
@@ -65,8 +68,34 @@ public sealed class StatusPoller : IDisposable
 
     private async void OnTick(object? sender, EventArgs e)
     {
-        if (_busy || Paused)
+        if (_busy)
         {
+            return;
+        }
+
+        if (Paused)
+        {
+            // Hidden window: no view needs refreshing, but keep a slow heartbeat so a stopped
+            // service is still noticed (the tray icon follows the connection state).
+            if (++_pausedTicks % PausedHeartbeatTicks != 0 || !_client.IsConnected)
+            {
+                return;
+            }
+
+            _busy = true;
+            try
+            {
+                await _client.GetStatusAsync().ConfigureAwait(true);
+            }
+            catch
+            {
+                // The client marks itself disconnected on failure.
+            }
+            finally
+            {
+                _busy = false;
+            }
+
             return;
         }
 
@@ -85,7 +114,7 @@ public sealed class StatusPoller : IDisposable
             }
 
             var events = await _client.ListEventsAsync(EventBatchLimit, null, _lastEventId).ConfigureAwait(true);
-            if (events.Count > 0)
+            if (events is { Count: > 0 })
             {
                 _lastEventId = events.Max(dto => dto.Id);
                 EventsReceived?.Invoke(events);
@@ -94,8 +123,12 @@ public sealed class StatusPoller : IDisposable
             _tick++;
             if (BansViewActive || _tick % 4 == 0)
             {
+                // Null means the request failed: keep what is on screen rather than show "no bans".
                 var bans = await _client.ListBansAsync().ConfigureAwait(true);
-                BansReceived?.Invoke(bans);
+                if (bans is not null)
+                {
+                    BansReceived?.Invoke(bans);
+                }
             }
         }
         catch

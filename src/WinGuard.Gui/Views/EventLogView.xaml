@@ -4,6 +4,7 @@
     <Grid Margin="24">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
@@ -26,7 +27,16 @@
             </StackPanel>
         </DockPanel>
 
-        <Border Grid.Row="1" Style="{StaticResource CardBorderStyle}" Padding="4">
+        <DockPanel Grid.Row="1" Margin="0,0,0,12">
+            <Button DockPanel.Dock="Right" Content="Export CSV…" Margin="8,0,0,0" Command="{Binding ExportCsvCommand}" />
+            <TextBlock DockPanel.Dock="Left" Text="Search" VerticalAlignment="Center" Margin="0,0,8,0"
+                       Foreground="{DynamicResource SubtleForegroundBrush}" />
+            <TextBox VerticalAlignment="Center"
+                     Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
+                     ToolTip="Show only events whose IP or message contains this text" />
+        </DockPanel>
+
+        <Border Grid.Row="2" Style="{StaticResource CardBorderStyle}" Padding="4">
             <ListBox x:Name="EventsList" ItemsSource="{Binding Events}"
                      ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                      VirtualizingPanel.IsVirtualizing="True">
@@ -37,7 +47,7 @@
                                 <ColumnDefinition Width="20" />
                                 <ColumnDefinition Width="165" />
                                 <ColumnDefinition Width="70" />
-                                <ColumnDefinition Width="90" />
+                                <ColumnDefinition Width="100" />
                                 <ColumnDefinition Width="150" />
                                 <ColumnDefinition Width="*" />
                             </Grid.ColumnDefinitions>
@@ -69,7 +79,10 @@
             </ListBox>
         </Border>
 
-        <TextBlock Grid.Row="2" Margin="0,10,0,0" Foreground="{DynamicResource SubtleForegroundBrush}"
-                   Text="{Binding VisibleCount, StringFormat='Showing {0} event(s)'}" />
+        <StackPanel Grid.Row="3" Margin="0,10,0,0">
+            <TextBlock Foreground="{DynamicResource SubtleForegroundBrush}"
+                       Text="{Binding VisibleCount, StringFormat='Showing {0} event(s)'}" />
+            <TextBlock Text="{Binding StatusMessage}" TextWrapping="Wrap" />
+        </StackPanel>
     </Grid>
 </UserControl>

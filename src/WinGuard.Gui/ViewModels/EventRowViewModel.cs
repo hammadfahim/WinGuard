@@ -33,14 +33,7 @@ public sealed class EventRowViewModel
     };
 
     /// <summary>Protocol source name, or an empty string.</summary>
-    public string SourceText => Dto.Source switch
-    {
-        ProtocolSource.Rdp => "RDP",
-        ProtocolSource.MsSql => "MS SQL",
-        ProtocolSource.Ftp => "FTP",
-        ProtocolSource.Custom => "Custom",
-        _ => string.Empty,
-    };
+    public string SourceText => SourceLabels.For(Dto.Source);
 
     /// <summary>IP address, or an empty string.</summary>
     public string IpAddress => Dto.IpAddress ?? string.Empty;

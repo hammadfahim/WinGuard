@@ -17,6 +17,10 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly PipeClient _client;
     private WinGuardSettings _baseSettings = new();
 
+    // Until the live settings have been fetched the editors show defaults; saving then would
+    // overwrite the service's real configuration with them.
+    private bool _loaded;
+
     /// <summary>Creates the view-model and seeds the ban-tier editor with the defaults.</summary>
     /// <param name="client">Pipe client used to load and save settings.</param>
     public SettingsViewModel(PipeClient client)
@@ -61,6 +65,10 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// <summary>Comma-separated ports to block; empty = all ports.</summary>
     [ObservableProperty]
     private string _blockedPortsText = string.Empty;
+
+    /// <summary>Days of event history the service keeps (text).</summary>
+    [ObservableProperty]
+    private string _eventRetentionDaysText = "30";
 
     /// <summary>Editable escalation tiers (text rows).</summary>
     public ObservableCollection<StringRowViewModel> BanTiers { get; } = [];
@@ -166,6 +174,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
             settings.Normalize();
             _baseSettings = settings;
+            _loaded = true;
             PopulateFrom(settings);
             ErrorMessage = string.Empty;
             StatusMessage = "Settings loaded.";
@@ -180,8 +189,20 @@ public sealed partial class SettingsViewModel : ObservableObject
     [RelayCommand]
     private async Task SaveAsync()
     {
+        if (!_loaded)
+        {
+            ErrorMessage = "The current settings have not been loaded from the service yet. Press Reset to load them, then edit and save.";
+            StatusMessage = string.Empty;
+            return;
+        }
+
         var errors = new List<string>();
         var settings = _baseSettings.Clone();
+
+        if (!int.TryParse(EventRetentionDaysText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var retentionDays) || retentionDays is < 1 or > 3650)
+        {
+            errors.Add("Event history must be a whole number of days between 1 and 3650.");
+        }
 
         if (!int.TryParse(ThresholdText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var threshold) || threshold < 1)
         {
@@ -257,6 +278,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         settings.MaxBanDuration = maxBan;
         settings.ClearBansOnStartup = ClearBansOnStartup;
         settings.ProcessInternalIPs = ProcessInternalIPs;
+        settings.EventRetentionDays = retentionDays;
         settings.BlockedPorts = ports;
         settings.BanTiers = tiers.ToArray();
 
@@ -294,9 +316,11 @@ public sealed partial class SettingsViewModel : ObservableObject
         IsBusy = true;
         try
         {
-            await _client.UpdateSettingsAsync(settings);
-            _baseSettings = settings;
-            PopulateFrom(settings);
+            // Show what the service actually stored (it normalizes, e.g. caps very long durations).
+            var saved = await _client.UpdateSettingsAsync(settings) ?? settings;
+            saved.Normalize();
+            _baseSettings = saved;
+            PopulateFrom(saved);
             ErrorMessage = string.Empty;
             StatusMessage = "Settings saved.";
         }
@@ -372,6 +396,39 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
     }
 
+    /// <summary>Adds the IIS FTP log folders found on this machine that are not listed yet.</summary>
+    [RelayCommand]
+    private void DetectIisFtp()
+    {
+        var added = 0;
+        try
+        {
+            var root = Environment.ExpandEnvironmentVariables(@"%SystemDrive%\inetpub\logs\LogFiles");
+            if (System.IO.Directory.Exists(root))
+            {
+                foreach (var folder in System.IO.Directory.EnumerateDirectories(root, "FTPSVC*"))
+                {
+                    if (FtpSources.Any(row => string.Equals(row.Path.Trim(), folder, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        continue;
+                    }
+
+                    FtpSources.Add(new FtpSourceRow { Name = "IIS " + System.IO.Path.GetFileName(folder), Kind = FtpServerKind.IisFtp, Path = folder });
+                    added++;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = "Could not look for IIS FTP logs: " + ex.Message;
+            return;
+        }
+
+        StatusMessage = added > 0
+            ? $"Added {added} IIS FTP log folder(s). Press Save settings to apply."
+            : "No new IIS FTP log folders were found under %SystemDrive%\\inetpub\\logs\\LogFiles.";
+    }
+
     /// <summary>Adds an FTP log source row.</summary>
     [RelayCommand]
     private void AddFtpSource()
@@ -421,6 +478,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         MaxBanDurationText = settings.MaxBanDuration.ToString();
         ClearBansOnStartup = settings.ClearBansOnStartup;
         ProcessInternalIPs = settings.ProcessInternalIPs;
+        EventRetentionDaysText = settings.EventRetentionDays.ToString(CultureInfo.InvariantCulture);
         BlockedPortsText = string.Join(", ", settings.BlockedPorts);
 
         SetTiers(settings.BanTiers.Select(tier => tier.ToString()));

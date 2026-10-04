@@ -59,13 +59,22 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         SelectedNavigation = NavigationItems[0];
 
+        // A dashboard toggle changes the settings behind the Settings page's back; reload them so
+        // a later Save there does not write the old values over the change.
+        Dashboard.SettingsChanged += () => _ = Settings.LoadAsync();
+
         _client.StateChanged += OnClientStateChanged;
-        IsConnected = client.IsConnected;
-        Dashboard.IsConnected = client.IsConnected;
+
+        // The client may already be connected: the event for that connection was raised before we
+        // subscribed, so run the on-connect work (load settings, lists, prerequisites) now.
+        if (client.IsConnected)
+        {
+            OnClientStateChanged(true);
+        }
     }
 
-    /// <summary>Raised when the user toggles the theme (true = dark).</summary>
-    public event Action<bool>? ThemeChanged;
+    /// <summary>Raised when the user picks another theme.</summary>
+    public event Action<ThemeChoice>? ThemeChoiceChanged;
 
     /// <summary>Dashboard view-model.</summary>
     public DashboardViewModel Dashboard { get; }
@@ -93,9 +102,18 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _isConnected;
 
-    /// <summary>Whether the dark theme is active.</summary>
+    /// <summary>The theme the user picked (System follows Windows).</summary>
     [ObservableProperty]
-    private bool _isDarkTheme = true;
+    [NotifyPropertyChangedFor(nameof(ThemeButtonText))]
+    private ThemeChoice _themeChoice = ThemeChoice.System;
+
+    /// <summary>Caption of the theme button.</summary>
+    public string ThemeButtonText => "Theme: " + (ThemeChoice switch
+    {
+        ThemeChoice.Light => "Light",
+        ThemeChoice.Dark => "Dark",
+        _ => "System",
+    });
 
     /// <summary>View-model currently rendered in the content area.</summary>
     public object? CurrentViewModel => SelectedNavigation?.ViewModel;
@@ -107,12 +125,17 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _poller.Dispose();
     }
 
-    /// <summary>Switches between the dark and light themes.</summary>
+    /// <summary>Cycles System → Light → Dark.</summary>
     [RelayCommand]
-    private void ToggleTheme()
+    private void CycleTheme()
     {
-        IsDarkTheme = !IsDarkTheme;
-        ThemeChanged?.Invoke(IsDarkTheme);
+        ThemeChoice = ThemeChoice switch
+        {
+            ThemeChoice.System => ThemeChoice.Light,
+            ThemeChoice.Light => ThemeChoice.Dark,
+            _ => ThemeChoice.System,
+        };
+        ThemeChoiceChanged?.Invoke(ThemeChoice);
     }
 
     partial void OnSelectedNavigationChanged(NavigationItem? value)
@@ -128,6 +151,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     }
 
     private int _handlingConnection;
+    private bool _reloadRequested;
 
     private void OnClientStateChanged(bool connected) =>
         _dispatcher.InvokeAsync(() => _ = HandleConnectionChangedAsync(connected));
@@ -148,6 +172,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         // (observed live: ~250% CPU + 2 GB churn while the pill blinked).
         if (Interlocked.Exchange(ref _handlingConnection, 1) == 1)
         {
+            _reloadRequested = true;
             return;
         }
 
@@ -181,6 +206,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         finally
         {
             Interlocked.Exchange(ref _handlingConnection, 0);
+        }
+
+        // A reconnect arrived while the loads above were running: do them once more.
+        if (_reloadRequested && _client.IsConnected)
+        {
+            _reloadRequested = false;
+            await HandleConnectionChangedAsync(true);
         }
     }
 }

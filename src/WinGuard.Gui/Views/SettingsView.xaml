@@ -35,9 +35,14 @@
                             <TextBox Text="{Binding MaxBanDurationText, UpdateSourceTrigger=PropertyChanged}" />
                         </StackPanel>
                         <StackPanel Width="220" Margin="0,0,16,10">
-                            <TextBlock Text="Blocked ports (comma separated; empty = all)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBlock Text="Event history (days)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding EventRetentionDaysText, UpdateSourceTrigger=PropertyChanged}"
+                                     ToolTip="How long the service keeps entries shown in the Event Log" />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Blocked ports (empty = all)" Style="{StaticResource FieldLabelStyle}" />
                             <TextBox Text="{Binding BlockedPortsText, UpdateSourceTrigger=PropertyChanged}"
-                                     ToolTip="Leave empty to block all ports. Example: 3389, 1433" />
+                                     ToolTip="Comma separated. Leave empty to block all ports. Example: 3389, 1433" />
                         </StackPanel>
                     </WrapPanel>
                     <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
@@ -186,17 +191,19 @@
                         </StackPanel>
                     </WrapPanel>
                     <TextBlock Text="Log sources" FontWeight="SemiBold" Margin="0,4,0,6" />
-                    <DataGrid ItemsSource="{Binding FtpSources}" SelectedItem="{Binding SelectedFtpSource}" Height="180">
+                    <DataGrid x:Name="FtpSourcesGrid" ItemsSource="{Binding FtpSources}" SelectedItem="{Binding SelectedFtpSource}" Height="180">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="170" />
+                            <DataGridTextColumn Header="Name" Binding="{Binding Name, UpdateSourceTrigger=PropertyChanged}" Width="170" />
                             <DataGridComboBoxColumn Header="Kind" Width="130"
                                                     ItemsSource="{x:Static local:SettingsViewModel.FtpKinds}"
-                                                    SelectedItemBinding="{Binding Kind, Mode=TwoWay}" />
-                            <DataGridTextColumn Header="Path" Binding="{Binding Path}" Width="*" />
+                                                    SelectedItemBinding="{Binding Kind, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <DataGridTextColumn Header="Path (local drive)" Binding="{Binding Path, UpdateSourceTrigger=PropertyChanged}" Width="*" />
                         </DataGrid.Columns>
                     </DataGrid>
                     <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                         <Button Content="Add source" Command="{Binding AddFtpSourceCommand}" />
+                        <Button Content="Detect IIS FTP logs" Margin="6,0,0,0" Command="{Binding DetectIisFtpCommand}"
+                                ToolTip="Adds the FTPSVC* folders found under %SystemDrive%\inetpub\logs\LogFiles" />
                         <Button Content="Remove selected" Margin="6,0,0,0" Command="{Binding RemoveFtpSourceCommand}" />
                     </StackPanel>
                 </StackPanel>
@@ -208,12 +215,12 @@
                     <TextBlock Text="Custom log sources" Style="{StaticResource SectionHeaderStyle}" />
                     <TextBlock Text="Regex must contain a named group (?&lt;ipaddress&gt;...) and may contain (?&lt;username&gt;...)."
                                Foreground="{DynamicResource SubtleForegroundBrush}" TextWrapping="Wrap" Margin="0,0,0,6" />
-                    <DataGrid ItemsSource="{Binding CustomSources}" SelectedItem="{Binding SelectedCustomSource}" Height="180">
+                    <DataGrid x:Name="CustomSourcesGrid" ItemsSource="{Binding CustomSources}" SelectedItem="{Binding SelectedCustomSource}" Height="180">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="140" />
-                            <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding Enabled, Mode=TwoWay}" Width="70" />
-                            <DataGridTextColumn Header="Path / glob" Binding="{Binding PathGlob}" Width="200" />
-                            <DataGridTextColumn Header="Regex" Binding="{Binding Regex}" Width="*" />
+                            <DataGridTextColumn Header="Name" Binding="{Binding Name, UpdateSourceTrigger=PropertyChanged}" Width="140" />
+                            <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding Enabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="70" />
+                            <DataGridTextColumn Header="Path / glob (local drive)" Binding="{Binding PathGlob, UpdateSourceTrigger=PropertyChanged}" Width="200" />
+                            <DataGridTextColumn Header="Regex" Binding="{Binding Regex, UpdateSourceTrigger=PropertyChanged}" Width="*" />
                         </DataGrid.Columns>
                     </DataGrid>
                     <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
@@ -225,7 +232,8 @@
 
             <!-- Save -->
             <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                <Button Content="Save settings" Style="{StaticResource AccentButtonStyle}" Command="{Binding SaveCommand}" />
+                <Button Content="Save settings" Style="{StaticResource AccentButtonStyle}" Command="{Binding SaveCommand}"
+                        Click="OnSaveClick" />
             </StackPanel>
             <TextBlock Text="{Binding StatusMessage}" Foreground="{DynamicResource SubtleForegroundBrush}" Margin="0,0,0,4" />
             <TextBlock Text="{Binding ErrorMessage}" Foreground="{DynamicResource ErrorBrush}" TextWrapping="Wrap" />

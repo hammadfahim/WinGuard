@@ -4,6 +4,7 @@
     <Grid Margin="24">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
@@ -12,6 +13,8 @@
             <TextBlock DockPanel.Dock="Left" Text="Blocked IPs" FontSize="24" FontWeight="Bold"
                        VerticalAlignment="Center" />
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                <TextBlock Text="Filter" VerticalAlignment="Center" Margin="0,0,6,0"
+                           Foreground="{DynamicResource SubtleForegroundBrush}" />
                 <TextBox Width="240" VerticalAlignment="Center"
                          Text="{Binding FilterText, UpdateSourceTrigger=PropertyChanged}"
                          ToolTip="Filter by IP, source or note" />
@@ -19,7 +22,28 @@
             </StackPanel>
         </DockPanel>
 
-        <DataGrid Grid.Row="1" ItemsSource="{Binding Bans}" SelectedItem="{Binding SelectedBan}"
+        <!-- Manual block -->
+        <Border Grid.Row="1" Style="{StaticResource CardBorderStyle}" Padding="12" Margin="0,0,0,12">
+            <WrapPanel>
+                <StackPanel Width="220" Margin="0,0,12,0">
+                    <TextBlock Text="Block an IP address" Style="{StaticResource FieldLabelStyle}" />
+                    <TextBox Text="{Binding NewIp, UpdateSourceTrigger=PropertyChanged}"
+                             ToolTip="IPv4 or IPv6 address, e.g. 203.0.113.7" />
+                </StackPanel>
+                <StackPanel Width="150" Margin="0,0,12,0">
+                    <TextBlock Text="For" Style="{StaticResource FieldLabelStyle}" />
+                    <ComboBox ItemsSource="{Binding DurationOptions}" SelectedItem="{Binding SelectedDuration, Mode=TwoWay}" />
+                </StackPanel>
+                <StackPanel Width="260" Margin="0,0,12,0">
+                    <TextBlock Text="Note (optional)" Style="{StaticResource FieldLabelStyle}" />
+                    <TextBox Text="{Binding NewNote, UpdateSourceTrigger=PropertyChanged}" />
+                </StackPanel>
+                <Button Content="Block" Style="{StaticResource AccentButtonStyle}" VerticalAlignment="Bottom"
+                        Command="{Binding BlockNowCommand}" />
+            </WrapPanel>
+        </Border>
+
+        <DataGrid Grid.Row="2" ItemsSource="{Binding Bans}" SelectedItem="{Binding SelectedBan}"
                   IsReadOnly="True" SelectionMode="Single"
                   PreviewMouseRightButtonDown="OnPreviewMouseRightButtonDown">
             <DataGrid.ContextMenu>
@@ -45,7 +69,9 @@
             </DataGrid.Columns>
         </DataGrid>
 
-        <TextBlock Grid.Row="2" Text="{Binding StatusMessage}" Margin="0,10,0,0"
-                   Foreground="{DynamicResource SubtleForegroundBrush}" />
+        <StackPanel Grid.Row="3" Margin="0,10,0,0">
+            <TextBlock Text="{Binding CountText}" Foreground="{DynamicResource SubtleForegroundBrush}" />
+            <TextBlock Text="{Binding StatusMessage}" TextWrapping="Wrap" />
+        </StackPanel>
     </Grid>
 </UserControl>

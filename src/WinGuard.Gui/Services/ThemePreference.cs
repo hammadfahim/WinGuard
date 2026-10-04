@@ -3,34 +3,67 @@ using Microsoft.Win32;
 
 namespace WinGuard.Gui.Services;
 
+/// <summary>Which theme the user asked for.</summary>
+public enum ThemeChoice
+{
+    /// <summary>Follow the Windows app-mode setting (and keep following it when it changes).</summary>
+    System,
+
+    /// <summary>Always light.</summary>
+    Light,
+
+    /// <summary>Always dark.</summary>
+    Dark,
+}
+
 /// <summary>
-/// Resolves the startup theme: the user's saved choice if any, otherwise the Windows
-/// "app mode" setting (light/dark). The choice is saved under %LOCALAPPDATA%\WinGuard.
+/// Loads and saves the user's theme choice under %LOCALAPPDATA%\WinGuard and resolves it against
+/// the Windows "app mode" setting.
 /// </summary>
 public static class ThemePreference
 {
     private static string FilePath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WinGuard", "theme.txt");
 
-    /// <summary>True when dark should be used at startup.</summary>
-    public static bool ResolveDark()
+    /// <summary>The saved choice; <see cref="ThemeChoice.System"/> when nothing was saved.</summary>
+    public static ThemeChoice Load()
     {
         try
         {
-            if (File.Exists(FilePath))
+            if (File.Exists(FilePath) && Enum.TryParse<ThemeChoice>(File.ReadAllText(FilePath).Trim(), ignoreCase: true, out var choice))
             {
-                var saved = File.ReadAllText(FilePath).Trim();
-                if (saved.Equals("dark", StringComparison.OrdinalIgnoreCase)) return true;
-                if (saved.Equals("light", StringComparison.OrdinalIgnoreCase)) return false;
+                return choice;
             }
         }
         catch (Exception)
         {
-            // Fall through to the system setting.
+            // Fall through to the default.
         }
 
-        return IsSystemDark();
+        return ThemeChoice.System;
     }
+
+    /// <summary>Persists the choice (best effort).</summary>
+    public static void Save(ThemeChoice choice)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
+            File.WriteAllText(FilePath, choice.ToString().ToLowerInvariant());
+        }
+        catch (Exception)
+        {
+            // Preference is a convenience only.
+        }
+    }
+
+    /// <summary>True when the choice means dark right now.</summary>
+    public static bool ResolveDark(ThemeChoice choice) => choice switch
+    {
+        ThemeChoice.Dark => true,
+        ThemeChoice.Light => false,
+        _ => IsSystemDark(),
+    };
 
     /// <summary>Reads the Windows app-mode setting; defaults to dark when unreadable.</summary>
     public static bool IsSystemDark()
@@ -43,20 +76,6 @@ public static class ThemePreference
         catch (Exception)
         {
             return true;
-        }
-    }
-
-    /// <summary>Persists the user's choice (best effort).</summary>
-    public static void Save(bool dark)
-    {
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-            File.WriteAllText(FilePath, dark ? "dark" : "light");
-        }
-        catch (Exception)
-        {
-            // Preference is a convenience only.
         }
     }
 }
