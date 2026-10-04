@@ -693,3 +693,8 @@ action versions are being retired on runners (Sep 2026) — use current major ve
   locale-independent GUID `{0CCE9215-69AE-11D9-BED3-505054503030}` rather than the
   English name `"Logon"`; the English name silently fails on German/French/Japanese/…
   Windows.
+
+- **A9 (GUI):** the GUI ships with a `requireAdministrator` manifest (an administrative
+  console like wf.msc). The pipe authorization model (Administrators group SID + LocalSystem,
+  enforced per connection) makes a non-elevated GUI unworkable for standard-user sessions;
+  §9's "don't run GUI elevated full-time" is superseded by this decision.

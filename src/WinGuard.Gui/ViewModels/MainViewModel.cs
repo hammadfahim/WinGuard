@@ -116,6 +116,8 @@ public sealed partial class MainViewModel : ObservableObject
         EventLog.AddEvents(events);
     }
 
+    private int _handlingConnection;
+
     private void OnClientStateChanged(bool connected) =>
         _dispatcher.InvokeAsync(() => _ = HandleConnectionChangedAsync(connected));
 
@@ -129,22 +131,45 @@ public sealed partial class MainViewModel : ObservableObject
             return;
         }
 
-        _poller.ResetEventCursor();
+        // Re-entrancy guard: the loads below can themselves trigger reconnects (every
+        // failed request reconnects and re-fires StateChanged), which without this guard
+        // becomes a tight connect/disconnect storm when the service keeps refusing us
+        // (observed live: ~250% CPU + 2 GB churn while the pill blinked).
+        if (Interlocked.Exchange(ref _handlingConnection, 1) == 1)
+        {
+            return;
+        }
 
         try
         {
-            var prereqs = await _client.CheckPrereqsAsync();
-            if (prereqs is not null)
+            _poller.ResetEventCursor();
+
+            try
             {
-                Dashboard.UpdatePrereqs(prereqs);
+                var prereqs = await _client.CheckPrereqsAsync();
+                if (prereqs is not null)
+                {
+                    Dashboard.UpdatePrereqs(prereqs);
+                }
+            }
+            catch
+            {
+                // Warnings are best-effort.
+            }
+
+            try
+            {
+                await Settings.LoadAsync();
+                await Lists.LoadAsync();
+            }
+            catch
+            {
+                // Surfaces as the disconnected pill; the next state change retries.
             }
         }
-        catch
+        finally
         {
-            // Warnings are best-effort.
+            Interlocked.Exchange(ref _handlingConnection, 0);
         }
-
-        await Settings.LoadAsync();
-        await Lists.LoadAsync();
     }
 }

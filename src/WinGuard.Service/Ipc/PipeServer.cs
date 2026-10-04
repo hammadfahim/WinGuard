@@ -117,6 +117,7 @@ public sealed class PipeServer : BackgroundService
                         rejected);
                 }
 
+                TryWriteRejection(pipe);
                 pipe.Dispose();
                 continue;
             }
@@ -721,6 +722,26 @@ public sealed class PipeServer : BackgroundService
         typeof(PipeServer).Assembly.GetName().Version?.ToString() ?? "0.0.0";
 
     // ---- list value handling ----
+
+    /// <summary>
+    /// Best-effort one-line rejection reason so a refused client can show WHY instead of
+    /// observing a bare EOF (helps the standard-user-runs-the-GUI case).
+    /// </summary>
+    private void TryWriteRejection(NamedPipeServerStream pipe)
+    {
+        try
+        {
+            var response = IpcResponse.Fail(0, "Access denied: the WinGuard GUI must run with administrator privileges.");
+            var json = JsonSerializer.Serialize(response, IpcJson.Options) + "\n";
+            var bytes = Encoding.UTF8.GetBytes(json);
+            pipe.Write(bytes, 0, bytes.Length);
+            pipe.Flush();
+        }
+        catch (Exception)
+        {
+            // The client may already be gone; nothing to do.
+        }
+    }
 
     /// <summary>
     /// Validates and normalizes a whitelist/blacklist entry (single IP or CIDR). Rejects

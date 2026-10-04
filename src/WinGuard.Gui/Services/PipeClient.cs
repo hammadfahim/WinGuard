@@ -31,6 +31,11 @@ public sealed class PipeClient : IDisposable
     private volatile bool _isConnected;
     private bool _disposed;
 
+    // Backoff state: sessions that die within seconds (e.g. the service rejecting our
+    // identity) escalate the reconnect delay exponentially instead of hammering.
+    private int _rapidFailures;
+    private DateTime _connectedAtUtc;
+
     /// <summary>Raised whenever the connection state changes (true = connected).</summary>
     public event Action<bool>? StateChanged;
 
@@ -285,7 +290,10 @@ public sealed class PipeClient : IDisposable
 
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
+                // 2 s baseline, doubling per consecutive rapid failure up to 64 s.
+                var failures = Volatile.Read(ref _rapidFailures);
+                var delay = TimeSpan.FromSeconds(2 * Math.Pow(2, failures));
+                await Task.Delay(delay, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -302,8 +310,21 @@ public sealed class PipeClient : IDisposable
             changed = _isConnected != connected;
             _isConnected = connected;
 
-            if (!connected)
+            if (connected)
             {
+                _connectedAtUtc = DateTime.UtcNow;
+            }
+            else
+            {
+                if (changed)
+                {
+                    // A session that died within seconds counts as a rapid failure and
+                    // escalates the reconnect backoff; a healthy session resets it.
+                    _rapidFailures = (DateTime.UtcNow - _connectedAtUtc) < TimeSpan.FromSeconds(5)
+                        ? Math.Min(_rapidFailures + 1, 5)
+                        : 0;
+                }
+
                 DisposePipeLocked();
             }
         }

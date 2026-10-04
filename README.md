@@ -186,6 +186,11 @@ loopback are auto-whitelisted at startup to prevent self-lockout.
 - **List prefixes shorter than `/8` are rejected.** Whitelist/blacklist entries such as
   `0.0.0.0/0` (or any CIDR prefix `< 8`) are refused by the GUI/IPC as a self-lockout
   footgun; use an explicit range instead.
+- **The GUI requires administrator elevation.** It is an administrative console (like
+  `wf.msc`): the service pipe only accepts Administrators + LocalSystem, so the GUI
+  manifest requests elevation and Windows shows a UAC prompt at launch (a credential
+  prompt for standard-user sessions). Running it non-elevated would just show
+  "service not running".
 
 ## Command line
 
