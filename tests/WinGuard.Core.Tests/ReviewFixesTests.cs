@@ -53,15 +53,12 @@ public class ReviewFixesTests
         var path = Path.GetTempFileName();
         try
         {
-            File.WriteAllText(path, "aaaa
-");
+            File.WriteAllText(path, "aaaa\n");
             var tailer = new LogFileTailer();
             Assert.Empty(tailer.ReadNewLines(path)); // first sight: skip to end
 
             File.Delete(path);
-            File.WriteAllText(path, "bbbb
-cccc
-");
+            File.WriteAllText(path, "bbbb\ncccc\n");
             File.SetCreationTimeUtc(path, DateTime.UtcNow.AddMinutes(5));
 
             Assert.Equal(new[] { "bbbb", "cccc" }, tailer.ReadNewLines(path));
