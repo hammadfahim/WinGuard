@@ -229,4 +229,4 @@ begin
     if DeleteDataOnUninstall then
       DelTree(ExpandConstant('{commonappdata}\WinGuard'), True, True, True);
   end;
-end.
+end;
