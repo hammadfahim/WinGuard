@@ -47,6 +47,12 @@ public sealed class WindowsFirewall : IFirewall
     private readonly Func<WinGuardSettings>? _settingsAccessor;
     private readonly object _gate = new();
 
+    // Cached COM policy and rule batches (guarded by _gate). Block/Unblock reuse them instead of
+    // re-enumerating every firewall rule on each call; ListBlocked (housekeeping) refreshes them
+    // from the live firewall, and any failure drops them so the next call reloads.
+    private object? _policyCache;
+    private List<RuleBatch>? _batchCache;
+
     /// <summary>
     /// Creates the firewall wrapper.
     /// </summary>
@@ -80,8 +86,8 @@ public sealed class WindowsFirewall : IFirewall
         {
             try
             {
-                dynamic policy = CreatePolicy();
-                List<RuleBatch> batches = LoadBatches(policy);
+                dynamic policy = GetPolicy();
+                List<RuleBatch> batches = GetBatches(policy);
 
                 foreach (var batch in batches)
                 {
@@ -105,6 +111,7 @@ public sealed class WindowsFirewall : IFirewall
             }
             catch (Exception ex)
             {
+                InvalidateCache();
                 _logger.LogError(ex, "Failed to block {Ip} in the Windows firewall.", ip);
             }
         }
@@ -123,8 +130,8 @@ public sealed class WindowsFirewall : IFirewall
         {
             try
             {
-                dynamic policy = CreatePolicy();
-                List<RuleBatch> batches = LoadBatches(policy);
+                dynamic policy = GetPolicy();
+                List<RuleBatch> batches = GetBatches(policy);
 
                 RuleBatch? target = null;
                 foreach (var batch in batches)
@@ -147,6 +154,7 @@ public sealed class WindowsFirewall : IFirewall
                     DeleteRule(policy, RuleName(target.Index));
                     DeleteRule(policy, RuleName(target.Index, "TCP"));
                     DeleteRule(policy, RuleName(target.Index, "UDP"));
+                    batches.Remove(target); // its COM handles are dead; a later Block must create fresh rules
                     _logger.LogInformation("Unblocked {Ip}; firewall rule {Rule} is now empty and was removed.", normalized, RuleName(target.Index));
                 }
                 else
@@ -157,6 +165,7 @@ public sealed class WindowsFirewall : IFirewall
             }
             catch (Exception ex)
             {
+                InvalidateCache();
                 _logger.LogError(ex, "Failed to unblock {Ip} in the Windows firewall.", ip);
             }
         }
@@ -203,10 +212,13 @@ public sealed class WindowsFirewall : IFirewall
                     WriteBatch(policy, batch, ports);
                 }
 
+                _policyCache = policy;
+                _batchCache = batches;
                 _logger.LogInformation("Reconciled firewall rules: {Rules} rule(s) for {Addresses} active ban(s).", batches.Count, seen.Count);
             }
             catch (Exception ex)
             {
+                InvalidateCache();
                 _logger.LogError(ex, "Failed to synchronize WinGuard firewall rules.");
             }
         }
@@ -221,21 +233,18 @@ public sealed class WindowsFirewall : IFirewall
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
+                // Fresh read from the live firewall; also refreshes the cache (self-heals drift).
                 dynamic policy = CreatePolicy();
-                foreach (dynamic rule in policy.Rules)
+                var batches = LoadBatches(policy);
+                _policyCache = policy;
+                _batchCache = batches;
+                foreach (var batch in batches)
                 {
-                    string? name = SafeGet(() => (string?)rule.Name);
-                    if (!TryParseRuleName(name, out _, out _))
+                    foreach (var address in batch.Addresses)
                     {
-                        continue;
-                    }
-
-                    string? remote = SafeGet(() => (string?)rule.RemoteAddresses);
-                    foreach (var candidate in SplitAddresses(remote))
-                    {
-                        if (IpMatcher.TryNormalize(candidate, out var normalized) && seen.Add(normalized))
+                        if (seen.Add(address))
                         {
-                            results.Add(normalized);
+                            results.Add(address);
                         }
                     }
                 }
@@ -275,6 +284,8 @@ public sealed class WindowsFirewall : IFirewall
                 ClearAllLocked(policy);
 
                 List<RuleBatch> remaining = LoadBatches(policy);
+                _policyCache = policy;
+                _batchCache = remaining;
                 if (remaining.Count > 0)
                 {
                     error = $"{remaining.Count} WinGuard_Block_* rule(s) are still present after the clear attempt.";
@@ -285,6 +296,7 @@ public sealed class WindowsFirewall : IFirewall
             }
             catch (Exception ex)
             {
+                InvalidateCache();
                 error = ex.Message;
                 return false;
             }
@@ -340,6 +352,16 @@ public sealed class WindowsFirewall : IFirewall
     }
 
     // ---- rule plumbing ----
+
+    private dynamic GetPolicy() => _policyCache ??= CreatePolicy();
+
+    private List<RuleBatch> GetBatches(dynamic policy) => _batchCache ??= LoadBatches(policy);
+
+    private void InvalidateCache()
+    {
+        _policyCache = null;
+        _batchCache = null;
+    }
 
     private static dynamic CreatePolicy()
     {
