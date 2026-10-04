@@ -37,6 +37,13 @@ public interface IStore
     /// <summary>All bans that are permanent or not yet expired.</summary>
     Task<IReadOnlyList<BanEntry>> GetActiveBansAsync(CancellationToken ct = default);
 
+    /// <summary>
+    /// Non-permanent bans with ExpiresUtc &lt;= <paramref name="nowUtc"/> that are due for
+    /// auto-unblock. The caller supplies "now" so the engine's TimeProvider stays
+    /// authoritative — implementations must NOT pre-filter with the wall clock.
+    /// </summary>
+    Task<IReadOnlyList<BanEntry>> GetDueBansAsync(DateTime nowUtc, CancellationToken ct = default);
+
     Task UpsertBanAsync(BanEntry ban, CancellationToken ct = default);
 
     Task RemoveBanAsync(string ip, CancellationToken ct = default);

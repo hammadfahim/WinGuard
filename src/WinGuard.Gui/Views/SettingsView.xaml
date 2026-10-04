@@ -1,0 +1,234 @@
+<UserControl x:Class="WinGuard.Gui.Views.SettingsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:WinGuard.Gui.ViewModels">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24">
+        <StackPanel>
+            <DockPanel Margin="0,0,0,16">
+                <TextBlock DockPanel.Dock="Left" Text="Settings" FontSize="24" FontWeight="Bold" VerticalAlignment="Center" />
+                <Button DockPanel.Dock="Right" Content="Reset" HorizontalAlignment="Right" Command="{Binding ResetCommand}" />
+            </DockPanel>
+
+            <!-- General engine -->
+            <Border Style="{StaticResource CardBorderStyle}" Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock Text="Engine" Style="{StaticResource SectionHeaderStyle}" />
+                    <WrapPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Failed-login threshold" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding ThresholdText, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Count window (e.g. 00:10:00)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding CountWindowText, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Expire time (e.g. 1.00:00:00)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding ExpireTimeText, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Housekeeping interval (e.g. 00:00:15)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding HousekeepingText, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Max ban duration (e.g. 365.00:00:00)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding MaxBanDurationText, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Blocked ports (comma separated; empty = all)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding BlockedPortsText, UpdateSourceTrigger=PropertyChanged}"
+                                     ToolTip="Leave empty to block all ports. Example: 3389, 1433" />
+                        </StackPanel>
+                    </WrapPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                        <CheckBox Style="{StaticResource ToggleSwitch}" IsChecked="{Binding ClearBansOnStartup, Mode=TwoWay}" />
+                        <TextBlock Text="Clear all bans on service startup" Margin="10,0,24,0" VerticalAlignment="Center" />
+                        <CheckBox Style="{StaticResource ToggleSwitch}" IsChecked="{Binding ProcessInternalIPs, Mode=TwoWay}" />
+                        <TextBlock Text="Process internal / private IPs" Margin="10,0,0,0" VerticalAlignment="Center" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Ban tiers -->
+            <Border Style="{StaticResource CardBorderStyle}" Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock Text="Ban tiers (escalation)" Style="{StaticResource SectionHeaderStyle}" />
+                    <TextBlock Text="Duration for each successive offense. Format: d.hh:mm:ss or hh:mm:ss."
+                               Foreground="{DynamicResource SubtleForegroundBrush}" Margin="0,0,0,8" TextWrapping="Wrap" />
+                    <WrapPanel Margin="0,0,0,8">
+                        <Button Content="24h / 7d / 30d (default)" Command="{Binding PresetTiersDefaultCommand}" />
+                        <Button Content="24h only" Margin="6,0,0,0" Command="{Binding PresetTiers24hCommand}" />
+                        <Button Content="7d only" Margin="6,0,0,0" Command="{Binding PresetTiers7dCommand}" />
+                        <Button Content="30d only" Margin="6,0,0,0" Command="{Binding PresetTiers30dCommand}" />
+                        <Button Content="Add tier" Margin="6,0,0,0" Command="{Binding AddTierCommand}" />
+                    </WrapPanel>
+                    <ItemsControl ItemsSource="{Binding BanTiers}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="240" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}" />
+                                    <Button Grid.Column="1" Content="Remove" Margin="6,0,0,0"
+                                            Command="{Binding DataContext.RemoveTierCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+            <!-- RDP -->
+            <Border Style="{StaticResource CardBorderStyle}" Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock Text="RDP" Style="{StaticResource SectionHeaderStyle}" />
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                        <CheckBox Style="{StaticResource ToggleSwitch}" IsChecked="{Binding RdpEnabled, Mode=TwoWay}" />
+                        <TextBlock Text="Enabled" Margin="10,0,24,0" VerticalAlignment="Center" />
+                        <CheckBox Style="{StaticResource ToggleSwitch}" IsChecked="{Binding RdpUseRdpCoreTsFallback, Mode=TwoWay}" />
+                        <TextBlock Text="Use RdpCoreTS/Operational 140 fallback" Margin="10,0,0,0" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <WrapPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Threshold override (empty = global)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding RdpThresholdText, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Count window override (empty = global)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding RdpCountWindowText, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                    </WrapPanel>
+                    <TextBlock Text="Exclusion rules" FontWeight="SemiBold" Margin="0,4,0,2" />
+                    <TextBlock Text="One rule per row. Comma = AND, separate rows = OR, '*' wildcard, '!=' negation. Example: LogonType=2, IpAddress=127.0.0.1"
+                               Foreground="{DynamicResource SubtleForegroundBrush}" TextWrapping="Wrap" Margin="0,0,0,6" />
+                    <Button Content="Add rule" HorizontalAlignment="Left" Command="{Binding AddExclusionCommand}" Margin="0,0,0,6" />
+                    <ItemsControl ItemsSource="{Binding RdpExclusions}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}" />
+                                    <Button Grid.Column="1" Content="Remove" Margin="6,0,0,0"
+                                            Command="{Binding DataContext.RemoveExclusionCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+            <!-- MS SQL -->
+            <Border Style="{StaticResource CardBorderStyle}" Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock Text="MS SQL" Style="{StaticResource SectionHeaderStyle}" />
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                        <CheckBox Style="{StaticResource ToggleSwitch}" IsChecked="{Binding MsSqlEnabled, Mode=TwoWay}" />
+                        <TextBlock Text="Enabled" Margin="10,0,0,0" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <WrapPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Threshold override (empty = global)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding MsSqlThresholdText, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Count window override (empty = global)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding MsSqlCountWindowText, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                    </WrapPanel>
+                    <TextBlock Text="Ignore message patterns (literal substrings)" FontWeight="SemiBold" Margin="0,4,0,6" />
+                    <Button Content="Add pattern" HorizontalAlignment="Left" Command="{Binding AddIgnorePatternCommand}" Margin="0,0,0,6" />
+                    <ItemsControl ItemsSource="{Binding MsSqlIgnorePatterns}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}" />
+                                    <Button Grid.Column="1" Content="Remove" Margin="6,0,0,0"
+                                            Command="{Binding DataContext.RemoveIgnorePatternCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+
+            <!-- FTP -->
+            <Border Style="{StaticResource CardBorderStyle}" Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock Text="FTP" Style="{StaticResource SectionHeaderStyle}" />
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                        <CheckBox Style="{StaticResource ToggleSwitch}" IsChecked="{Binding FtpEnabled, Mode=TwoWay}" />
+                        <TextBlock Text="Enabled" Margin="10,0,0,0" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <WrapPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Threshold override (empty = global)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding FtpThresholdText, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Count window override (empty = global)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding FtpCountWindowText, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Poll interval (e.g. 00:00:03)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding FtpPollIntervalText, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                    </WrapPanel>
+                    <TextBlock Text="Log sources" FontWeight="SemiBold" Margin="0,4,0,6" />
+                    <DataGrid ItemsSource="{Binding FtpSources}" SelectedItem="{Binding SelectedFtpSource}" Height="180">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="170" />
+                            <DataGridComboBoxColumn Header="Kind" Width="130"
+                                                    ItemsSource="{x:Static local:SettingsViewModel.FtpKinds}"
+                                                    SelectedItemBinding="{Binding Kind, Mode=TwoWay}" />
+                            <DataGridTextColumn Header="Path" Binding="{Binding Path}" Width="*" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                        <Button Content="Add source" Command="{Binding AddFtpSourceCommand}" />
+                        <Button Content="Remove selected" Margin="6,0,0,0" Command="{Binding RemoveFtpSourceCommand}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Custom sources -->
+            <Border Style="{StaticResource CardBorderStyle}" Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock Text="Custom log sources" Style="{StaticResource SectionHeaderStyle}" />
+                    <TextBlock Text="Regex must contain a named group (?&lt;ipaddress&gt;...) and may contain (?&lt;username&gt;...)."
+                               Foreground="{DynamicResource SubtleForegroundBrush}" TextWrapping="Wrap" Margin="0,0,0,6" />
+                    <DataGrid ItemsSource="{Binding CustomSources}" SelectedItem="{Binding SelectedCustomSource}" Height="180">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="140" />
+                            <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding Enabled, Mode=TwoWay}" Width="70" />
+                            <DataGridTextColumn Header="Path / glob" Binding="{Binding PathGlob}" Width="200" />
+                            <DataGridTextColumn Header="Regex" Binding="{Binding Regex}" Width="*" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                        <Button Content="Add source" Command="{Binding AddCustomSourceCommand}" />
+                        <Button Content="Remove selected" Margin="6,0,0,0" Command="{Binding RemoveCustomSourceCommand}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Save -->
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                <Button Content="Save settings" Style="{StaticResource AccentButtonStyle}" Command="{Binding SaveCommand}" />
+            </StackPanel>
+            <TextBlock Text="{Binding StatusMessage}" Foreground="{DynamicResource SubtleForegroundBrush}" Margin="0,0,0,4" />
+            <TextBlock Text="{Binding ErrorMessage}" Foreground="{DynamicResource ErrorBrush}" TextWrapping="Wrap" />
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

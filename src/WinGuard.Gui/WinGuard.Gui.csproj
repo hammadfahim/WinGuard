@@ -14,6 +14,15 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
   </ItemGroup>
 
+  <!-- Both UseWPF and UseWindowsForms are on (WinForms only for the tray NotifyIcon).
+       WinForms contributes implicit usings for System.Windows.Forms/System.Drawing which
+       collide with WPF types (Application, UserControl, MessageBox...). Remove them and
+       reference the WinForms types with full names in TrayIconService. -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\WinGuard.Core\WinGuard.Core.csproj" />
   </ItemGroup>

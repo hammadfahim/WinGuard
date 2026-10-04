@@ -1,0 +1,25 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- WinGuard light theme brushes (PLAN.md §9). Keys are shared with Dark.xaml. -->
+
+    <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#FFF3F4F6" />
+    <SolidColorBrush x:Key="PanelBackgroundBrush" Color="#FFFFFFFF" />
+    <SolidColorBrush x:Key="CardBackgroundBrush" Color="#FFFFFFFF" />
+    <SolidColorBrush x:Key="ControlBackgroundBrush" Color="#FFFFFFFF" />
+    <SolidColorBrush x:Key="ForegroundBrush" Color="#FF1F2937" />
+    <SolidColorBrush x:Key="SubtleForegroundBrush" Color="#FF6B7280" />
+    <SolidColorBrush x:Key="BorderBrush" Color="#FFD1D5DB" />
+    <SolidColorBrush x:Key="AccentBrush" Color="#FF2563EB" />
+    <SolidColorBrush x:Key="AccentForegroundBrush" Color="#FFFFFFFF" />
+    <SolidColorBrush x:Key="SuccessBrush" Color="#FF16A34A" />
+    <SolidColorBrush x:Key="WarningBrush" Color="#FFD97706" />
+    <SolidColorBrush x:Key="ErrorBrush" Color="#FFDC2626" />
+    <SolidColorBrush x:Key="InfoBrush" Color="#FF2563EB" />
+    <SolidColorBrush x:Key="HoverBackgroundBrush" Color="#FFE5E7EB" />
+    <SolidColorBrush x:Key="SelectedBackgroundBrush" Color="#FFDBEAFE" />
+    <SolidColorBrush x:Key="ControlTrackBrush" Color="#FFD1D5DB" />
+    <SolidColorBrush x:Key="OnAccentForegroundBrush" Color="#FFFFFFFF" />
+    <SolidColorBrush x:Key="WarningForegroundBrush" Color="#FF1F2937" />
+
+</ResourceDictionary>

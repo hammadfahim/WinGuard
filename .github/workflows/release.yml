@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write            # needed to create the release
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Compute version
+        id: ver
+        shell: bash
+        run: echo "v=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish service
+        run: dotnet publish src/WinGuard.Service/WinGuard.Service.csproj -c Release -r win-x64
+             -p:PublishSingleFile=true -p:SelfContained=true
+             -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false
+             -p:Version=${{ steps.ver.outputs.v }} -o publish/service
+
+      - name: Publish GUI
+        run: dotnet publish src/WinGuard.Gui/WinGuard.Gui.csproj -c Release -r win-x64
+             -p:PublishSingleFile=true -p:SelfContained=true -p:PublishTrimmed=false
+             -p:Version=${{ steps.ver.outputs.v }} -o publish/gui
+
+      - name: Stage installer inputs
+        shell: pwsh
+        run: |
+          New-Item -Type Directory dist -Force | Out-Null
+          Copy-Item publish/service/winguard-svc.exe dist/
+          Copy-Item publish/gui/winguard-gui.exe dist/
+          Copy-Item src/WinGuard.Service/appsettings.json dist/
+          Copy-Item installer/assets/* dist/ -Recurse
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          & "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion=${{ steps.ver.outputs.v }} installer/winguard.iss
+        # Inno Setup 6 is preinstalled on windows-latest runners.
+        # Fallback if a future image drops it:
+        #   winget install --id JRSoftware.InnoSetup -e -h
+        #   or: uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
+
+      - name: Also zip portable EXEs
+        shell: pwsh
+        run: Compress-Archive -Path publish/service/*,publish/gui/* -DestinationPath dist/WinGuard-portable-win-x64.zip
+
+      - name: Create GitHub Release + upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer/Output/WinGuard-Setup-*.exe
+            dist/WinGuard-portable-win-x64.zip

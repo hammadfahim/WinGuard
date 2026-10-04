@@ -1,0 +1,75 @@
+<UserControl x:Class="WinGuard.Gui.Views.ListsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <DockPanel Grid.Row="0" Margin="0,0,0,12">
+            <TextBlock DockPanel.Dock="Left" Text="Lists" FontSize="24" FontWeight="Bold" VerticalAlignment="Center" />
+            <Button DockPanel.Dock="Right" Content="Refresh" HorizontalAlignment="Right" Command="{Binding RefreshCommand}" />
+        </DockPanel>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="16" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Whitelist -->
+            <Border Grid.Column="0" Style="{StaticResource CardBorderStyle}">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="Whitelist" Style="{StaticResource SectionHeaderStyle}" />
+                    <TextBlock DockPanel.Dock="Top" Text="Never blocked; always wins over the blacklist and any ban."
+                               TextWrapping="Wrap" Foreground="{DynamicResource SubtleForegroundBrush}" Margin="0,0,0,8" />
+                    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+                        <Button DockPanel.Dock="Right" Content="Add" Margin="6,0,0,0" Command="{Binding AddWhitelistCommand}" />
+                        <TextBox Text="{Binding NewWhitelistValue, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="IP or CIDR, e.g. 203.0.113.7 or 10.0.0.0/8" />
+                    </DockPanel>
+                    <Button DockPanel.Dock="Bottom" Content="Remove selected" Margin="0,8,0,0"
+                            Command="{Binding RemoveWhitelistCommand}" CommandParameter="{Binding SelectedWhitelistEntry}" />
+                    <ListBox ItemsSource="{Binding Whitelist}" SelectedItem="{Binding SelectedWhitelistEntry}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding Value}" FontFamily="Consolas" />
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </DockPanel>
+            </Border>
+
+            <!-- Blacklist -->
+            <Border Grid.Column="2" Style="{StaticResource CardBorderStyle}">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="Blacklist" Style="{StaticResource SectionHeaderStyle}" />
+                    <TextBlock DockPanel.Dock="Top" Text="Always banned (permanent). Use for known-bad addresses."
+                               TextWrapping="Wrap" Foreground="{DynamicResource SubtleForegroundBrush}" Margin="0,0,0,8" />
+                    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+                        <Button DockPanel.Dock="Right" Content="Add" Margin="6,0,0,0" Command="{Binding AddBlacklistCommand}" />
+                        <TextBox Text="{Binding NewBlacklistValue, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="IP or CIDR, e.g. 203.0.113.7 or 10.0.0.0/8" />
+                    </DockPanel>
+                    <Button DockPanel.Dock="Bottom" Content="Remove selected" Margin="0,8,0,0"
+                            Command="{Binding RemoveBlacklistCommand}" CommandParameter="{Binding SelectedBlacklistEntry}" />
+                    <ListBox ItemsSource="{Binding Blacklist}" SelectedItem="{Binding SelectedBlacklistEntry}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding Value}" FontFamily="Consolas" />
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </DockPanel>
+            </Border>
+        </Grid>
+
+        <StackPanel Grid.Row="2" Margin="0,10,0,0">
+            <TextBlock Text="{Binding StatusMessage}" Foreground="{DynamicResource SubtleForegroundBrush}" />
+            <TextBlock Text="{Binding ErrorMessage}" Foreground="{DynamicResource ErrorBrush}" TextWrapping="Wrap" />
+        </StackPanel>
+    </Grid>
+</UserControl>
