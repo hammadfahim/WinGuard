@@ -85,12 +85,7 @@ public sealed class MsSqlDetector : IDetector
     /// <inheritdoc />
     public Task StartAsync(Channel<FailedLogin> sink, CancellationToken ct)
     {
-        if (!_settingsAccessor().MsSql.Enabled)
-        {
-            _logger.LogInformation("MS SQL 18456 detector is disabled by settings.");
-            return Task.CompletedTask;
-        }
-
+        // Subscribe regardless of Enabled: OnEventRecord honors the live flag per event.
         var watcher = TrySubscribe(SubscriptionXPath, sink, tolerateQueryErrors: false, "provider-filtered");
         if (watcher is null)
         {

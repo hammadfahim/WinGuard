@@ -43,6 +43,10 @@ public sealed class BanEngine
     // Recent RDP failures per IP for detector-aware 4625/140 de-dup (accessed under _gate).
     private readonly Dictionary<string, List<(string? Detector, DateTime TimestampUtc)>> _recentRdp = new(StringComparer.Ordinal);
 
+    // Per-IP throttle for "SKIPPED" events so an attack on a banned IP cannot flood the events table.
+    private static readonly TimeSpan SkipEventInterval = TimeSpan.FromMinutes(5);
+    private readonly Dictionary<string, DateTime> _lastSkipEventUtc = new(StringComparer.Ordinal);
+
     private IpMatcher _matcher = new(Array.Empty<string>(), Array.Empty<string>());
     private bool _listsLoaded;
 
@@ -473,6 +477,7 @@ public sealed class BanEngine
         if (_matcher.IsWhitelisted(ip))
         {
             _logger.LogDebug("Skipping whitelisted IP {Ip}.", ip);
+            if (ShouldRecordSkip("w:" + ip))
             await TryAddEventAsync(new LogEvent
             {
                 TimestampUtc = NowUtc(),
@@ -536,6 +541,7 @@ public sealed class BanEngine
         if (current is not null && (current.IsPermanent || current.ExpiresUtc > now))
         {
             _logger.LogDebug("IP {Ip} is already banned; ignoring attempt.", ip);
+            if (ShouldRecordSkip("b:" + ip))
             await TryAddEventAsync(new LogEvent
             {
                 TimestampUtc = now,
@@ -937,6 +943,23 @@ public sealed class BanEngine
             IpAddress = ip,
             Message = message,
         }, ct).ConfigureAwait(false);
+    }
+
+    private bool ShouldRecordSkip(string key)
+    {
+        var now = NowUtc();
+        if (_lastSkipEventUtc.TryGetValue(key, out var last) && now - last < SkipEventInterval)
+        {
+            return false;
+        }
+
+        if (_lastSkipEventUtc.Count > 10_000)
+        {
+            _lastSkipEventUtc.Clear();
+        }
+
+        _lastSkipEventUtc[key] = now;
+        return true;
     }
 
     private DateTime NowUtc() => _timeProvider.GetUtcNow().UtcDateTime;
