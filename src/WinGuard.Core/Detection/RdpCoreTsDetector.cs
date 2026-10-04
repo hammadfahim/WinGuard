@@ -64,13 +64,7 @@ public sealed class RdpCoreTsDetector : IDetector
     /// <inheritdoc />
     public Task StartAsync(Channel<FailedLogin> sink, CancellationToken ct)
     {
-        var settings = _settingsAccessor();
-        if (!settings.Rdp.Enabled || !settings.Rdp.UseRdpCoreTsFallback)
-        {
-            _logger.LogInformation("RdpCoreTS 140 fallback detector is disabled by settings.");
-            return Task.CompletedTask;
-        }
-
+        // Subscribe regardless of settings: OnEventRecord honors the live flags per event.
         try
         {
             var query = new EventLogQuery(ChannelName, PathType.LogName, SubscriptionXPath)

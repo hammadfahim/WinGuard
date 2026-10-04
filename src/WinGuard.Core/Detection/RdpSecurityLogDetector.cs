@@ -64,12 +64,8 @@ public sealed class RdpSecurityLogDetector : IDetector
     /// <inheritdoc />
     public Task StartAsync(Channel<FailedLogin> sink, CancellationToken ct)
     {
-        if (!_settingsAccessor().Rdp.Enabled)
-        {
-            _logger.LogInformation("RDP Security 4625 detector is disabled by settings.");
-            return Task.CompletedTask;
-        }
-
+        // Subscribe regardless of Enabled: OnEventRecord honors the live flag per event,
+        // so enabling RDP in the GUI works without a service restart.
         try
         {
             var query = new EventLogQuery(ChannelName, PathType.LogName, SubscriptionXPath)

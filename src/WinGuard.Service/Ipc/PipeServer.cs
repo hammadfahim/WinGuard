@@ -423,6 +423,18 @@ public sealed class PipeServer : BackgroundService
         {
             await _engine.UnbanAsync(ip, ct).ConfigureAwait(false);
         }
+        else
+        {
+            // CIDR range: unban every active ban that falls inside it.
+            var range = new IpMatcher([value], []);
+            foreach (var ban in await _store.GetActiveBansAsync(ct).ConfigureAwait(false))
+            {
+                if (range.IsWhitelisted(ban.IpAddress))
+                {
+                    await _engine.UnbanAsync(ban.IpAddress, ct).ConfigureAwait(false);
+                }
+            }
+        }
 
         return IpcResponse.Success(request.Id, null);
     }

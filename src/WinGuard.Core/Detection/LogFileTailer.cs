@@ -84,6 +84,17 @@ public sealed class LogFileTailer
                     FileShare.ReadWrite | FileShare.Delete);
 
                 var length = stream.Length;
+                var created = File.GetCreationTimeUtc(path);
+                if (cursor.Initialized && cursor.CreatedUtc != created)
+                {
+                    // Replaced by a new file (rotation) that may already be as large as the old
+                    // one, so the shrink check below would miss it: re-read from the start.
+                    cursor.Offset = 0;
+                    cursor.Pending = string.Empty;
+                    cursor.Decoder.Reset();
+                }
+
+                cursor.CreatedUtc = created;
                 if (!cursor.Initialized)
                 {
                     cursor.Initialized = true;
@@ -251,5 +262,6 @@ public sealed class LogFileTailer
         public long Offset;
         public string Pending = string.Empty;
         public bool Initialized;
+        public DateTime CreatedUtc;
     }
 }

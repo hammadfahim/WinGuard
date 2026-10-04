@@ -46,4 +46,29 @@ public class ReviewFixesTests
             File.Delete(path);
         }
     }
+
+    [Fact]
+    public void Tailer_detects_rotation_to_an_equal_or_larger_file()
+    {
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(path, "aaaa
+");
+            var tailer = new LogFileTailer();
+            Assert.Empty(tailer.ReadNewLines(path)); // first sight: skip to end
+
+            File.Delete(path);
+            File.WriteAllText(path, "bbbb
+cccc
+");
+            File.SetCreationTimeUtc(path, DateTime.UtcNow.AddMinutes(5));
+
+            Assert.Equal(new[] { "bbbb", "cccc" }, tailer.ReadNewLines(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
 }
