@@ -11,6 +11,9 @@ public enum LogEventLevel
 /// <summary>One entry of the WinGuard event feed shown in the GUI.</summary>
 public sealed class LogEvent
 {
+    /// <summary>Store-assigned monotonically increasing id (0 for events not yet persisted).</summary>
+    public long Id { get; set; }
+
     public DateTime TimestampUtc { get; set; }
 
     public LogEventLevel Level { get; set; } = LogEventLevel.Info;
