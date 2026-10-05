@@ -524,7 +524,7 @@ public sealed partial class PipeServer : BackgroundService
 
     private static string NameFor(ProtocolSource source) => source switch
     {
-        ProtocolSource.Rdp => "RDP",
+        ProtocolSource.Rdp => "RDP / logon",
         ProtocolSource.MsSql => "MS SQL",
         ProtocolSource.Ftp => "FTP",
         ProtocolSource.Custom => "Custom",
