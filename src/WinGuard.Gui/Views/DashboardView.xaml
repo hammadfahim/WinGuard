@@ -56,8 +56,9 @@
                         </StackPanel>
 
                         <StackPanel Visibility="{Binding IsConnected, Converter={StaticResource InverseBoolToVis}}">
-                            <TextBlock Text="The WinGuard service is not running. Start it to begin protection."
-                                       TextWrapping="Wrap" Margin="0,0,0,10" />
+                            <TextBlock Text="{Binding DisconnectedText}" TextWrapping="Wrap" Margin="0,0,0,4" />
+                            <TextBlock Text="{Binding ConnectionProblem}" TextWrapping="Wrap" Margin="0,0,0,10"
+                                       Foreground="{DynamicResource ErrorBrush}" />
                             <Button Content="Start service" Style="{StaticResource AccentButtonStyle}"
                                     HorizontalAlignment="Left" Command="{Binding StartServiceCommand}" />
                         </StackPanel>

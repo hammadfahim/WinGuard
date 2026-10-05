@@ -52,6 +52,15 @@ public sealed partial class DashboardViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(ConnectionText))]
     private bool _isConnected;
 
+    /// <summary>
+    /// Why the service cannot be used although it is running (for example: it refused this
+    /// console). Empty when the service is simply not running, or when everything is fine.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ConnectionText))]
+    [NotifyPropertyChangedFor(nameof(DisconnectedText))]
+    private string _connectionProblem = string.Empty;
+
     /// <summary>Whether any prerequisite warnings exist.</summary>
     [ObservableProperty]
     private bool _hasWarnings;
@@ -77,7 +86,14 @@ public sealed partial class DashboardViewModel : ObservableObject
     private string _serviceActionMessage = string.Empty;
 
     /// <summary>Pill caption.</summary>
-    public string ConnectionText => IsConnected ? "Connected" : "Service not running";
+    public string ConnectionText => IsConnected
+        ? "Connected"
+        : string.IsNullOrEmpty(ConnectionProblem) ? "Service not running" : "Not connected";
+
+    /// <summary>Explanation shown while disconnected.</summary>
+    public string DisconnectedText => string.IsNullOrEmpty(ConnectionProblem)
+        ? "The WinGuard service is not running. Start it to begin protection."
+        : "The WinGuard service is running, but this console cannot use it:";
 
     /// <summary>Applies a fresh status snapshot to the tiles and header.</summary>
     /// <param name="status">Status from the service.</param>
@@ -163,10 +179,21 @@ public sealed partial class DashboardViewModel : ObservableObject
                 return process.HasExited ? process.ExitCode : 0;
             });
 
+            if (exitCode is 0 or 1056)
+            {
+                // Do not make the user wait for the background retry loop.
+                await Task.Delay(1500);
+                if (await _client.TryReconnectNowAsync())
+                {
+                    ServiceActionMessage = "Connected to the service.";
+                    return;
+                }
+            }
+
             ServiceActionMessage = exitCode switch
             {
                 0 => "Service start requested; it connects within a few seconds.",
-                1056 => "The service is already running.",
+                1056 => "The service is already running. If this console still cannot connect, the reason is shown above; the service log is in %ProgramData%\\WinGuard\\Logs.",
                 1060 => "The WinGuard service is not installed. Run the installer, or winguard-svc.exe --install.",
                 _ => $"The service could not be started (sc.exe exit code {exitCode}).",
             };
