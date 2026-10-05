@@ -194,6 +194,7 @@ internal static class Program
                 sp.GetRequiredService<ILogger<CustomLogDetector>>(),
                 sp.GetRequiredService<TimeProvider>()));
 
+        builder.Services.AddSingleton<IpcRequestHandler>();
         builder.Services.AddHostedService<GuardWorker>();
         builder.Services.AddHostedService<PipeServer>();
     }

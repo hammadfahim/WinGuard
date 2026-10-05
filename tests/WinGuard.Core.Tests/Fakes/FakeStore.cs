@@ -291,6 +291,7 @@ public sealed class FakeStore : IStore
 
     private static LogEvent Clone(LogEvent source) => new()
     {
+        Id = source.Id,
         TimestampUtc = source.TimestampUtc,
         Level = source.Level,
         Source = source.Source,

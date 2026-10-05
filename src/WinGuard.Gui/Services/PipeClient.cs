@@ -1,5 +1,6 @@
 using System.IO;
 using System.IO.Pipes;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using WinGuard.Core.Config;
@@ -43,8 +44,21 @@ public sealed class PipeClient : IDisposable
     /// <summary>Raised whenever the connection state changes (true = connected).</summary>
     public event Action<bool>? StateChanged;
 
-    /// <summary>True while a pipe connection is established.</summary>
+    /// <summary>
+    /// True once the service has answered a request on the current connection — an open pipe alone
+    /// does not count, because the service may still refuse the caller.
+    /// </summary>
     public bool IsConnected => _isConnected;
+
+    /// <summary>
+    /// Why the service cannot be used although it is there (it refused this caller, or Windows
+    /// denied access to its pipe). Null when there is no such problem — including when the service
+    /// is simply not running.
+    /// </summary>
+    public string? LastProblem { get; private set; }
+
+    /// <summary>Raised when <see cref="LastProblem"/> changes.</summary>
+    public event Action<string?>? ProblemChanged;
 
     /// <summary>Starts the background connect/retry loop.</summary>
     public void Start()
@@ -96,6 +110,12 @@ public sealed class PipeClient : IDisposable
 
                 response = JsonSerializer.Deserialize<IpcResponse>(line, IpcJson.Options)
                     ?? throw new IOException("Malformed response from the WinGuard service.");
+
+                // One request, one response, in order: anything else means the stream is out of step.
+                if (response.Id != request.Id)
+                {
+                    throw new IOException("Out-of-sequence response from the WinGuard service.");
+                }
             }
             catch (Exception)
             {
@@ -115,6 +135,32 @@ public sealed class PipeClient : IDisposable
         finally
         {
             _requestLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Tries to connect right now instead of waiting for the retry loop (for example just after the
+    /// user started the service). Returns whether the service is connected afterwards.
+    /// </summary>
+    public async Task<bool> TryReconnectNowAsync(CancellationToken ct = default)
+    {
+        if (IsConnected)
+        {
+            return true;
+        }
+
+        lock (_stateLock)
+        {
+            _rapidFailures = 0;
+        }
+
+        try
+        {
+            return await TryConnectAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
+        {
+            return false;
         }
     }
 
@@ -247,19 +293,38 @@ public sealed class PipeClient : IDisposable
                 return true;
             }
 
+            // Identification: the service may look at who we are (it only accepts administrators)
+            // but cannot act as us. Asking for a level also fixes our identity at connect time,
+            // which is what lets the service identify us before we have sent anything.
             var pipe = new NamedPipeClientStream(
                 ".",
                 PipeConstants.PipeName,
                 PipeDirection.InOut,
-                PipeOptions.Asynchronous);
+                PipeOptions.Asynchronous,
+                TokenImpersonationLevel.Identification);
 
             try
             {
                 await pipe.ConnectAsync(500, ct).ConfigureAwait(false);
             }
-            catch (Exception)
+            catch (UnauthorizedAccessException)
             {
                 pipe.Dispose();
+                SetProblem("Windows denied access to the WinGuard service. This console must be run as an administrator.");
+                NoteFailedAttempt();
+                return false;
+            }
+            catch (Exception)
+            {
+                // No pipe: the service is not running. That is not a "problem" to explain, and
+                // there is nothing to back off from — notice quickly when it comes up.
+                pipe.Dispose();
+                SetProblem(null);
+                lock (_stateLock)
+                {
+                    _rapidFailures = 0;
+                }
+
                 return false;
             }
 
@@ -270,6 +335,20 @@ public sealed class PipeClient : IDisposable
                 NewLine = "\n",
             };
 
+            // Handshake: the connection only counts once the service has answered. A service that
+            // refuses this caller answers with a reason and closes the pipe; reporting "connected"
+            // before knowing that would make the window flicker and start loads that cannot work.
+            var problem = await HandshakeAsync(reader, writer, ct).ConfigureAwait(false);
+            if (problem is not null)
+            {
+                reader.Dispose();
+                writer.Dispose();
+                pipe.Dispose();
+                SetProblem(problem);
+                NoteFailedAttempt();
+                return false;
+            }
+
             lock (_stateLock)
             {
                 _pipe = pipe;
@@ -277,12 +356,88 @@ public sealed class PipeClient : IDisposable
                 _writer = writer;
             }
 
+            SetProblem(null);
             SetConnected(true);
             return true;
         }
         finally
         {
             _connectLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Sends one status request on a freshly opened pipe. Returns null when the service answered
+    /// it, otherwise the reason the service cannot be used.
+    /// </summary>
+    private async Task<string?> HandshakeAsync(StreamReader reader, StreamWriter writer, CancellationToken ct)
+    {
+        var probe = new IpcRequest { Id = Interlocked.Increment(ref _nextId), Method = IpcMethods.GetStatus };
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(RequestTimeout);
+
+        string? line;
+        try
+        {
+            await writer.WriteLineAsync(JsonSerializer.Serialize(probe, IpcJson.Options).AsMemory(), timeout.Token).ConfigureAwait(false);
+            line = await reader.ReadLineAsync(timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException)
+        {
+            return "The WinGuard service is running but did not answer this console.";
+        }
+
+        if (line is null)
+        {
+            return "The WinGuard service closed the connection without answering.";
+        }
+
+        IpcResponse? response;
+        try
+        {
+            response = JsonSerializer.Deserialize<IpcResponse>(line, IpcJson.Options);
+        }
+        catch (JsonException)
+        {
+            response = null;
+        }
+
+        if (response is null)
+        {
+            return "The WinGuard service sent an answer this console does not understand. Reinstall so both are the same version.";
+        }
+
+        // A refusal is not an answer to our request (it carries id 0): it is the service telling
+        // every unauthorized caller why it is about to hang up.
+        if (!response.Ok && response.Id != probe.Id)
+        {
+            return response.Error ?? "The WinGuard service refused this console.";
+        }
+
+        return null;
+    }
+
+    private void SetProblem(string? problem)
+    {
+        if (string.Equals(LastProblem, problem, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        LastProblem = problem;
+        ProblemChanged?.Invoke(problem);
+    }
+
+    /// <summary>A connection that was opened but could not be used also slows the retry loop down.</summary>
+    private void NoteFailedAttempt()
+    {
+        lock (_stateLock)
+        {
+            _rapidFailures = Math.Min(_rapidFailures + 1, 5);
         }
     }
 

@@ -64,6 +64,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         Dashboard.SettingsChanged += () => _ = Settings.LoadAsync();
 
         _client.StateChanged += OnClientStateChanged;
+        _client.ProblemChanged += OnClientProblemChanged;
+        Dashboard.ConnectionProblem = client.LastProblem ?? string.Empty;
 
         // The client may already be connected: the event for that connection was raised before we
         // subscribed, so run the on-connect work (load settings, lists, prerequisites) now.
@@ -122,6 +124,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public void Dispose()
     {
         _client.StateChanged -= OnClientStateChanged;
+        _client.ProblemChanged -= OnClientProblemChanged;
         _poller.Dispose();
     }
 
@@ -152,6 +155,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     private int _handlingConnection;
     private bool _reloadRequested;
+
+    private void OnClientProblemChanged(string? problem) =>
+        _dispatcher.InvokeAsync(() => Dashboard.ConnectionProblem = problem ?? string.Empty);
 
     private void OnClientStateChanged(bool connected) =>
         _dispatcher.InvokeAsync(() => _ = HandleConnectionChangedAsync(connected));

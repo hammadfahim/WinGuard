@@ -18,6 +18,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\WinGuard.Core\WinGuard.Core.csproj" />
+    <!-- The request handler lives in the service host; its tests need no pipe and no admin rights. -->
+    <ProjectReference Include="..\..\src\WinGuard.Service\WinGuard.Service.csproj" />
   </ItemGroup>
 
   <!-- Sample log/event fixtures used by parser tests are copied next to the test assembly. -->

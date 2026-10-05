@@ -19,7 +19,7 @@ using WinGuard.Core.Model;
 namespace WinGuard.Service.Ipc;
 
 /// <summary>Prerequisite checks (audit policy, firewall service, event channels) for the CheckPrereqs IPC call.</summary>
-public sealed partial class PipeServer
+public sealed partial class IpcRequestHandler
 {
     // ---- prerequisites ----
 
