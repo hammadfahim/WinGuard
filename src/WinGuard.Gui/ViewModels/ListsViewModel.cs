@@ -55,6 +55,13 @@ public sealed partial class ListsViewModel : ObservableObject
         try
         {
             var entries = await _client.ListListsAsync();
+            if (entries is null)
+            {
+                // Keep what is shown: an unanswered request is not an empty list.
+                ErrorMessage = "The lists could not be loaded: the service is not responding.";
+                return;
+            }
+
             Whitelist.Clear();
             Blacklist.Clear();
             foreach (var entry in entries)

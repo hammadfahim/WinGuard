@@ -2,7 +2,7 @@ namespace WinGuard.Core.Model;
 
 /// <summary>
 /// A single failed login observed by one of the detectors.
-/// Immutable; created by detectors, consumed by the BanEngine.
+/// Created by detectors, consumed (and normalized in place) by the BanEngine.
 /// </summary>
 public sealed class FailedLogin
 {
@@ -26,6 +26,12 @@ public sealed class FailedLogin
     /// <summary>When the failure happened, in UTC.</summary>
     public DateTime TimestampUtc { get; set; }
 
-    /// <summary>The matched raw log/event text, for the GUI event feed and the DB.</summary>
+    /// <summary>
+    /// True when an exclusion rule matched this failure. It is still sent to the engine so the
+    /// counterpart event from the other RDP detector can be dropped as well; it is never counted.
+    /// </summary>
+    public bool IsExcluded { get; set; }
+
+    /// <summary>The matched raw log/event text, for diagnostics. Not persisted.</summary>
     public string RawLog { get; set; } = string.Empty;
 }

@@ -42,9 +42,10 @@ public sealed class TrayIconService : IDisposable
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(exitItem);
 
+        // Grey until the first connection is confirmed.
         _notifyIcon = new NotifyIcon
         {
-            Icon = _icon,
+            Icon = _offlineIcon,
             Visible = true,
             Text = "WinGuard - connecting...",
             ContextMenuStrip = menu,

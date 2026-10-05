@@ -43,7 +43,7 @@
                                     </Style.Triggers>
                                 </Style>
                             </Border.Style>
-                            <TextBlock Text="{Binding ConnectionText}" Foreground="White" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding ConnectionText}" Foreground="{DynamicResource OnAccentForegroundBrush}" FontWeight="SemiBold" />
                         </Border>
                     </StackPanel>
 
@@ -58,10 +58,12 @@
                         <StackPanel Visibility="{Binding IsConnected, Converter={StaticResource InverseBoolToVis}}">
                             <TextBlock Text="The WinGuard service is not running. Start it to begin protection."
                                        TextWrapping="Wrap" Margin="0,0,0,10" />
-                            <Button Content="Start service (elevated)" Style="{StaticResource AccentButtonStyle}"
+                            <Button Content="Start service" Style="{StaticResource AccentButtonStyle}"
                                     HorizontalAlignment="Left" Command="{Binding StartServiceCommand}" />
                         </StackPanel>
 
+                        <TextBlock Text="{Binding VersionMismatchText}" TextWrapping="Wrap"
+                                   Foreground="{DynamicResource ErrorBrush}" Margin="0,6,0,0" />
                         <TextBlock Text="{Binding ServiceActionMessage}" TextWrapping="Wrap"
                                    Foreground="{DynamicResource SubtleForegroundBrush}" Margin="0,8,0,0" />
                     </StackPanel>
@@ -131,7 +133,7 @@
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="170" />
                                         <ColumnDefinition Width="80" />
-                                        <ColumnDefinition Width="90" />
+                                        <ColumnDefinition Width="100" />
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
                                     <TextBlock Grid.Column="0" Text="{Binding TimeText}"

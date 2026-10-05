@@ -17,7 +17,7 @@ public sealed class BanRowViewModel
     public string IpAddress => Dto.IpAddress;
 
     /// <summary>Protocol that triggered the ban.</summary>
-    public string SourceText => Dto.Source.ToString();
+    public string SourceText => SourceLabels.For(Dto.Source);
 
     /// <summary>Ban creation time in local time.</summary>
     public string BannedText => ToLocalText(Dto.BannedAtUtc);

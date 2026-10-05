@@ -1,4 +1,8 @@
 using System.Collections.ObjectModel;
+using System.IO;
+using System.Text;
+using Microsoft.Win32;
+using WinGuard.Gui.Services;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using WinGuard.Gui.Collections;
@@ -25,7 +29,16 @@ public sealed partial class EventLogViewModel : ObservableObject
     public ObservableCollection<string> LevelFilters { get; } = ["All", "Info", "Warning", "Error"];
 
     /// <summary>Available source filter options.</summary>
-    public ObservableCollection<string> SourceFilters { get; } = ["All", "RDP", "MS SQL", "FTP", "Custom"];
+    public ObservableCollection<string> SourceFilters { get; } =
+        ["All", SourceLabels.Rdp, SourceLabels.MsSql, SourceLabels.Ftp, SourceLabels.Custom];
+
+    /// <summary>Case-insensitive text filter over the IP and the message.</summary>
+    [ObservableProperty]
+    private string _searchText = string.Empty;
+
+    /// <summary>Result of the last export.</summary>
+    [ObservableProperty]
+    private string _statusMessage = string.Empty;
 
     /// <summary>Selected level filter.</summary>
     [ObservableProperty]
@@ -90,6 +103,52 @@ public sealed partial class EventLogViewModel : ObservableObject
 
     partial void OnSelectedSourceFilterChanged(string value) => Rebuild();
 
+    partial void OnSearchTextChanged(string value) => Rebuild();
+
+    /// <summary>Exports the rows currently shown to a UTF-8 CSV file.</summary>
+    [RelayCommand]
+    private void ExportCsv()
+    {
+        if (Events.Count == 0)
+        {
+            StatusMessage = "Nothing to export.";
+            return;
+        }
+
+        var dialog = new SaveFileDialog
+        {
+            Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
+            FileName = "winguard-events.csv",
+            Title = "Export events",
+        };
+
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        try
+        {
+            var builder = new StringBuilder();
+            builder.AppendLine("Time(local),Level,Source,IP,Message");
+            foreach (var row in Events)
+            {
+                builder.Append(CsvText.Escape(row.TimeText)).Append(',');
+                builder.Append(CsvText.Escape(row.LevelText)).Append(',');
+                builder.Append(CsvText.Escape(row.SourceText)).Append(',');
+                builder.Append(CsvText.Escape(row.IpAddress)).Append(',');
+                builder.Append(CsvText.Escape(row.Message)).AppendLine();
+            }
+
+            File.WriteAllText(dialog.FileName, builder.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+            StatusMessage = $"Exported {Events.Count} event(s) to {dialog.FileName}.";
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = "Export failed: " + ex.Message;
+        }
+    }
+
     /// <summary>Clears the in-memory feed (the service history is unaffected).</summary>
     [RelayCommand]
     private void Clear()
@@ -115,6 +174,14 @@ public sealed partial class EventLogViewModel : ObservableObject
         }
 
         if (SelectedSourceFilter != "All" && row.SourceText != SelectedSourceFilter)
+        {
+            return false;
+        }
+
+        var search = SearchText?.Trim();
+        if (!string.IsNullOrEmpty(search)
+            && !row.Message.Contains(search, StringComparison.OrdinalIgnoreCase)
+            && !row.IpAddress.Contains(search, StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }

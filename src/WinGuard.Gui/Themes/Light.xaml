@@ -18,6 +18,7 @@
     <SolidColorBrush x:Key="InfoBrush" Color="#FF2563EB" />
     <SolidColorBrush x:Key="HoverBackgroundBrush" Color="#FFE5E7EB" />
     <SolidColorBrush x:Key="SelectedBackgroundBrush" Color="#FFDBEAFE" />
+    <SolidColorBrush x:Key="SelectedForegroundBrush" Color="#FF1F2937" />
     <SolidColorBrush x:Key="ControlTrackBrush" Color="#FFD1D5DB" />
     <SolidColorBrush x:Key="OnAccentForegroundBrush" Color="#FFFFFFFF" />
     <SolidColorBrush x:Key="WarningForegroundBrush" Color="#FF1F2937" />

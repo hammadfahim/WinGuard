@@ -19,7 +19,7 @@ namespace WinGuard.Core.Detection;
 /// RdpCoreTS fallback can handle TLS/NLA connections (PLAN.md §4.1/§4.2).
 /// </summary>
 [SupportedOSPlatform("windows")]
-public sealed class RdpSecurityLogDetector : IDetector
+public sealed class RdpSecurityLogDetector : EventLogDetectorBase
 {
     /// <summary>Event log channel this detector watches.</summary>
     public const string ChannelName = "Security";
@@ -36,64 +36,48 @@ public sealed class RdpSecurityLogDetector : IDetector
         """;
 
     private readonly Func<WinGuardSettings> _settingsAccessor;
-    private readonly ILogger<RdpSecurityLogDetector> _logger;
-    private EventLogWatcher? _watcher;
 
     /// <summary>Creates the detector.</summary>
     /// <param name="settingsAccessor">Returns the current live settings.</param>
     /// <param name="logger">Logger for subscription/parse diagnostics.</param>
-    /// <param name="timeProvider">Clock abstraction; defaults to <see cref="TimeProvider.System"/>.</param>
+    /// <param name="timeProvider">Accepted for API symmetry; the event's own SystemTime stamps the record.</param>
     public RdpSecurityLogDetector(
         Func<WinGuardSettings> settingsAccessor,
         ILogger<RdpSecurityLogDetector> logger,
         TimeProvider? timeProvider = null)
+        : base(logger)
     {
         _settingsAccessor = settingsAccessor;
-        _logger = logger;
-        // The failure's own SystemTime is authoritative for this event-log engine; the injected
-        // TimeProvider is accepted for API symmetry but is not used to stamp parsed records.
         _ = timeProvider;
     }
 
     /// <inheritdoc />
-    public ProtocolSource Source => ProtocolSource.Rdp;
+    public override ProtocolSource Source => ProtocolSource.Rdp;
 
     /// <inheritdoc />
-    public string Name => "RDP (Security 4625)";
+    public override string Name => "RDP (Security 4625)";
 
     /// <inheritdoc />
-    public Task StartAsync(Channel<FailedLogin> sink, CancellationToken ct)
+    protected override string LogChannel => ChannelName;
+
+    /// <inheritdoc />
+    protected override IReadOnlyList<(string Query, bool TolerateQueryErrors)> Queries => [(SubscriptionXPath, true)];
+
+    /// <inheritdoc />
+    protected override bool IsEnabled() => _settingsAccessor().Rdp.Enabled;
+
+    /// <inheritdoc />
+    protected override FailedLogin? Parse(EventRecord record)
     {
-        // Subscribe regardless of Enabled: OnEventRecord honors the live flag per event,
-        // so enabling RDP in the GUI works without a service restart.
-        try
+        // An excluded failure is still forwarded (flagged) so the engine can drop the RdpCoreTS
+        // 140 event that describes the same attempt.
+        TryParseDetailed(record.ToXml(), _settingsAccessor(), out var failed, out var excluded);
+        if (failed is not null)
         {
-            var query = new EventLogQuery(ChannelName, PathType.LogName, SubscriptionXPath)
-            {
-                TolerateQueryErrors = true,
-            };
-            var watcher = new EventLogWatcher(query);
-            try
-            {
-                watcher.EventRecordWritten += (_, args) => OnEventRecord(args, sink);
-                watcher.Enabled = true;
-            }
-            catch
-            {
-                watcher.Dispose();
-                throw;
-            }
-
-            _watcher = watcher;
-            ct.Register(DisposeWatcher);
-            _logger.LogInformation("Subscribed to the {Channel} channel for 4625 failed-logon events.", ChannelName);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "RDP Security 4625 detector could not subscribe to the {Channel} channel; detection is inactive.", ChannelName);
+            failed.IsExcluded = excluded;
         }
 
-        return Task.CompletedTask;
+        return failed;
     }
 
     /// <summary>
@@ -105,7 +89,23 @@ public sealed class RdpSecurityLogDetector : IDetector
     /// <param name="failed">The parsed failure when the method returns <see langword="true"/>.</param>
     public static bool TryParse(string eventXml, WinGuardSettings settings, out FailedLogin? failed)
     {
+        if (TryParseDetailed(eventXml, settings, out failed, out var excluded) && !excluded)
+        {
+            return true;
+        }
+
         failed = null;
+        return false;
+    }
+
+    /// <summary>
+    /// Like <see cref="TryParse"/>, but an event removed by an exclusion rule is still returned,
+    /// with <paramref name="excluded"/> set, instead of being dropped.
+    /// </summary>
+    public static bool TryParseDetailed(string eventXml, WinGuardSettings settings, out FailedLogin? failed, out bool excluded)
+    {
+        failed = null;
+        excluded = false;
         if (string.IsNullOrWhiteSpace(eventXml) || settings is null)
         {
             return false;
@@ -146,10 +146,7 @@ public sealed class RdpSecurityLogDetector : IDetector
             return false;
         }
 
-        if (ExclusionEvaluator.IsExcluded(eventData, settings.Rdp.ExclusionRules))
-        {
-            return false;
-        }
+        excluded = ExclusionEvaluator.IsExcluded(eventData, settings.Rdp.ExclusionRules);
 
         var user = NormalizeOptional(eventData.GetValueOrDefault("TargetUserName"));
         failed = new FailedLogin
@@ -162,63 +159,6 @@ public sealed class RdpSecurityLogDetector : IDetector
             RawLog = BuildRawLog(eventData, ip, user),
         };
         return true;
-    }
-
-    private void OnEventRecord(EventRecordWrittenEventArgs args, Channel<FailedLogin> sink)
-    {
-        // Live toggle: honor Rdp.Enabled per event, not only at subscribe time.
-        if (!_settingsAccessor().Rdp.Enabled)
-        {
-            return;
-        }
-
-        try
-        {
-            var record = args.EventRecord;
-            if (record is null)
-            {
-                if (args.EventException is not null)
-                {
-                    _logger.LogDebug(args.EventException, "Security 4625 subscription reported an event error.");
-                }
-
-                return;
-            }
-
-            string xml;
-            using (record)
-            {
-                xml = record.ToXml();
-            }
-
-            if (TryParse(xml, _settingsAccessor(), out var failed) && failed is not null
-                && !sink.Writer.TryWrite(failed))
-            {
-                _logger.LogWarning("RDP Security 4625 detector could not write to the sink channel (closed).");
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to process a Security 4625 event record.");
-        }
-    }
-
-    private void DisposeWatcher()
-    {
-        try
-        {
-            var watcher = _watcher;
-            _watcher = null;
-            if (watcher is not null)
-            {
-                watcher.Enabled = false;
-                watcher.Dispose();
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Error while disposing the RDP Security 4625 watcher.");
-        }
     }
 
     private static Dictionary<string, string> ExtractEventData(XElement root, XNamespace ns)

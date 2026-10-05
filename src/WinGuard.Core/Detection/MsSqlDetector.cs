@@ -25,7 +25,7 @@ namespace WinGuard.Core.Detection;
 /// </para>
 /// </summary>
 [SupportedOSPlatform("windows")]
-public sealed class MsSqlDetector : IDetector
+public sealed class MsSqlDetector : EventLogDetectorBase
 {
     /// <summary>Event log channel this detector watches.</summary>
     public const string ChannelName = "Application";
@@ -57,52 +57,43 @@ public sealed class MsSqlDetector : IDetector
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private readonly Func<WinGuardSettings> _settingsAccessor;
-    private readonly ILogger<MsSqlDetector> _logger;
-    private EventLogWatcher? _watcher;
 
     /// <summary>Creates the detector.</summary>
     /// <param name="settingsAccessor">Returns the current live settings.</param>
     /// <param name="logger">Logger for subscription/parse diagnostics.</param>
-    /// <param name="timeProvider">Clock abstraction; defaults to <see cref="TimeProvider.System"/>.</param>
+    /// <param name="timeProvider">Accepted for API symmetry; the event's own SystemTime stamps the record.</param>
     public MsSqlDetector(
         Func<WinGuardSettings> settingsAccessor,
         ILogger<MsSqlDetector> logger,
         TimeProvider? timeProvider = null)
+        : base(logger)
     {
         _settingsAccessor = settingsAccessor;
-        _logger = logger;
-        // The failure's own SystemTime is authoritative for this event-log engine; the injected
-        // TimeProvider is accepted for API symmetry but is not used to stamp parsed records.
         _ = timeProvider;
     }
 
     /// <inheritdoc />
-    public ProtocolSource Source => ProtocolSource.MsSql;
+    public override ProtocolSource Source => ProtocolSource.MsSql;
 
     /// <inheritdoc />
-    public string Name => "MS SQL (Application 18456)";
+    public override string Name => "MS SQL (Application 18456)";
 
     /// <inheritdoc />
-    public Task StartAsync(Channel<FailedLogin> sink, CancellationToken ct)
+    protected override string LogChannel => ChannelName;
+
+    /// <inheritdoc />
+    protected override IReadOnlyList<(string Query, bool TolerateQueryErrors)> Queries =>
+        [(SubscriptionXPath, false), (FallbackSubscriptionXPath, true)];
+
+    /// <inheritdoc />
+    protected override bool IsEnabled() => _settingsAccessor().MsSql.Enabled;
+
+    /// <inheritdoc />
+    protected override FailedLogin? Parse(EventRecord record)
     {
-        // Subscribe regardless of Enabled: OnEventRecord honors the live flag per event.
-        var watcher = TrySubscribe(SubscriptionXPath, sink, tolerateQueryErrors: false, "provider-filtered");
-        if (watcher is null)
-        {
-            _logger.LogWarning("MS SQL detector: provider-filtered XPath was rejected; falling back to an EventID-only subscription.");
-            watcher = TrySubscribe(FallbackSubscriptionXPath, sink, tolerateQueryErrors: true, "EventID-only");
-        }
-
-        if (watcher is null)
-        {
-            _logger.LogError("MS SQL 18456 detector could not subscribe to the {Channel} channel; detection is inactive.", ChannelName);
-            return Task.CompletedTask;
-        }
-
-        _watcher = watcher;
-        ct.Register(DisposeWatcher);
-        _logger.LogInformation("Subscribed to the {Channel} channel for 18456 login-failure events.", ChannelName);
-        return Task.CompletedTask;
+        var xml = record.ToXml();
+        var message = TryFormatDescription(record);
+        return TryParse(xml, message, _settingsAccessor(), out var failed) ? failed : null;
     }
 
     /// <summary>
@@ -183,69 +174,6 @@ public sealed class MsSqlDetector : IDetector
         return true;
     }
 
-    private EventLogWatcher? TrySubscribe(string xpath, Channel<FailedLogin> sink, bool tolerateQueryErrors, string description)
-    {
-        EventLogWatcher? watcher = null;
-        try
-        {
-            var query = new EventLogQuery(ChannelName, PathType.LogName, xpath)
-            {
-                TolerateQueryErrors = tolerateQueryErrors,
-            };
-            watcher = new EventLogWatcher(query);
-            watcher.EventRecordWritten += (_, args) => OnEventRecord(args, sink);
-            watcher.Enabled = true;
-            return watcher;
-        }
-        catch (Exception ex)
-        {
-            watcher?.Dispose();
-            _logger.LogDebug(ex, "MS SQL {Description} subscription attempt failed.", description);
-            return null;
-        }
-    }
-
-    private void OnEventRecord(EventRecordWrittenEventArgs args, Channel<FailedLogin> sink)
-    {
-        // Live toggle: honor MsSql.Enabled per event, not only at subscribe time.
-        if (!_settingsAccessor().MsSql.Enabled)
-        {
-            return;
-        }
-
-        try
-        {
-            var record = args.EventRecord;
-            if (record is null)
-            {
-                if (args.EventException is not null)
-                {
-                    _logger.LogDebug(args.EventException, "MS SQL 18456 subscription reported an event error.");
-                }
-
-                return;
-            }
-
-            string xml;
-            string? message;
-            using (record)
-            {
-                xml = record.ToXml();
-                message = TryFormatDescription(record);
-            }
-
-            if (TryParse(xml, message, _settingsAccessor(), out var failed) && failed is not null
-                && !sink.Writer.TryWrite(failed))
-            {
-                _logger.LogWarning("MS SQL 18456 detector could not write to the sink channel (closed).");
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to process an Application 18456 event record.");
-        }
-    }
-
     private string? TryFormatDescription(EventRecord record)
     {
         try
@@ -255,26 +183,8 @@ public sealed class MsSqlDetector : IDetector
         catch (Exception ex)
         {
             // Message DLL missing / access denied: fall back to scanning the raw XML.
-            _logger.LogDebug(ex, "FormatDescription failed for a 18456 record; using the raw event XML.");
+            Logger.LogDebug(ex, "FormatDescription failed for a 18456 record; using the raw event XML.");
             return null;
-        }
-    }
-
-    private void DisposeWatcher()
-    {
-        try
-        {
-            var watcher = _watcher;
-            _watcher = null;
-            if (watcher is not null)
-            {
-                watcher.Enabled = false;
-                watcher.Dispose();
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Error while disposing the MS SQL 18456 watcher.");
         }
     }
 
@@ -285,8 +195,11 @@ public sealed class MsSqlDetector : IDetector
             return null;
         }
 
-        var match = ClientRegex.Match(text);
-        return match.Success ? match.Groups["ip"].Value.Trim() : null;
+        // SQL Server appends "[CLIENT: ip]" at the END of the message. The login name earlier in the
+        // text is chosen by the remote client, so an attacker could plant a fake "[CLIENT: x]" there:
+        // only the last occurrence is trustworthy.
+        var matches = ClientRegex.Matches(text);
+        return matches.Count > 0 ? matches[^1].Groups["ip"].Value.Trim() : null;
     }
 
     private static bool IsIgnored(string message, string[] patterns)

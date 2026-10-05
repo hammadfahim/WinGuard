@@ -31,6 +31,13 @@ public sealed class CustomLogDetector : IDetector
     private readonly LogFileTailer _tailer = new();
     private readonly FileChangeSignal _signal = new();
 
+    // Sources already polled at least once: a file appearing under one of them later is new.
+    private HashSet<string> _knownSources = new(StringComparer.OrdinalIgnoreCase);
+    private volatile bool _loopRunning;
+
+    // A regex that keeps hitting the match timeout would stall the poll loop for seconds per line.
+    private const int MaxTimeoutsPerCycle = 3;
+
     // Compiled pattern cache keyed by (source name, pattern); a null value marks a known-bad source.
     private readonly Dictionary<(string Source, string Pattern), Regex?> _regexCache = new();
     private readonly HashSet<string> _invalidWarnedSources = new(StringComparer.OrdinalIgnoreCase);
@@ -55,6 +62,9 @@ public sealed class CustomLogDetector : IDetector
 
     /// <inheritdoc />
     public string Name => "Custom log sources";
+
+    /// <inheritdoc />
+    public bool IsRunning => _loopRunning;
 
     /// <inheritdoc />
     public Task StartAsync(Channel<FailedLogin> sink, CancellationToken ct)
@@ -147,6 +157,7 @@ public sealed class CustomLogDetector : IDetector
 
     private async Task PollLoopAsync(Channel<FailedLogin> sink, CancellationToken ct)
     {
+        _loopRunning = true;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -181,11 +192,17 @@ public sealed class CustomLogDetector : IDetector
         {
             _logger.LogError(ex, "Custom log detector poll loop terminated unexpectedly.");
         }
+        finally
+        {
+            _loopRunning = false;
+            _signal.Dispose();
+        }
     }
 
     private void PollOnce(WinGuardSettings settings, Channel<FailedLogin> sink)
     {
         var activeFiles = new List<string>();
+        var seenSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var source in settings.CustomSources ?? [])
         {
             if (source is null || !source.Enabled
@@ -202,12 +219,33 @@ public sealed class CustomLogDetector : IDetector
             }
 
             var detectorName = DisplayName(source);
+            var sourceKey = $"{source.Name}|{source.PathGlob.Trim()}";
+            var sourceKnown = _knownSources.Contains(sourceKey);
+            seenSources.Add(sourceKey);
+            var timeouts = 0;
+
             foreach (var file in LogFileTailer.ResolveFiles(source.PathGlob, "*"))
             {
                 activeFiles.Add(file);
-                foreach (var line in _tailer.ReadNewLines(file))
+                foreach (var line in _tailer.ReadNewLines(file, readFromStartIfNew: sourceKnown))
                 {
-                    if (TryParseForSource(line, source, regex, out var failure) && failure is not null)
+                    if (timeouts >= MaxTimeoutsPerCycle)
+                    {
+                        // Give up on this batch of lines; the next cycle starts after them.
+                        break;
+                    }
+
+                    if (!TryParseForSource(line, source, regex, out var failure, out var timedOut))
+                    {
+                        if (timedOut)
+                        {
+                            timeouts++;
+                        }
+
+                        continue;
+                    }
+
+                    if (failure is not null)
                     {
                         failure.Detector = detectorName;
                         // Custom regexes have no guaranteed timestamp capture, so the ingest
@@ -222,8 +260,19 @@ public sealed class CustomLogDetector : IDetector
             }
         }
 
+        _knownSources = seenSources;
         _tailer.Prune(activeFiles);
         _signal.Watch(activeFiles);
+
+        // Keep the compiled-pattern cache to the patterns still configured.
+        var live = (settings.CustomSources ?? [])
+            .Where(source => source is not null)
+            .Select(source => (source.Name ?? string.Empty, source.Regex))
+            .ToHashSet();
+        foreach (var key in _regexCache.Keys.Where(k => !live.Contains(k)).ToList())
+        {
+            _regexCache.Remove(key);
+        }
     }
 
     /// <summary>
@@ -265,8 +314,9 @@ public sealed class CustomLogDetector : IDetector
     /// Runs a cached regex against one line, converting a match timeout into a skipped line and a
     /// rate-limited (once per source) warning instead of propagating the exception.
     /// </summary>
-    private bool TryParseForSource(string line, CustomLogSource source, Regex regex, out FailedLogin? failure)
+    private bool TryParseForSource(string line, CustomLogSource source, Regex regex, out FailedLogin? failure, out bool timedOut)
     {
+        timedOut = false;
         try
         {
             return TryMatch(regex, line, out failure);
@@ -274,6 +324,7 @@ public sealed class CustomLogDetector : IDetector
         catch (RegexMatchTimeoutException)
         {
             failure = null;
+            timedOut = true;
             if (_timeoutWarnedSources.Add(DisplayName(source)))
             {
                 _logger.LogWarning(

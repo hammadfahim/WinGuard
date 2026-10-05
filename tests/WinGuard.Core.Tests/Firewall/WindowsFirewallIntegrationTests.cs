@@ -17,21 +17,11 @@ public sealed class WindowsFirewallIntegrationTests
 {
     // TEST-NET-3 (RFC 5737) address: never routable, safe to use as a test target.
     private const string TestIp = "203.0.113.250";
+    private const string SecondTestIp = "2001:db8::fa";
 
-    [Fact]
+    [ElevatedFact]
     public void Block_unblock_and_clear_roundtrip()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            Console.WriteLine("Skipping firewall integration test: not running on Windows.");
-            return;
-        }
-
-        if (!IsAdministrator())
-        {
-            Console.WriteLine("Skipping firewall integration test: process is not elevated (Administrator).");
-            return;
-        }
 
         Assert.True(IpMatcher.IsValid(TestIp));
 
@@ -42,6 +32,14 @@ public sealed class WindowsFirewallIntegrationTests
 
             firewall.Block(TestIp);
             Assert.Contains(TestIp, firewall.ListBlocked());
+
+            // A second address must be added to the rule, not replace the first one, and a
+            // fresh instance (no cache) must read both back from Windows.
+            firewall.Block(SecondTestIp);
+            var fresh = new WindowsFirewall(NullLogger<WindowsFirewall>.Instance);
+            Assert.Contains(TestIp, fresh.ListBlocked());
+            Assert.Contains(SecondTestIp, fresh.ListBlocked());
+            firewall.Unblock(SecondTestIp);
 
             firewall.Unblock(TestIp);
             Assert.DoesNotContain(TestIp, firewall.ListBlocked());
@@ -55,6 +53,25 @@ public sealed class WindowsFirewallIntegrationTests
         finally
         {
             firewall.ClearAll();
+        }
+    }
+
+    /// <summary>
+    /// Reports the test as SKIPPED (not passed) when it cannot run, so an unelevated run never
+    /// looks like the real firewall was exercised.
+    /// </summary>
+    private sealed class ElevatedFactAttribute : FactAttribute
+    {
+        public ElevatedFactAttribute()
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                Skip = "Requires Windows.";
+            }
+            else if (!IsAdministrator())
+            {
+                Skip = "Requires an elevated (Administrator) process: it edits the real Windows Firewall.";
+            }
         }
     }
 

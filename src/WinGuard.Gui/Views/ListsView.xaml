@@ -47,7 +47,7 @@
             <Border Grid.Column="2" Style="{StaticResource CardBorderStyle}">
                 <DockPanel>
                     <TextBlock DockPanel.Dock="Top" Text="Blacklist" Style="{StaticResource SectionHeaderStyle}" />
-                    <TextBlock DockPanel.Dock="Top" Text="Always banned (permanent). Use for known-bad addresses."
+                    <TextBlock DockPanel.Dock="Top" Text="A single IP is blocked permanently as soon as it is added. A range (CIDR) is not blocked up front: any address in it is banned permanently on its first failed login. Removing an entry lifts the bans it caused."
                                TextWrapping="Wrap" Foreground="{DynamicResource SubtleForegroundBrush}" Margin="0,0,0,8" />
                     <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
                         <Button DockPanel.Dock="Right" Content="Add" Margin="6,0,0,0" Command="{Binding AddBlacklistCommand}" />

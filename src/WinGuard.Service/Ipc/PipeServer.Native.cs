@@ -36,11 +36,12 @@ public sealed partial class PipeServer
     private const int ErrorAccessDenied = 5;
 
     /// <summary>
-    /// SYSTEM + Administrators full control; Authenticated Users read/write so the
-    /// non-elevated (UAC-filtered) admin GUI can submit requests — identity is still
-    /// verified per connection in <see cref="Authorize"/>. No Everyone/Anonymous access.
+    /// SYSTEM + Administrators only. Nothing is granted to other accounts: on a named pipe,
+    /// write access includes the right to create further instances of the pipe, which would let
+    /// any local user stand up a fake WinGuard endpoint for the (elevated) GUI to connect to.
+    /// Identity is verified again per connection in <see cref="Authorize"/>.
     /// </summary>
-    private const string PipeSddl = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)";
+    private const string PipeSddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
 
     private NamedPipeServerStream CreateSecuredPipe()
     {
@@ -56,8 +57,7 @@ public sealed partial class PipeServer
         if (!TryCreateSecurityDescriptor(PipeSddl, out var securityDescriptor))
         {
             _logger.LogWarning(
-                "Could not build the pipe security descriptor; falling back to the OS default DACL " +
-                "(non-elevated GUI connections may be rejected by the OS).");
+                "Could not build the pipe security descriptor; falling back to the OS default DACL.");
             return new NamedPipeServerStream(
                 PipeConstants.PipeName,
                 PipeDirection.InOut,

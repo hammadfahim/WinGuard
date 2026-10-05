@@ -81,12 +81,11 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
             {
                 await using var cmd = connection.CreateCommand();
                 cmd.CommandText =
-                    "INSERT INTO failed_logins (ip, source, ts_utc, user, raw) VALUES ($ip, $source, $ts, $user, $raw);";
+                    "INSERT INTO failed_logins (ip, source, ts_utc, user, raw) VALUES ($ip, $source, $ts, $user, NULL);";
                 cmd.Parameters.AddWithValue("$ip", failed.IpAddress);
                 cmd.Parameters.AddWithValue("$source", (int)failed.Source);
                 cmd.Parameters.AddWithValue("$ts", ToDb(failed.TimestampUtc));
                 cmd.Parameters.AddWithValue("$user", (object?)failed.UserName ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("$raw", failed.RawLog);
                 await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             },
             ct).ConfigureAwait(false);
@@ -116,27 +115,41 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
     }
 
     /// <inheritdoc />
-    public async Task<FailedLogin?> GetRecentFailedLoginAsync(string ip, ProtocolSource source, DateTime sinceUtc, CancellationToken ct = default)
+    public async Task<int> AddFailedLoginAndCountAsync(FailedLogin failed, DateTime sinceUtc, CancellationToken ct = default)
     {
+        ArgumentNullException.ThrowIfNull(failed);
         return await WithConnectionAsync(
             async connection =>
             {
                 await using var cmd = connection.CreateCommand();
                 cmd.CommandText =
-                    "SELECT ip, source, ts_utc, user, raw FROM failed_logins " +
-                    "WHERE ip = $ip AND source = $source AND ts_utc >= $since " +
-                    "ORDER BY ts_utc DESC LIMIT 1;";
+                    "INSERT INTO failed_logins (ip, source, ts_utc, user, raw) VALUES ($ip, $source, $ts, $user, NULL); " +
+                    "SELECT COUNT(*) FROM failed_logins WHERE ip = $ip AND ts_utc >= $since AND source = $source;";
+                cmd.Parameters.AddWithValue("$ip", failed.IpAddress);
+                cmd.Parameters.AddWithValue("$source", (int)failed.Source);
+                cmd.Parameters.AddWithValue("$ts", ToDb(failed.TimestampUtc));
+                cmd.Parameters.AddWithValue("$user", (object?)failed.UserName ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$since", ToDb(sinceUtc));
+                var result = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+                return Convert.ToInt32(result, CultureInfo.InvariantCulture);
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task RemoveLatestFailedLoginAsync(string ip, ProtocolSource source, CancellationToken ct = default)
+    {
+        await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "DELETE FROM failed_logins WHERE rowid = (" +
+                    "SELECT rowid FROM failed_logins WHERE ip = $ip AND source = $source ORDER BY ts_utc DESC, rowid DESC LIMIT 1);";
                 cmd.Parameters.AddWithValue("$ip", ip);
                 cmd.Parameters.AddWithValue("$source", (int)source);
-                cmd.Parameters.AddWithValue("$since", ToDb(sinceUtc));
-
-                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                if (!await reader.ReadAsync(ct).ConfigureAwait(false))
-                {
-                    return null;
-                }
-
-                return ReadFailedLogin(reader);
+                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                return true;
             },
             ct).ConfigureAwait(false);
     }
@@ -552,6 +565,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
             await ExecuteNonQueryAsync(connection, "PRAGMA temp_store=MEMORY;", ct).ConfigureAwait(false);
             await ExecuteNonQueryAsync(connection, $"PRAGMA busy_timeout={BusyTimeoutMs};", ct).ConfigureAwait(false);
             await ExecuteNonQueryAsync(connection, SchemaSql, ct).ConfigureAwait(false);
+            await MigrateAsync(connection, ct).ConfigureAwait(false);
         }
         catch
         {
@@ -564,6 +578,64 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
         _logger.LogInformation("SqliteStore initialized at {DatabasePath}", _databasePath);
         return connection;
     }
+
+    /// <summary>
+    /// Brings an existing database up to <see cref="SchemaVersion"/> (tracked in PRAGMA user_version).
+    /// v2: the events table gets an AUTOINCREMENT id so the GUI's event cursor never sees an id
+    /// reused after pruning, and raw log lines stored by older versions are discarded.
+    /// </summary>
+    private static async Task MigrateAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        int version;
+        await using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "PRAGMA user_version;";
+            version = Convert.ToInt32(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false), CultureInfo.InvariantCulture);
+        }
+
+        if (version >= SchemaVersion)
+        {
+            return;
+        }
+
+        string? eventsSql;
+        await using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'events';";
+            eventsSql = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) as string;
+        }
+
+        if (eventsSql is not null && !eventsSql.Contains("AUTOINCREMENT", StringComparison.OrdinalIgnoreCase))
+        {
+            await ExecuteNonQueryAsync(
+                connection,
+                """
+                BEGIN;
+                CREATE TABLE events_new (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  ts_utc TEXT NOT NULL,
+                  level INTEGER NOT NULL,
+                  source INTEGER,
+                  ip TEXT,
+                  message TEXT
+                );
+                INSERT INTO events_new (ts_utc, level, source, ip, message)
+                  SELECT ts_utc, level, source, ip, message FROM events ORDER BY rowid;
+                DROP TABLE events;
+                ALTER TABLE events_new RENAME TO events;
+                CREATE INDEX IF NOT EXISTS ix_events_ts ON events(ts_utc);
+                COMMIT;
+                """,
+                ct).ConfigureAwait(false);
+        }
+
+        await ExecuteNonQueryAsync(
+            connection,
+            $"UPDATE failed_logins SET raw = NULL WHERE raw IS NOT NULL; PRAGMA user_version = {SchemaVersion};",
+            ct).ConfigureAwait(false);
+    }
+
+    private const int SchemaVersion = 2;
 
     private static async Task ExecuteNonQueryAsync(SqliteConnection connection, string sql, CancellationToken ct)
     {
@@ -585,7 +657,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
         {
             var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
             if (string.IsNullOrEmpty(programData)
-                || !directoryPath.StartsWith(programData, StringComparison.OrdinalIgnoreCase))
+                || !directoryPath.StartsWith(programData.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase))
             {
                 // Not the production location (e.g. unit tests on temp files): leave ACLs alone.
                 return;
@@ -680,15 +752,6 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern IntPtr LocalFree(IntPtr hMem);
     }
-
-    private static FailedLogin ReadFailedLogin(SqliteDataReader reader) => new()
-    {
-        IpAddress = reader.GetString(0),
-        Source = (ProtocolSource)reader.GetInt32(1),
-        TimestampUtc = FromDb(reader.GetString(2)),
-        UserName = reader.IsDBNull(3) ? null : reader.GetString(3),
-        RawLog = reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
-    };
 
     private static BanEntry ReadBan(SqliteDataReader reader) => new()
     {
@@ -796,6 +859,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
         );
 
         CREATE TABLE IF NOT EXISTS events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
           ts_utc TEXT NOT NULL,
           level INTEGER NOT NULL,
           source INTEGER,

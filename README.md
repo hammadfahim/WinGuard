@@ -59,7 +59,7 @@ target server. Only building from source needs the .NET 10 SDK.
 ### Option 1 — Setup installer (recommended)
 
 1. Download `WinGuard-Setup-<version>.exe` from
-   [Releases](https://github.com/winguard/winguard/releases).
+   [Releases](https://github.com/hammadfahim/WinGuard/releases).
 2. Run it (it requests elevation). It installs to `%ProgramFiles%\WinGuard`, creates
    `%ProgramData%\WinGuard` and `%ProgramData%\WinGuard\Logs`, registers and starts the
    **WinGuardService** service, and — if you leave the task checked — enables logon
@@ -88,8 +88,8 @@ For a persistent install from the portable binaries, register the service with
 Requires the **.NET 10 SDK**.
 
 ```powershell
-git clone https://github.com/winguard/winguard
-cd winguard
+git clone https://github.com/hammadfahim/WinGuard
+cd WinGuard
 
 # Build + unit tests
 dotnet restore WinGuard.sln
@@ -176,15 +176,25 @@ loopback are auto-whitelisted at startup to prevent self-lockout.
 
 ### Limitations
 
-- **Enabling a disabled engine requires a service restart.** Engines that are disabled
-  when the WinGuard service starts are not started at all; toggling one on in the GUI
-  afterwards needs a WinGuard service restart to activate. Disabling an engine takes
-  effect immediately.
+- **Log sources must be on a local drive.** FTP and custom log paths that point at a
+  network share (`\\server\share\…`) are refused: the service runs as SYSTEM and would
+  authenticate to whatever host the path names.
+- **The "RDP / logon" engine counts every failed Windows logon that carries a client
+  address.** Security event 4625 also covers failed SMB and other network logons, not only
+  Remote Desktop, and they all count towards a ban.
+- **FileZilla Server 1.x support is unverified.** The parser accepts the legacy 0.9.x log
+  layout and any line with a `530 Login…` response whose prefix contains the session
+  address, but it has only been tested against 0.9.x sample logs.
+- **A blacklisted range is enforced on first contact.** A single blacklisted IP is blocked
+  at once; for a CIDR range each address is banned permanently at its first failed login.
+- **Failures logged while the service is stopped are not counted.** Event-log and log-file
+  detectors start reading from the moment the service starts.
+- **IPv6 bans are per address.** An attacker with a whole /64 can rotate addresses.
 - **Custom log sources share the FTP poll interval.** A single `Ftp.PollInterval`
   (default 3 s) drives the IIS/FileZilla tailers and every custom source; there is no
   per-source interval.
-- **List prefixes shorter than `/8` are rejected.** Whitelist/blacklist entries such as
-  `0.0.0.0/0` (or any CIDR prefix `< 8`) are refused by the GUI/IPC as a self-lockout
+- **Very broad list prefixes are rejected.** Whitelist/blacklist entries shorter than `/8`
+  for IPv4 (such as `0.0.0.0/0`) or `/32` for IPv6 are refused by the IPC as a self-lockout
   footgun; use an explicit range instead.
 - **The GUI requires administrator elevation.** It is an administrative console (like
   `wf.msc`): the service pipe only accepts Administrators + LocalSystem, so the GUI
@@ -233,9 +243,11 @@ dotnet test tests/WinGuard.Core.Tests -c Release --filter "Category!=Integration
 ```
 
 The parser tests assert the exact ground truth documented in
-[`samples/logs/README.md`](samples/logs/README.md). The Windows-Firewall COM test is tagged
-`Category=Integration`, requires an **elevated** process, and is excluded from CI; run it
-explicitly on a throwaway VM:
+[`samples/logs/README.md`](samples/logs/README.md). The firewall batching logic is covered
+by unit tests against an in-memory rule store that returns addresses in the format Windows
+reports them. The test against the real Windows Firewall is tagged `Category=Integration`,
+requires an **elevated** process (it is reported as *skipped*, not passed, otherwise), and is
+excluded from CI; run it explicitly on a throwaway VM:
 
 ```powershell
 dotnet test tests/WinGuard.Core.Tests -c Release --filter "Category=Integration"

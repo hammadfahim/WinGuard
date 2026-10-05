@@ -45,24 +45,23 @@ public sealed class SqliteStoreTests
     }
 
     [Fact]
-    public async Task Get_recent_failed_login_returns_latest_for_ip_and_source()
+    public async Task Add_and_count_returns_the_window_count_and_remove_latest_takes_one_back()
     {
         await WithStoreAsync(async store =>
         {
             var now = DateTime.UtcNow;
-            await store.AddFailedLoginAsync(Failed("1.2.3.4", now.AddMinutes(-5), ProtocolSource.Rdp));
-            await store.AddFailedLoginAsync(Failed("1.2.3.4", now.AddMinutes(-1), ProtocolSource.Rdp));
-            await store.AddFailedLoginAsync(Failed("1.2.3.4", now, ProtocolSource.Ftp));
+            await store.AddFailedLoginAsync(Failed("1.2.3.4", now.AddMinutes(-30), ProtocolSource.Rdp));
+            await store.AddFailedLoginAsync(Failed("1.2.3.4", now.AddMinutes(-1), ProtocolSource.Ftp));
 
-            var recent = await store.GetRecentFailedLoginAsync("1.2.3.4", ProtocolSource.Rdp, now.AddMinutes(-10));
-            Assert.NotNull(recent);
-            Assert.Equal(now.AddMinutes(-1).Ticks, recent!.TimestampUtc.Ticks);
-            Assert.Equal(ProtocolSource.Rdp, recent.Source);
+            var since = now.AddMinutes(-10);
+            Assert.Equal(1, await store.AddFailedLoginAndCountAsync(Failed("1.2.3.4", now.AddMinutes(-2), ProtocolSource.Rdp), since));
+            Assert.Equal(2, await store.AddFailedLoginAndCountAsync(Failed("1.2.3.4", now, ProtocolSource.Rdp), since));
 
-            Assert.Null(await store.GetRecentFailedLoginAsync(
-                "1.2.3.4", ProtocolSource.Rdp, now.AddMinutes(1)));
-            Assert.Null(await store.GetRecentFailedLoginAsync(
-                "9.9.9.9", ProtocolSource.Rdp, now.AddDays(-1)));
+            await store.RemoveLatestFailedLoginAsync("1.2.3.4", ProtocolSource.Rdp);
+            Assert.Equal(1, await store.CountFailedLoginsAsync("1.2.3.4", since, ProtocolSource.Rdp));
+            Assert.Equal(1, await store.CountFailedLoginsAsync("1.2.3.4", since, ProtocolSource.Ftp));
+
+            await store.RemoveLatestFailedLoginAsync("9.9.9.9", ProtocolSource.Rdp); // no-op
         });
     }
 

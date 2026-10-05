@@ -19,8 +19,14 @@ public interface IStore
     /// <summary>Count attempts for ip with ts_utc &gt;= sinceUtc (optionally for one source only).</summary>
     Task<int> CountFailedLoginsAsync(string ip, DateTime sinceUtc, ProtocolSource? source = null, CancellationToken ct = default);
 
-    /// <summary>Look up the most recent attempt for ip within [sinceUtc, nowUtc] (used for 4625/140 de-dup). Null when none.</summary>
-    Task<FailedLogin?> GetRecentFailedLoginAsync(string ip, ProtocolSource source, DateTime sinceUtc, CancellationToken ct = default);
+    /// <summary>
+    /// Records the attempt and returns how many attempts this IP has for the same source with
+    /// ts_utc &gt;= sinceUtc (the new one included) in a single round trip — the engine's hot path.
+    /// </summary>
+    Task<int> AddFailedLoginAndCountAsync(FailedLogin failed, DateTime sinceUtc, CancellationToken ct = default);
+
+    /// <summary>Deletes the newest attempt of this IP for the source (takes back one count). No-op when none.</summary>
+    Task RemoveLatestFailedLoginAsync(string ip, ProtocolSource source, CancellationToken ct = default);
 
     /// <summary>Delete this IP's counter rows (after a ban fires, so the next tier starts fresh).</summary>
     Task ClearFailedLoginsAsync(string ip, CancellationToken ct = default);

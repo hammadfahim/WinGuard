@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using WinGuard.Core.Config;
@@ -24,11 +25,18 @@ public sealed partial class DashboardViewModel : ObservableObject
     public DashboardViewModel(PipeClient client)
     {
         _client = client;
-        Tiles.Add(new EngineTileViewModel(ProtocolSource.Rdp, "RDP", ToggleEngineAsync));
-        Tiles.Add(new EngineTileViewModel(ProtocolSource.MsSql, "MS SQL", ToggleEngineAsync));
-        Tiles.Add(new EngineTileViewModel(ProtocolSource.Ftp, "FTP", ToggleEngineAsync));
-        Tiles.Add(new EngineTileViewModel(ProtocolSource.Custom, "Custom", ToggleEngineAsync));
+        Tiles.Add(new EngineTileViewModel(ProtocolSource.Rdp, SourceLabels.Rdp, ToggleEngineAsync));
+        Tiles.Add(new EngineTileViewModel(ProtocolSource.MsSql, SourceLabels.MsSql, ToggleEngineAsync));
+        Tiles.Add(new EngineTileViewModel(ProtocolSource.Ftp, SourceLabels.Ftp, ToggleEngineAsync));
+        Tiles.Add(new EngineTileViewModel(ProtocolSource.Custom, SourceLabels.Custom, ToggleEngineAsync));
     }
+
+    /// <summary>Raised after this view changed the service settings (so other views can reload them).</summary>
+    public event Action? SettingsChanged;
+
+    /// <summary>Shown when the service speaks a different IPC version than this GUI.</summary>
+    [ObservableProperty]
+    private string _versionMismatchText = string.Empty;
 
     /// <summary>The four per-protocol tiles.</summary>
     public ObservableCollection<EngineTileViewModel> Tiles { get; } = [];
@@ -80,6 +88,9 @@ public sealed partial class DashboardViewModel : ObservableObject
             ? string.Empty
             : "Started " + status.StartedUtc.ToLocalTime().ToString("g");
         TotalActiveBansText = status.ActiveBans.ToString();
+        VersionMismatchText = status.ProtocolVersion == PipeConstants.ProtocolVersion
+            ? string.Empty
+            : "The service and this console are from different WinGuard versions; some features may not work. Reinstall so both match.";
 
         foreach (var engine in status.Engines)
         {
@@ -94,21 +105,7 @@ public sealed partial class DashboardViewModel : ObservableObject
     {
         Warnings.Clear();
 
-        if (!prereqs.AuditLogonFailureEnabled)
-        {
-            Warnings.Add("Windows failed-logon auditing is disabled. Run: auditpol /set /subcategory:\"{0CCE9215-69AE-11D9-BED3-505054503030}\" /success:enable /failure:enable (the GUID form also works on localized Windows)");
-        }
-
-        if (!prereqs.FirewallServiceRunning)
-        {
-            Warnings.Add("The Windows Defender Firewall service (MpsSvc) is not running; blocks will not take effect.");
-        }
-
-        if (!prereqs.RdpCoreTsChannelEnabled)
-        {
-            Warnings.Add("The RdpCoreTS/Operational channel is unavailable; RDP TLS/NLA fallback detection is disabled.");
-        }
-
+        // The service already words one warning per failed prerequisite; show those as they are.
         foreach (var warning in prereqs.Warnings)
         {
             if (!string.IsNullOrWhiteSpace(warning))
@@ -137,22 +134,42 @@ public sealed partial class DashboardViewModel : ObservableObject
         HasRecentEvents = RecentEvents.Count > 0;
     }
 
-    /// <summary>Launches an elevated <c>sc start WinGuardService</c> (the only elevated operation).</summary>
+    /// <summary>Runs <c>sc start WinGuardService</c> (this console already runs elevated) and reports the outcome.</summary>
     [RelayCommand]
-    private void StartService()
+    private async Task StartServiceAsync()
     {
+        ServiceActionMessage = "Starting the service…";
         try
         {
-            var startInfo = new ProcessStartInfo
+            var exitCode = await Task.Run(() =>
             {
-                FileName = "sc.exe",
-                Arguments = "start " + Defaults.ServiceName,
-                UseShellExecute = true,
-                Verb = "runas",
-                WindowStyle = ProcessWindowStyle.Hidden,
+                var startInfo = new ProcessStartInfo
+                {
+                    // Full path, so a file named sc.exe elsewhere on the search path is never run.
+                    FileName = Path.Combine(Environment.SystemDirectory, "sc.exe"),
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                startInfo.ArgumentList.Add("start");
+                startInfo.ArgumentList.Add(Defaults.ServiceName);
+
+                using var process = Process.Start(startInfo);
+                if (process is null)
+                {
+                    return -1;
+                }
+
+                process.WaitForExit(15_000);
+                return process.HasExited ? process.ExitCode : 0;
+            });
+
+            ServiceActionMessage = exitCode switch
+            {
+                0 => "Service start requested; it connects within a few seconds.",
+                1056 => "The service is already running.",
+                1060 => "The WinGuard service is not installed. Run the installer, or winguard-svc.exe --install.",
+                _ => $"The service could not be started (sc.exe exit code {exitCode}).",
             };
-            Process.Start(startInfo);
-            ServiceActionMessage = "Elevation requested — Windows will prompt to start the service.";
         }
         catch (Exception ex)
         {
@@ -181,6 +198,12 @@ public sealed partial class DashboardViewModel : ObservableObject
                 settings.Ftp.Enabled = enabled;
                 break;
             case ProtocolSource.Custom:
+                if (settings.CustomSources.Count == 0)
+                {
+                    ServiceActionMessage = "No custom log sources are configured yet. Add one under Settings.";
+                    return;
+                }
+
                 // There is no global Custom toggle in WinGuardSettings; enable/disable every source.
                 foreach (var source in settings.CustomSources)
                 {
@@ -194,6 +217,7 @@ public sealed partial class DashboardViewModel : ObservableObject
         {
             await _client.UpdateSettingsAsync(settings);
             ServiceActionMessage = $"{tile.Name} engine {(enabled ? "enabled" : "disabled")}.";
+            SettingsChanged?.Invoke();
         }
         catch (Exception ex)
         {

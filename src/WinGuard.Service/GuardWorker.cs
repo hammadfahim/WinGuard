@@ -17,9 +17,10 @@ namespace WinGuard.Service;
 /// </summary>
 public sealed class GuardWorker : BackgroundService
 {
+    private const int ChannelCapacity = 20_000;
+
     private readonly IEnumerable<IDetector> _detectors;
     private readonly BanEngine _engine;
-    private readonly Func<WinGuardSettings> _settingsAccessor;
     private readonly DetectorRuntimeState _state;
     private readonly ILogger<GuardWorker> _logger;
 
@@ -39,7 +40,6 @@ public sealed class GuardWorker : BackgroundService
         _detectors = detectors ?? throw new ArgumentNullException(nameof(detectors));
         _engine = engine ?? throw new ArgumentNullException(nameof(engine));
         ArgumentNullException.ThrowIfNull(settings);
-        _settingsAccessor = () => settings.Current;
         _state = state ?? throw new ArgumentNullException(nameof(state));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
@@ -48,7 +48,13 @@ public sealed class GuardWorker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("GuardWorker starting.");
-        var channel = Channel.CreateUnbounded<FailedLogin>(new UnboundedChannelOptions { SingleReader = true });
+        // Bounded: under a flood faster than the store and firewall can absorb, the oldest pending
+        // failures are dropped instead of growing memory without limit.
+        var channel = Channel.CreateBounded<FailedLogin>(new BoundedChannelOptions(ChannelCapacity)
+        {
+            SingleReader = true,
+            FullMode = BoundedChannelFullMode.DropOldest,
+        });
 
         try
         {
@@ -63,7 +69,8 @@ public sealed class GuardWorker : BackgroundService
             _logger.LogError(ex, "BanEngine failed to start; detection will continue but bans may not be enforced.");
         }
 
-        var settings = _settingsAccessor();
+        // Every detector is started regardless of its enabled setting: each one checks the live
+        // setting itself, so enabling an engine in the GUI needs no service restart.
         foreach (var detector in _detectors)
         {
             if (stoppingToken.IsCancellationRequested)
@@ -71,16 +78,10 @@ public sealed class GuardWorker : BackgroundService
                 break;
             }
 
-            if (!ShouldStart(detector, settings))
-            {
-                _logger.LogInformation("Detector {Detector} is disabled by settings; not started.", detector.Name);
-                continue;
-            }
-
             try
             {
                 await detector.StartAsync(channel, stoppingToken).ConfigureAwait(false);
-                _state.SetRunning(detector.Source, true);
+                _state.Register(detector);
                 _logger.LogInformation("Detector {Detector} ({Source}) started.", detector.Name, detector.Source);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -118,14 +119,4 @@ public sealed class GuardWorker : BackgroundService
 
         _logger.LogInformation("GuardWorker stopped.");
     }
-
-    private static bool ShouldStart(IDetector detector, WinGuardSettings settings) => detector switch
-    {
-        RdpSecurityLogDetector => true, // subscribes always; gated per event (hot-enable)
-        RdpCoreTsDetector => true,
-        MsSqlDetector => true,
-        FtpLogDetector => true, // polls always; gated by Ftp.Enabled each cycle (hot-enable)
-        CustomLogDetector => true, // loop re-reads sources every cycle (hot-add)
-        _ => true,
-    };
 }

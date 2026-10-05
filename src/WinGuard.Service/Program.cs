@@ -60,7 +60,27 @@ internal static class Program
         catch (Exception ex)
         {
             Console.Error.WriteLine($"WinGuard failed: {ex.Message}");
+            TryLogFatal(ex);
             return 1;
+        }
+    }
+
+    /// <summary>
+    /// A start-up failure happens before (or outside) the host's logging, and a Windows service has
+    /// no console: leave a trace in the log folder so "the service will not start" can be diagnosed.
+    /// </summary>
+    private static void TryLogFatal(Exception exception)
+    {
+        try
+        {
+            Directory.CreateDirectory(Defaults.LogFolder);
+            File.AppendAllText(
+                Path.Combine(Defaults.LogFolder, "winguard-fatal.log"),
+                $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [CRT] WinGuard failed: {exception}{Environment.NewLine}");
+        }
+        catch (Exception)
+        {
+            // Nothing else can be done.
         }
     }
 
@@ -189,9 +209,11 @@ internal static class Program
             return 1;
         }
 
-        var create = RunProcess("sc.exe",
+        // The path is passed WITH its quotes so the stored ImagePath is quoted; an unquoted path
+        // containing spaces ("C:\Program Files\...") is the classic unquoted-service-path weakness.
+        var create = RunProcess(ScExe,
             "create", Defaults.ServiceName,
-            "binPath=", executable,
+            "binPath=", "\"" + executable + "\"",
             "start=", "delayed-auto",
             "DisplayName=", Defaults.ServiceDisplayName);
         if (create.ExitCode != 0)
@@ -202,13 +224,13 @@ internal static class Program
 
         Console.WriteLine($"Created service '{Defaults.ServiceName}'.");
 
-        var description = RunProcess("sc.exe", "description", Defaults.ServiceName, Defaults.ServiceDescription);
+        var description = RunProcess(ScExe, "description", Defaults.ServiceName, Defaults.ServiceDescription);
         if (description.ExitCode != 0)
         {
             Console.Error.WriteLine($"Warning: could not set the service description: {description.Output}");
         }
 
-        var failure = RunProcess("sc.exe",
+        var failure = RunProcess(ScExe,
             "failure", Defaults.ServiceName,
             "reset=", "86400",
             "actions=", "restart/5000/restart/5000/restart/5000");
@@ -217,7 +239,7 @@ internal static class Program
             Console.Error.WriteLine($"Warning: could not set service failure actions: {failure.Output}");
         }
 
-        var start = RunProcess("sc.exe", "start", Defaults.ServiceName);
+        var start = RunProcess(ScExe, "start", Defaults.ServiceName);
         if (start.ExitCode != 0)
         {
             // Already-running (1056) is benign; report but do not fail the install.
@@ -233,7 +255,7 @@ internal static class Program
 
     private static int UninstallService()
     {
-        var stop = RunProcess("sc.exe", "stop", Defaults.ServiceName);
+        var stop = RunProcess(ScExe, "stop", Defaults.ServiceName);
         if (stop.ExitCode != 0)
         {
             Console.Error.WriteLine($"Warning: could not stop the service (it may not be running): {stop.Output}");
@@ -242,7 +264,7 @@ internal static class Program
         // Give the SCM a moment to finish stopping before deletion.
         Thread.Sleep(1500);
 
-        var delete = RunProcess("sc.exe", "delete", Defaults.ServiceName);
+        var delete = RunProcess(ScExe, "delete", Defaults.ServiceName);
         if (delete.ExitCode != 0)
         {
             Console.Error.WriteLine($"Failed to delete the service: {delete.Output}");
@@ -266,6 +288,9 @@ internal static class Program
         Console.WriteLine("Removed all WinGuard firewall rules.");
         return 0;
     }
+
+    /// <summary>Full path, so a file named sc.exe next to this executable can never be run instead.</summary>
+    private static string ScExe => Path.Combine(Environment.SystemDirectory, "sc.exe");
 
     private static (int ExitCode, string Output) RunProcess(string fileName, params string[] arguments)
     {

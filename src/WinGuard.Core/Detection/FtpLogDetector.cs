@@ -16,7 +16,8 @@ namespace WinGuard.Core.Detection;
 /// It polls <see cref="FtpSettings.Sources"/> every <see cref="FtpSettings.PollInterval"/> using
 /// the shared <see cref="LogFileTailer"/>, parsing only newly appended lines. IIS lines are
 /// flagged when <c>cs-method == PASS</c> and <c>sc-status == 530</c>; FileZilla lines are flagged
-/// on <c>"530 Login or password incorrect!"</c>. The failure timestamp comes from the log line
+/// on a <c>530 Login…</c> response (<c>"530 Login or password incorrect!"</c> in Server 0.9.x,
+/// <c>"530 Login incorrect."</c> in 1.x). The failure timestamp comes from the log line
 /// itself: IIS W3C <c>date</c>+<c>time</c> columns are UTC, and the FileZilla leading
 /// <c>(nnnnnn) yyyy-MM-dd HH:mm:ss</c> stamp is local time converted to UTC. Only when the
 /// line carries no parseable timestamp does the parser fall back to <see cref="DateTime.UtcNow"/>.
@@ -53,6 +54,11 @@ public sealed class FtpLogDetector : IDetector
     private readonly TimeProvider _timeProvider;
     private readonly LogFileTailer _tailer = new();
     private readonly FileChangeSignal _signal = new();
+
+    // Sources that were already polled at least once: a file that shows up under one of them
+    // later is new (e.g. the next daily log) and is read from its first line.
+    private HashSet<string> _knownSources = new(StringComparer.OrdinalIgnoreCase);
+    private volatile bool _loopRunning;
     private readonly Dictionary<string, string> _fieldsHeaders = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _headerPreReadDone = new(StringComparer.OrdinalIgnoreCase);
 
@@ -75,6 +81,9 @@ public sealed class FtpLogDetector : IDetector
 
     /// <inheritdoc />
     public string Name => "FTP (IIS/FileZilla logs)";
+
+    /// <inheritdoc />
+    public bool IsRunning => _loopRunning;
 
     /// <inheritdoc />
     public Task StartAsync(Channel<FailedLogin> sink, CancellationToken ct)
@@ -172,7 +181,9 @@ public sealed class FtpLogDetector : IDetector
         }
 
         var trimmed = line.Trim();
-        if (trimmed.IndexOf("530 Login or password incorrect!", StringComparison.OrdinalIgnoreCase) < 0)
+        // "530 Login or password incorrect!" (Server 0.9.x) and "530 Login incorrect." (1.x).
+        var responseIndex = trimmed.IndexOf("530 Login", StringComparison.OrdinalIgnoreCase);
+        if (responseIndex < 0)
         {
             return false;
         }
@@ -180,7 +191,7 @@ public sealed class FtpLogDetector : IDetector
         string? user = null;
         string? rawIp;
         var match = FileZillaLoginRegex.Match(trimmed);
-        if (match.Success)
+        if (match.Success && match.Index < responseIndex)
         {
             rawIp = match.Groups["ip"].Value;
             var parenUser = match.Groups["parenUser"].Success ? match.Groups["parenUser"].Value : null;
@@ -189,7 +200,7 @@ public sealed class FtpLogDetector : IDetector
         }
         else
         {
-            rawIp = LastParenthesizedIp(trimmed);
+            rawIp = LastParenthesizedIp(trimmed) ?? FirstIpToken(trimmed[..responseIndex]);
         }
 
         if (rawIp is null || !IpMatcher.TryNormalize(rawIp, out var ip))
@@ -211,6 +222,7 @@ public sealed class FtpLogDetector : IDetector
 
     private async Task PollLoopAsync(Channel<FailedLogin> sink, CancellationToken ct)
     {
+        _loopRunning = true;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -229,6 +241,13 @@ public sealed class FtpLogDetector : IDetector
                         _logger.LogWarning(ex, "FTP detector poll cycle failed.");
                     }
                 }
+                else if (_knownSources.Count > 0)
+                {
+                    // Disabled: forget positions so re-enabling starts at the end of each file
+                    // instead of replaying what was logged in the meantime.
+                    _knownSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    _tailer.Prune([]);
+                }
 
                 var interval = settings.Ftp.PollInterval > TimeSpan.Zero ? settings.Ftp.PollInterval : Defaults.FtpPollInterval;
                 try
@@ -245,17 +264,27 @@ public sealed class FtpLogDetector : IDetector
         {
             _logger.LogError(ex, "FTP detector poll loop terminated unexpectedly.");
         }
+        finally
+        {
+            _loopRunning = false;
+            _signal.Dispose();
+        }
     }
 
     private void PollOnce(WinGuardSettings settings, Channel<FailedLogin> sink)
     {
         var activeFiles = new List<string>();
+        var seenSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var source in settings.Ftp.Sources ?? [])
         {
             if (source is null || string.IsNullOrWhiteSpace(source.Path))
             {
                 continue;
             }
+
+            var sourceKey = $"{source.Kind}|{source.Path.Trim()}";
+            var sourceKnown = _knownSources.Contains(sourceKey);
+            seenSources.Add(sourceKey);
 
             var files = source.Kind == FtpServerKind.FileZilla
                 ? LogFileTailer.ResolveFiles(source.Path, "*")
@@ -269,7 +298,7 @@ public sealed class FtpLogDetector : IDetector
                     EnsureFieldsHeaderPreRead(file);
                 }
 
-                foreach (var line in _tailer.ReadNewLines(file))
+                foreach (var line in _tailer.ReadNewLines(file, readFromStartIfNew: sourceKnown))
                 {
                     if (source.Kind == FtpServerKind.FileZilla)
                     {
@@ -295,6 +324,7 @@ public sealed class FtpLogDetector : IDetector
             }
         }
 
+        _knownSources = seenSources;
         _tailer.Prune(activeFiles);
         _signal.Watch(activeFiles);
 
@@ -423,6 +453,25 @@ public sealed class FtpLogDetector : IDetector
         return found;
     }
 
+    /// <summary>
+    /// The first whitespace/bracket-delimited token that is a valid IP. Used for log layouts the
+    /// legacy pattern does not match (FileZilla Server 1.x writes the session address in the line
+    /// prefix). Only the text BEFORE the server's 530 response is searched, and the first address
+    /// wins, so nothing the client typed later on the line can be mistaken for the session address.
+    /// </summary>
+    private static string? FirstIpToken(string text)
+    {
+        foreach (var token in text.Split([' ', '\t', '[', ']', '(', ')', '<', '>', ',', ';'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (IpMatcher.TryNormalize(token, out _))
+            {
+                return token;
+            }
+        }
+
+        return null;
+    }
+
     private static string? NormalizeOptional(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -471,6 +520,19 @@ public sealed class FtpLogDetector : IDetector
                 out var parsed))
         {
             return DateTime.SpecifyKind(parsed, DateTimeKind.Local).ToUniversalTime();
+        }
+
+        // FileZilla Server 1.x starts the line with an ISO-8601 stamp, optionally in < > or [ ].
+        var space = line.IndexOf(' ');
+        var first = (space > 0 ? line[..space] : line).Trim('<', '>', '[', ']');
+        if (first.Length >= 19 && first[10] == 'T'
+            && DateTimeOffset.TryParse(
+                first,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out var iso))
+        {
+            return iso.UtcDateTime;
         }
 
         return DateTime.UtcNow;

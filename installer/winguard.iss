@@ -8,7 +8,7 @@
   #define MyAppVersion "0.1.0"
 #endif
 #define MyAppPublisher "WinGuard contributors"
-#define MyAppUrl "https://github.com/winguard/winguard"
+#define MyAppUrl "https://github.com/hammadfahim/WinGuard"
 #define MyAppExeName "winguard-gui.exe"
 #define MyAppServiceExe "winguard-svc.exe"
 #define MyAppServiceName "WinGuardService"
@@ -73,15 +73,20 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 ; Register the service. "binPath=" and "DisplayName=" need a space before the quoted value.
+; The executable path is passed with escaped inner quotes (\"...\") so the stored ImagePath is
+; itself quoted: a bare path with spaces ("C:\Program Files\...") is an unquoted service path.
 ; On upgrade the service already exists (and was stopped in PrepareToInstall), so the
-; create step is skipped and only description/failure/start are re-applied (harmless).
-Filename: "{sys}\sc.exe"; Parameters: "create {#MyAppServiceName} binPath= ""{app}\{#MyAppServiceExe}"" start= delayed-auto DisplayName= ""{#MyAppServiceDisplayName}"""; Flags: runhidden; StatusMsg: "Registering {#MyAppServiceDisplayName}..."; Check: not ServiceExistsFlag
+; create step is skipped; the config step below always runs and also re-quotes the path of a
+; service registered by an older installer.
+Filename: "{sys}\sc.exe"; Parameters: "create {#MyAppServiceName} binPath= ""\""{app}\{#MyAppServiceExe}\"""" start= delayed-auto DisplayName= ""{#MyAppServiceDisplayName}"""; Flags: runhidden; StatusMsg: "Registering {#MyAppServiceDisplayName}..."; Check: not ServiceExistsFlag
+Filename: "{sys}\sc.exe"; Parameters: "config {#MyAppServiceName} binPath= ""\""{app}\{#MyAppServiceExe}\"""""; Flags: runhidden
 Filename: "{sys}\sc.exe"; Parameters: "description {#MyAppServiceName} ""{#MyAppServiceDescription}"""; Flags: runhidden
 Filename: "{sys}\sc.exe"; Parameters: "failure {#MyAppServiceName} reset= 86400 actions= restart/5000/restart/5000/restart/5000"; Flags: runhidden
 ; Lock down the data folder (created by [Dirs]) before the service starts, so no
 ; local standard user can pre-create/poison the DB: remove inherited ACEs and grant
-; only SYSTEM + Administrators full control.
-Filename: "{sys}\icacls.exe"; Parameters: """{commonappdata}\WinGuard"" /inheritance:r /grant:r ""SYSTEM:(OI)(CI)F"" ""Administrators:(OI)(CI)F"""; Flags: runhidden; StatusMsg: "Securing {#MyAppName} data folder..."
+; only SYSTEM + Administrators full control. The accounts are given as SIDs
+; (S-1-5-18 = SYSTEM, S-1-5-32-544 = Administrators) because their names are localized.
+Filename: "{sys}\icacls.exe"; Parameters: """{commonappdata}\WinGuard"" /inheritance:r /grant:r ""*S-1-5-18:(OI)(CI)F"" ""*S-1-5-32-544:(OI)(CI)F"""; Flags: runhidden; StatusMsg: "Securing {#MyAppName} data folder..."
 Filename: "{sys}\sc.exe"; Parameters: "start {#MyAppServiceName}"; Flags: runhidden; StatusMsg: "Starting {#MyAppServiceDisplayName}..."
 ; Optional prerequisites. The subcategory GUID is locale-independent (the English name
 ; "Logon" silently fails on non-English Windows).

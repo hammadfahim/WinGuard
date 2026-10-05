@@ -19,6 +19,10 @@ public sealed class PipeClient : IDisposable
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
 
+    // Requests that make the service do real work (run auditpol, rewrite firewall rules, reload
+    // lists) can legitimately take longer than a status read.
+    private static readonly TimeSpan LongRequestTimeout = TimeSpan.FromSeconds(30);
+
     private readonly SemaphoreSlim _requestLock = new(1, 1);
     private readonly SemaphoreSlim _connectLock = new(1, 1);
     private readonly object _stateLock = new();
@@ -59,7 +63,7 @@ public sealed class PipeClient : IDisposable
     /// Sends one request and awaits its response. Throws <see cref="InvalidOperationException"/> when
     /// the service replies with an error, and <see cref="IOException"/> when the service is unreachable.
     /// </summary>
-    public async Task<IpcResponse> SendAsync(string method, object? parameters, CancellationToken ct = default)
+    public async Task<IpcResponse> SendAsync(string method, object? parameters, CancellationToken ct = default, TimeSpan? requestTimeout = null)
     {
         await _requestLock.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -75,7 +79,7 @@ public sealed class PipeClient : IDisposable
             var payload = JsonSerializer.Serialize(request, IpcJson.Options);
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(RequestTimeout);
+            timeout.CancelAfter(requestTimeout ?? RequestTimeout);
 
             IpcResponse response;
             try
@@ -118,20 +122,23 @@ public sealed class PipeClient : IDisposable
     public Task<ServiceStatusDto?> GetStatusAsync(CancellationToken ct = default) =>
         GetAsync<ServiceStatusDto>(IpcMethods.GetStatus, null, ct);
 
-    /// <summary>Lists active bans, or an empty list when the service is unavailable.</summary>
-    public async Task<List<BanDto>> ListBansAsync(CancellationToken ct = default) =>
-        await GetAsync<List<BanDto>>(IpcMethods.ListBans, null, ct).ConfigureAwait(false) ?? [];
+    /// <summary>Lists active bans, or null when the request failed (so "no bans" and "no answer" differ).</summary>
+    public Task<List<BanDto>?> ListBansAsync(CancellationToken ct = default) =>
+        GetAsync<List<BanDto>>(IpcMethods.ListBans, null, ct);
 
-    /// <summary>Lists events newest-first (optionally only those newer than <paramref name="sinceUtc"/>).</summary>
-    public async Task<List<EventDto>> ListEventsAsync(int limit, DateTime? sinceUtc, long? afterId = null, CancellationToken ct = default) =>
-        await GetAsync<List<EventDto>>(
+    /// <summary>
+    /// Lists events newest-first: the latest <paramref name="limit"/> when <paramref name="afterId"/>
+    /// is null, otherwise only those with a larger id. Null when the request failed.
+    /// </summary>
+    public Task<List<EventDto>?> ListEventsAsync(int limit, DateTime? sinceUtc, long? afterId = null, CancellationToken ct = default) =>
+        GetAsync<List<EventDto>>(
             IpcMethods.ListEvents,
             new ListEventsParams { Limit = limit, SinceUtc = sinceUtc, AfterId = afterId },
-            ct).ConfigureAwait(false) ?? [];
+            ct);
 
-    /// <summary>Lists whitelist and blacklist entries.</summary>
-    public async Task<List<ListEntryDto>> ListListsAsync(CancellationToken ct = default) =>
-        await GetAsync<List<ListEntryDto>>(IpcMethods.ListLists, null, ct).ConfigureAwait(false) ?? [];
+    /// <summary>Lists whitelist and blacklist entries, or null when the request failed.</summary>
+    public Task<List<ListEntryDto>?> ListListsAsync(CancellationToken ct = default) =>
+        GetAsync<List<ListEntryDto>>(IpcMethods.ListLists, null, ct);
 
     /// <summary>Removes a ban, optionally adding the IP to the whitelist.</summary>
     public Task UnblockAsync(string ip, bool alsoWhitelist, CancellationToken ct = default) =>
@@ -156,13 +163,20 @@ public sealed class PipeClient : IDisposable
     public Task<WinGuardSettings?> GetSettingsAsync(CancellationToken ct = default) =>
         GetAsync<WinGuardSettings>(IpcMethods.GetSettings, null, ct);
 
-    /// <summary>Pushes new settings to the service (hot-reload).</summary>
-    public Task UpdateSettingsAsync(WinGuardSettings settings, CancellationToken ct = default) =>
-        PostAsync(IpcMethods.UpdateSettings, new UpdateSettingsParams { Settings = settings }, ct);
+    /// <summary>
+    /// Pushes new settings to the service (hot-reload) and returns them as the service stored them
+    /// (after its own normalization). Throws when the service rejects them.
+    /// </summary>
+    public async Task<WinGuardSettings?> UpdateSettingsAsync(WinGuardSettings settings, CancellationToken ct = default)
+    {
+        var response = await SendAsync(IpcMethods.UpdateSettings, new UpdateSettingsParams { Settings = settings }, ct, LongRequestTimeout)
+            .ConfigureAwait(false);
+        return response.Result is { } result ? JsonSerializer.Deserialize<WinGuardSettings>(result, IpcJson.Options) : null;
+    }
 
     /// <summary>Checks detection prerequisites, or null when the service is unavailable.</summary>
     public Task<PrereqsDto?> CheckPrereqsAsync(CancellationToken ct = default) =>
-        GetAsync<PrereqsDto>(IpcMethods.CheckPrereqs, null, ct);
+        GetAsync<PrereqsDto>(IpcMethods.CheckPrereqs, null, ct, LongRequestTimeout);
 
     /// <inheritdoc />
     public void Dispose()
@@ -190,11 +204,11 @@ public sealed class PipeClient : IDisposable
         _connectLock.Dispose();
     }
 
-    private async Task<T?> GetAsync<T>(string method, object? parameters, CancellationToken ct)
+    private async Task<T?> GetAsync<T>(string method, object? parameters, CancellationToken ct, TimeSpan? requestTimeout = null)
     {
         try
         {
-            var response = await SendAsync(method, parameters, ct).ConfigureAwait(false);
+            var response = await SendAsync(method, parameters, ct, requestTimeout).ConfigureAwait(false);
             return response.Result is { } result
                 ? JsonSerializer.Deserialize<T>(result, IpcJson.Options)
                 : default;
@@ -207,7 +221,7 @@ public sealed class PipeClient : IDisposable
 
     private async Task PostAsync(string method, object? parameters, CancellationToken ct)
     {
-        await SendAsync(method, parameters, ct).ConfigureAwait(false);
+        await SendAsync(method, parameters, ct, LongRequestTimeout).ConfigureAwait(false);
     }
 
     private async Task EnsureConnectedAsync(CancellationToken ct)

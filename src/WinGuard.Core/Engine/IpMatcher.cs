@@ -168,6 +168,32 @@ public sealed class IpMatcher
     }
 
     /// <summary>
+    /// False for addresses that can never be a remote client and must not reach the ban list or
+    /// the firewall: unspecified (0.0.0.0, ::), IPv4 broadcast and multicast.
+    /// </summary>
+    /// <param name="ip">An IP literal (normalized or not).</param>
+    public static bool IsBannable(string ip)
+    {
+        if (!TryNormalize(ip, out var value) || !IPAddress.TryParse(value, out var address))
+        {
+            return false;
+        }
+
+        if (address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any) || address.Equals(IPAddress.Broadcast))
+        {
+            return false;
+        }
+
+        if (address.AddressFamily == AddressFamily.InterNetwork)
+        {
+            var first = address.GetAddressBytes()[0];
+            return first is not (0 or >= 224 and <= 239);
+        }
+
+        return !address.IsIPv6Multicast;
+    }
+
+    /// <summary>
     /// Parses an entry into an <see cref="IPNetwork"/>: either a CIDR (<c>1.2.3.0/24</c>)
     /// or a bare IP (treated as <c>/32</c> or <c>/128</c>). Host bits set in a CIDR
     /// (e.g. <c>192.168.1.5/24</c>) are masked to the network address so admin-entered
@@ -339,6 +365,12 @@ public sealed class IpMatcher
         foreach (var part in parts)
         {
             if (part.Length is 0 or > 3)
+            {
+                return false;
+            }
+
+            // IPAddress.TryParse reads a leading zero as octal ("010.1.1.1" => 8.1.1.1).
+            if (part.Length > 1 && part[0] == '0')
             {
                 return false;
             }

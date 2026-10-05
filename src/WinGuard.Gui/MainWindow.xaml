@@ -56,10 +56,11 @@
                                 </Style.Triggers>
                             </Style>
                         </Border.Style>
-                        <TextBlock Text="{Binding Dashboard.ConnectionText}" Foreground="White"
+                        <TextBlock Text="{Binding Dashboard.ConnectionText}" Foreground="{DynamicResource OnAccentForegroundBrush}"
                                    FontWeight="SemiBold" FontSize="11" HorizontalAlignment="Center" />
                     </Border>
-                    <Button Content="Toggle theme" Command="{Binding ToggleThemeCommand}" />
+                    <Button Content="{Binding ThemeButtonText}" Command="{Binding CycleThemeCommand}"
+                            ToolTip="Switch between following Windows, light and dark" />
                 </StackPanel>
 
                 <ListBox ItemsSource="{Binding NavigationItems}"
