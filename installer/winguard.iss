@@ -91,7 +91,10 @@ Filename: "{sys}\sc.exe"; Parameters: "start {#MyAppServiceName}"; Flags: runhid
 ; Optional prerequisites. The subcategory GUID is locale-independent (the English name
 ; "Logon" silently fails on non-English Windows).
 Filename: "{sys}\auditpol.exe"; Parameters: "/set /subcategory:""{{0CCE9215-69AE-11D9-BED3-505054503030}"" /success:enable /failure:enable"; Flags: runhidden; Tasks: auditpolicy; StatusMsg: "Enabling logon failure auditing..."
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+; The console requires elevation (its manifest says requireAdministrator). A postinstall entry
+; is started as the ORIGINAL, non-elevated user by default, which fails with "CreateProcess
+; failed; code 740". runascurrentuser starts it with Setup's own (already elevated) rights.
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent runascurrentuser
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
