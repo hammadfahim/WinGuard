@@ -77,6 +77,18 @@ public sealed class NotificationDispatcherTests
         NullEventPublisher.Instance.Publish(new LogEvent { Message = "x" });
     }
 
+    [Fact]
+    public void Windows_event_log_writer_honors_its_toggle_and_level_filter()
+    {
+        var writer = new WindowsEventLogWriter(NullLogger<WindowsEventLogWriter>.Instance);
+        var off = new NotificationSettings { WriteToWindowsEventLog = false };
+
+        // Toggle off / Info-level events never reach the event-log API.
+        writer.Write(new LogEvent { Level = LogEventLevel.Warning, Message = "BLOCKED 1.2.3.4" }, off);
+        writer.Write(new LogEvent { Level = LogEventLevel.Info, Message = "SKIPPED 1.2.3.4" }, null);
+        writer.Write(null!, null);
+    }
+
     private sealed class RecordingPublisher : IEventPublisher
     {
         public List<LogEvent> Records { get; } = [];

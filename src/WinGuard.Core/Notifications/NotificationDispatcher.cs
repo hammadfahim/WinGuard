@@ -29,6 +29,7 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
 
     private readonly Func<WinGuardSettings> _settingsAccessor;
     private readonly ILogger<NotificationDispatcher> _logger;
+    private readonly WindowsEventLogWriter? _windowsEventLog;
     private readonly Channel<LogEvent> _queue;
     private readonly object _rateLock = new();
     private readonly Queue<DateTime> _recentSends = new();
@@ -41,14 +42,21 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
     /// <summary>Creates the dispatcher.</summary>
     /// <param name="settingsAccessor">Live settings (channels are re-read per event).</param>
     /// <param name="logger">Diagnostic logger.</param>
+    /// <param name="windowsEventLog">
+    /// Optional Windows Application-log writer, delivered on the dispatcher's background loop so
+    /// the engine's hot path never performs event-log I/O. Honors its own settings toggle,
+    /// independent of the notification master switch.
+    /// </param>
     /// <param name="httpClient">Optional HTTP client (tests inject one); created when null.</param>
     public NotificationDispatcher(
         Func<WinGuardSettings> settingsAccessor,
         ILogger<NotificationDispatcher> logger,
+        WindowsEventLogWriter? windowsEventLog = null,
         HttpClient? httpClient = null)
     {
         _settingsAccessor = settingsAccessor ?? throw new ArgumentNullException(nameof(settingsAccessor));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _windowsEventLog = windowsEventLog;
         _httpClient = httpClient ?? new HttpClient();
         _queue = Channel.CreateBounded<LogEvent>(new BoundedChannelOptions(500)
         {
@@ -148,6 +156,14 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
     {
         var settings = _settingsAccessor();
         var notifications = settings?.Notifications;
+
+        // The Windows Application log is delivered regardless of the notification master switch
+        // (it has its own toggle) and is not rate limited: SIEM consumers want full fidelity.
+        if (settings is not null)
+        {
+            _windowsEventLog?.Write(logEvent, settings.Notifications);
+        }
+
         if (notifications is not { Enabled: true })
         {
             return;
@@ -311,6 +327,11 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
 /// <c>WinGuard</c> source, so Windows Event Forwarding, Splunk, Wazuh and friends can consume
 /// WinGuard activity without polling the GUI pipe. Opt-in via
 /// <see cref="NotificationSettings.WriteToWindowsEventLog"/> (default on).
+/// <para>
+/// <see cref="Publish"/> stays on the calling (engine) path only to enqueue; the actual event-log
+/// I/O is expected to run on the notification dispatcher's background loop via <see cref="Write"/>,
+/// which is also safe to call directly.
+/// </para>
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class WindowsEventLogWriter : IEventPublisher
@@ -318,41 +339,50 @@ public sealed class WindowsEventLogWriter : IEventPublisher
     /// <summary>Event-log source WinGuard writes under (created on first use; needs one elevation).</summary>
     public const string SourceName = "WinGuard";
 
-    private readonly Func<WinGuardSettings>? _settingsAccessor;
     private readonly ILogger _logger;
-    private readonly bool _available;
-    private bool _warnedSourceFailure;
+
+    // Source-existence probing enumerates the event log registry and is slow; the result is
+    // cached for the process lifetime (0 = unknown, 1 = ready, 2 = failed).
+    private int _sourceState;
 
     /// <summary>Creates the writer.</summary>
-    /// <param name="settingsAccessor">Live settings; when supplied the built-in toggle is honored.</param>
     /// <param name="logger">Diagnostic logger.</param>
-    public WindowsEventLogWriter(Func<WinGuardSettings>? settingsAccessor, ILogger logger)
+    public WindowsEventLogWriter(ILogger logger)
     {
-        _settingsAccessor = settingsAccessor;
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _available = OperatingSystem.IsWindows();
     }
 
-    /// <inheritdoc />
-    public void Publish(LogEvent logEvent)
+    /// <summary>
+    /// Direct sink entry: writes one event, honoring the
+    /// <see cref="NotificationSettings.WriteToWindowsEventLog"/> toggle. Never throws.
+    /// </summary>
+    public void Write(LogEvent logEvent, NotificationSettings? settings)
     {
-        if (!_available || logEvent is null || logEvent.Level < LogEventLevel.Warning)
+        if (!OperatingSystem.IsWindows() || logEvent is null || logEvent.Level < LogEventLevel.Warning)
+        {
+            return;
+        }
+
+        if (settings is not null && !settings.WriteToWindowsEventLog)
         {
             return;
         }
 
         try
         {
-            var settings = _settingsAccessor?.Invoke();
-            if (settings?.Notifications is { } notifications && !notifications.WriteToWindowsEventLog)
+            if (Volatile.Read(ref _sourceState) == 0)
+            {
+                if (!System.Diagnostics.EventLog.SourceExists(SourceName))
+                {
+                    System.Diagnostics.EventLog.CreateEventSource(SourceName, "Application");
+                    _logger.LogInformation("Created the '{Source}' event source in the Application log.", SourceName);
+                }
+
+                Volatile.Write(ref _sourceState, 1);
+            }
+            else if (Volatile.Read(ref _sourceState) == 2)
             {
                 return;
-            }
-
-            if (!System.Diagnostics.EventLog.SourceExists(SourceName))
-            {
-                System.Diagnostics.EventLog.CreateEventSource(SourceName, "Application");
-                _logger.LogInformation("Created the '{Source}' event source in the Application log.", SourceName);
             }
 
             var entryType = logEvent.Level switch
@@ -366,13 +396,17 @@ public sealed class WindowsEventLogWriter : IEventPublisher
         }
         catch (Exception ex)
         {
-            // A locked-down Application log must never break the engine; complain once.
-            if (!_warnedSourceFailure)
-            {
-                _warnedSourceFailure = true;
-                _logger.LogWarning(ex, "Could not write to the Windows Application event log; Windows Event Log output is disabled for this run.");
-            }
+            // A locked-down Application log must never break delivery; complain once and stop.
+            Volatile.Write(ref _sourceState, 2);
+            _logger.LogWarning(ex, "Could not write to the Windows Application event log; Windows Event Log output is disabled for this run.");
         }
+    }
+
+    /// <inheritdoc />
+    public void Publish(LogEvent logEvent)
+    {
+        // Compatibility path for direct use as an IEventPublisher: no settings toggle available.
+        Write(logEvent, null);
     }
 }
 

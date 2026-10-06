@@ -169,17 +169,15 @@ internal static class Program
                 Defaults.MaxAddressesPerRule,
                 () => sp.GetRequiredService<SettingsHolder>().Current));
 
-        // Event fan-out: warning/error engine events go to the Windows Application event log (SIEM
+        // Event fan-out: warning/error engine events are enqueued (never blocking the engine path)
+        // and delivered by one background loop — to the Windows Application event log (SIEM
         // friendly, opt-out via settings) and to the configured notification channels.
         builder.Services.AddSingleton(sp => new NotificationDispatcher(
             () => sp.GetRequiredService<SettingsHolder>().Current,
-            sp.GetRequiredService<ILogger<NotificationDispatcher>>()));
+            sp.GetRequiredService<ILogger<NotificationDispatcher>>(),
+            new WindowsEventLogWriter(sp.GetRequiredService<ILogger<WindowsEventLogWriter>>())));
 
-        builder.Services.AddSingleton<IEventPublisher>(sp => new CompositeEventPublisher(
-            new WindowsEventLogWriter(
-                () => sp.GetRequiredService<SettingsHolder>().Current,
-                sp.GetRequiredService<ILogger<CompositeEventPublisher>>()),
-            sp.GetRequiredService<NotificationDispatcher>()));
+        builder.Services.AddSingleton<IEventPublisher>(sp => sp.GetRequiredService<NotificationDispatcher>());
 
         builder.Services.AddSingleton(sp =>
             new BanEngine(
