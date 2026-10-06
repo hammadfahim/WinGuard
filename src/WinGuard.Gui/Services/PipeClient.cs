@@ -20,6 +20,9 @@ public sealed class PipeClient : IDisposable
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
 
+    // How long one attempt waits for a free instance of the service's pipe.
+    private const int ConnectTimeoutMs = 2000;
+
     // Requests that make the service do real work (run auditpol, rewrite firewall rules, reload
     // lists) can legitimately take longer than a status read.
     private static readonly TimeSpan LongRequestTimeout = TimeSpan.FromSeconds(30);
@@ -305,7 +308,7 @@ public sealed class PipeClient : IDisposable
 
             try
             {
-                await pipe.ConnectAsync(500, ct).ConfigureAwait(false);
+                await pipe.ConnectAsync(ConnectTimeoutMs, ct).ConfigureAwait(false);
             }
             catch (UnauthorizedAccessException)
             {
@@ -314,17 +317,33 @@ public sealed class PipeClient : IDisposable
                 NoteFailedAttempt();
                 return false;
             }
-            catch (Exception)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                // No pipe: the service is not running. That is not a "problem" to explain, and
-                // there is nothing to back off from — notice quickly when it comes up.
                 pipe.Dispose();
-                SetProblem(null);
-                lock (_stateLock)
+                throw;
+            }
+            catch (Exception ex)
+            {
+                pipe.Dispose();
+                if (!ServicePipeExists())
                 {
-                    _rapidFailures = 0;
+                    // No pipe: the service is not running. That is not a "problem" to explain, and
+                    // there is nothing to back off from — notice quickly when it comes up.
+                    SetProblem(null);
+                    lock (_stateLock)
+                    {
+                        _rapidFailures = 0;
+                    }
+
+                    return false;
                 }
 
+                // The service's pipe is there but could not be opened in time: say so instead of
+                // claiming the service is not running.
+                SetProblem(ex is TimeoutException
+                    ? "The WinGuard service is running but is not accepting connections (its pipe is busy). Restart the WinGuard service; if this keeps happening, check the service log."
+                    : "Could not connect to the WinGuard service: " + ex.Message);
+                NoteFailedAttempt();
                 return false;
             }
 
@@ -419,6 +438,30 @@ public sealed class PipeClient : IDisposable
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Whether the service's pipe exists at all. The pipe directory is listed rather than probing
+    /// the name, because probing a pipe name opens (and uses up) one of its instances.
+    /// </summary>
+    private static bool ServicePipeExists()
+    {
+        try
+        {
+            foreach (var path in Directory.EnumerateFiles(@"\\.\pipe\"))
+            {
+                if (string.Equals(Path.GetFileName(path), PipeConstants.PipeName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Cannot tell: treat as absent.
+        }
+
+        return false;
     }
 
     private void SetProblem(string? problem)
