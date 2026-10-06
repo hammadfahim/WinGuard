@@ -92,6 +92,18 @@ public sealed partial class BanEngine
                 _logger.LogError(ex, "Housekeeping failed to remove expired ban {Ip}.", ban.IpAddress);
             }
 
+            await AddBanHistoryCoreAsync(new BanHistoryEntry
+            {
+                TimestampUtc = now,
+                Action = BanHistoryAction.Expired,
+                IpAddress = ban.IpAddress,
+                Source = ban.Source,
+                OffenseCount = ban.OffenseCount,
+                Duration = ban.BannedAtUtc == DateTime.MinValue || ban.ExpiresUtc == DateTime.MaxValue
+                    ? null
+                    : ban.ExpiresUtc - ban.BannedAtUtc,
+            }, ct).ConfigureAwait(false);
+
             // The escalation quiet period starts when the ban ENDS, not when the offense
             // was recorded — otherwise a 7d/30d ban would outlive its own offense record
             // and tier escalation would silently reset (E-M2 pruning interaction).
@@ -158,6 +170,9 @@ public sealed partial class BanEngine
 
         await ReloadListsCoreAsync(ct).ConfigureAwait(false);
 
+        // Persist the buffered per-day statistics deltas.
+        await FlushDailyStatsAsync(ct).ConfigureAwait(false);
+
         // Expiry above already unblocked what is due; the full firewall comparison is only a
         // self-heal against outside changes, so the timer loop runs it at most once a minute.
         if (forceReconcile || (now - _lastReconcileUtc).Duration() >= ReconcileInterval)
@@ -169,6 +184,13 @@ public sealed partial class BanEngine
 
     private async Task ReconcileFirewallCoreAsync(CancellationToken ct)
     {
+        // Monitoring mode never enforces: leave the firewall alone entirely (bans recorded in
+        // the store become enforced the moment report-only is switched off, right here).
+        if (_settingsAccessor().ReportOnly)
+        {
+            return;
+        }
+
         IReadOnlyList<BanEntry> activeBans;
         IReadOnlyList<string> blocked;
         try
@@ -182,9 +204,22 @@ public sealed partial class BanEngine
             return;
         }
 
+        var blockedSet = new HashSet<string>(blocked, StringComparer.OrdinalIgnoreCase);
         var activeSet = new HashSet<string>(activeBans.Select(b => b.IpAddress), StringComparer.OrdinalIgnoreCase);
 
-        // Remove orphan rules that no longer correspond to an active ban.
+        // Blacklisted CIDR entries are enforced as whole-subnet range rules: they belong to the
+        // expected state just like active bans (a blacklisted range is blocked as a whole, not
+        // address-by-address on first contact).
+        var expectedRanges = new List<string>();
+        foreach (var range in _blacklistedRanges)
+        {
+            if (activeSet.Add(range))
+            {
+                expectedRanges.Add(range);
+            }
+        }
+
+        // Remove orphan rules that no longer correspond to an active ban or blacklisted range.
         foreach (var blockedIp in blocked)
         {
             if (!activeSet.Contains(blockedIp))
@@ -193,12 +228,22 @@ public sealed partial class BanEngine
             }
         }
 
-        // Re-add missing rules for active bans (self-heal after reboot/firewall reset).
+        // Re-add missing rules for active bans (self-heal after reboot/firewall reset) and for
+        // newly blacklisted subnets.
         foreach (var ban in activeBans)
         {
-            if (!blocked.Contains(ban.IpAddress, StringComparer.OrdinalIgnoreCase))
+            if (!blockedSet.Contains(ban.IpAddress))
             {
                 TryFirewall(() => _firewall.Block(ban.IpAddress), "re-block", ban.IpAddress);
+            }
+        }
+
+        foreach (var range in expectedRanges)
+        {
+            if (!blockedSet.Contains(range))
+            {
+                TryFirewall(() => _firewall.Block(range), "blacklist range", range);
+                _logger.LogInformation("Enforcing blacklisted subnet {Range} as a firewall range rule.", range);
             }
         }
     }

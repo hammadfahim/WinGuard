@@ -25,6 +25,7 @@ public sealed partial class BanEngine
     private readonly Func<WinGuardSettings> _settingsAccessor;
     private readonly ILogger<BanEngine> _logger;
     private readonly TimeProvider _timeProvider;
+    private readonly IEventPublisher _publisher;
 
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _lifecycle = new();
@@ -53,6 +54,14 @@ public sealed partial class BanEngine
     private readonly int[] _detectionsToday = new int[Enum.GetValues<ProtocolSource>().Length];
     private DateOnly _detectionsDay;
 
+    // Buffered daily-statistics deltas (day, source) -> (detections, bans), flushed to the store
+    // during housekeeping so the hot path stays write-free. Own lock, read by IPC.
+    private readonly Dictionary<(DateOnly Day, ProtocolSource Source), (int Detections, int Bans)> _dailyStats = new();
+
+    // Canonical CIDR entries of the blacklist (e.g. "203.0.113.0/24"): enforced as firewall
+    // range rules so a blacklisted subnet is blocked as a whole, not address-by-address.
+    private List<string> _blacklistedRanges = [];
+
     private IpMatcher _matcher = new(Array.Empty<string>(), Array.Empty<string>());
     private bool _listsLoaded;
 
@@ -61,18 +70,21 @@ public sealed partial class BanEngine
 
     /// <summary>Creates the engine. <paramref name="settingsAccessor"/> is called fresh on every
     /// decision so hot-reloaded settings take effect immediately.</summary>
+    /// <param name="eventPublisher">Optional fan-out for engine events (notifications, Windows Event Log).</param>
     public BanEngine(
         IStore store,
         IFirewall firewall,
         Func<WinGuardSettings> settingsAccessor,
         ILogger<BanEngine> logger,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IEventPublisher? eventPublisher = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _firewall = firewall ?? throw new ArgumentNullException(nameof(firewall));
         _settingsAccessor = settingsAccessor ?? throw new ArgumentNullException(nameof(settingsAccessor));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _publisher = eventPublisher ?? NullEventPublisher.Instance;
     }
 
     /// <summary>
@@ -132,6 +144,15 @@ public sealed partial class BanEngine
                 _rdpDedup.Clear();
                 await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
                 await TryAddEventAsync(null, null, "Cleared bans on startup (ClearBansOnStartup).", ct).ConfigureAwait(false);
+            }
+            else if (settings.ReportOnly)
+            {
+                // Monitoring mode: never enforce, but keep the database the source of truth. Any
+                // rules left over from before the flag was set are lifted by expiry/unban, and
+                // everything recorded becomes enforced the moment report-only is switched off
+                // (the reconcile pass re-blocks every active ban).
+                _logger.LogInformation("BanEngine started in report-only mode: failures are counted and recorded, but the firewall is not modified.");
+                await TryAddEventAsync(null, null, "Started in report-only mode: bans are recorded but NOT enforced in the firewall.", ct).ConfigureAwait(false);
             }
             else
             {
@@ -359,7 +380,23 @@ public sealed partial class BanEngine
             await _store.UpsertBanAsync(ban, ct).ConfigureAwait(false);
             _offenses.Set(normalized, offense, now);
             await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
-            TryFirewall(() => _firewall.Block(normalized), "block", normalized);
+            TryBlock(normalized);
+            if (!stillBanned)
+            {
+                RecordBanStat(ban.Source);
+            }
+
+            await AddBanHistoryCoreAsync(new BanHistoryEntry
+            {
+                TimestampUtc = now,
+                Action = stillBanned ? BanHistoryAction.Updated : BanHistoryAction.Banned,
+                IpAddress = normalized,
+                Source = ban.Source,
+                OffenseCount = offense,
+                IsPermanent = isPermanent,
+                Duration = effectiveDuration,
+                Note = string.IsNullOrWhiteSpace(note) ? null : note.Trim(),
+            }, ct).ConfigureAwait(false);
 
             var message = isPermanent
                 ? $"MANUAL BLOCK {normalized} (permanent)"
@@ -413,6 +450,13 @@ public sealed partial class BanEngine
             {
                 _logger.LogError(ex, "Manual unblock: failed to clear failed logins for {Ip}.", normalized);
             }
+
+            await AddBanHistoryCoreAsync(new BanHistoryEntry
+            {
+                TimestampUtc = NowUtc(),
+                Action = BanHistoryAction.Unbanned,
+                IpAddress = normalized,
+            }, ct).ConfigureAwait(false);
 
             await TryAddEventAsync(new LogEvent
             {
@@ -487,6 +531,16 @@ public sealed partial class BanEngine
             }
         }
 
+        // Do not lose today's buffered statistics deltas on shutdown.
+        try
+        {
+            await FlushDailyStatsAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not flush daily statistics on stop.");
+        }
+
         cts.Dispose();
     }
 
@@ -539,6 +593,28 @@ public sealed partial class BanEngine
             return;
         }
 
+        // Blacklist membership is checked on the FULL address: list entries are networks, and the
+        // aggregated prefix computed below is not an address they could contain.
+        var blacklisted = _matcher.IsBlacklisted(ip);
+
+        // IPv6 aggregate banning: an attacker rotating addresses inside their /64 would never
+        // cross a per-address threshold, so count and ban the whole prefix instead.
+        if (!blacklisted
+            && settings.Ipv6AggregatePrefixLength > 0
+            && ip.Contains(':')
+            && IpMatcher.TryAggregateIpv6(ip, settings.Ipv6AggregatePrefixLength, out var aggregatedPrefix))
+        {
+            if (_matcher.IsWhitelisted(aggregatedPrefix))
+            {
+                _logger.LogDebug("Skipping aggregated prefix {Prefix}: it is whitelisted.", aggregatedPrefix);
+                return;
+            }
+
+            _logger.LogDebug("Aggregating IPv6 address {Ip} to prefix {Prefix}.", ip, aggregatedPrefix);
+            ip = aggregatedPrefix;
+            failed.IpAddress = ip;
+        }
+
         // An exclusion rule matched (RDP 4625). It is never counted, but it is remembered so the
         // RdpCoreTS 140 event describing the same attempt is dropped too; when that 140 arrived
         // first and was already counted, that one count is taken back.
@@ -575,11 +651,11 @@ public sealed partial class BanEngine
         var now = NowUtc();
 
         // 3. Blacklist -> ensure a permanent ban.
-        if (_matcher.IsBlacklisted(ip))
+        if (blacklisted)
         {
             if (current is { IsPermanent: true })
             {
-                TryFirewall(() => _firewall.Block(ip), "block", ip);
+                TryBlock(ip);
                 return;
             }
 
@@ -598,7 +674,18 @@ public sealed partial class BanEngine
             await _store.UpsertBanAsync(permanentBan, ct).ConfigureAwait(false);
             _offenses.Set(ip, offense, now);
             await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
-            TryFirewall(() => _firewall.Block(ip), "block", ip);
+            TryBlock(ip);
+            RecordBanStat(failed.Source);
+            await AddBanHistoryCoreAsync(new BanHistoryEntry
+            {
+                TimestampUtc = now,
+                Action = BanHistoryAction.Banned,
+                IpAddress = ip,
+                Source = failed.Source,
+                OffenseCount = offense,
+                IsPermanent = true,
+                Note = "blacklist",
+            }, ct).ConfigureAwait(false);
             await TryAddEventAsync(new LogEvent
             {
                 TimestampUtc = now,
@@ -668,17 +755,28 @@ public sealed partial class BanEngine
         await _store.UpsertBanAsync(ban, ct).ConfigureAwait(false);
         _offenses.Set(ip, nextOffense, now);
         await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
-        TryFirewall(() => _firewall.Block(ip), "block", ip);
+        TryBlock(ip);
         await _store.ClearFailedLoginsAsync(ip, ct).ConfigureAwait(false);
+        RecordBanStat(failed.Source);
+        await AddBanHistoryCoreAsync(new BanHistoryEntry
+        {
+            TimestampUtc = now,
+            Action = BanHistoryAction.Banned,
+            IpAddress = ip,
+            Source = failed.Source,
+            OffenseCount = nextOffense,
+            Duration = duration,
+        }, ct).ConfigureAwait(false);
 
-        _logger.LogWarning("Blocked {Ip} for {Duration} (offense #{Offense}).", ip, duration, nextOffense);
+        var reportSuffix = settings.ReportOnly ? " (report-only: firewall unchanged)" : string.Empty;
+        _logger.LogWarning("Blocked {Ip} for {Duration} (offense #{Offense}).{Suffix}", ip, duration, nextOffense, reportSuffix);
         await TryAddEventAsync(new LogEvent
         {
             TimestampUtc = now,
             Level = LogEventLevel.Warning,
             Source = failed.Source,
             IpAddress = ip,
-            Message = $"BLOCKED {ip} for {FormatDuration(duration)} (offense #{nextOffense})",
+            Message = $"BLOCKED {ip} for {FormatDuration(duration)} (offense #{nextOffense}){reportSuffix}",
         }, ct).ConfigureAwait(false);
     }
 
@@ -693,6 +791,62 @@ public sealed partial class BanEngine
             if (index >= 0 && index < _detectionsToday.Length)
             {
                 _detectionsToday[index]++;
+            }
+
+            BufferDailyStatLocked(source, detections: 1, bans: 0);
+        }
+    }
+
+    private void RecordBanStat(ProtocolSource source)
+    {
+        lock (_statsLock)
+        {
+            RollDetectionsDayLocked();
+            BufferDailyStatLocked(source, detections: 0, bans: 1);
+        }
+    }
+
+    private void BufferDailyStatLocked(ProtocolSource source, int detections, int bans)
+    {
+        var day = DateOnly.FromDateTime(_timeProvider.GetLocalNow().DateTime);
+        var key = (day, source);
+        var current = _dailyStats.TryGetValue(key, out var existing)
+            ? existing
+            : (Detections: 0, Bans: 0);
+        _dailyStats[key] = (current.Detections + detections, current.Bans + bans);
+    }
+
+    /// <summary>
+    /// Drains the buffered daily-statistics deltas into the store. Called from housekeeping so the
+    /// per-event hot path performs no statistics writes, and from StopAsync so a shutdown does not
+    /// lose the day's tail.
+    /// </summary>
+    private async Task FlushDailyStatsAsync(CancellationToken ct)
+    {
+        List<(DateOnly Day, ProtocolSource Source, int Detections, int Bans)> drained;
+        lock (_statsLock)
+        {
+            if (_dailyStats.Count == 0)
+            {
+                return;
+            }
+
+            drained = _dailyStats
+                .Select(pair => (pair.Key.Day, pair.Key.Source, pair.Value.Detections, pair.Value.Bans))
+                .ToList();
+            _dailyStats.Clear();
+        }
+
+        foreach (var entry in drained)
+        {
+            try
+            {
+                var dayUtc = entry.Day.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+                await _store.AddDailyStatsAsync(dayUtc, entry.Source, entry.Detections, entry.Bans, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not persist daily statistics for {Day}/{Source}.", entry.Day, entry.Source);
             }
         }
     }
@@ -773,6 +927,16 @@ public sealed partial class BanEngine
         whitelist.AddRange(IpMatcher.GetLocalAddresses());
         _matcher = new IpMatcher(whitelist, blacklist);
         _listsLoaded = true;
+
+        // Remember the blacklisted CIDR entries in canonical form: housekeeping enforces them as
+        // whole-subnet firewall range rules instead of banning each address on first contact.
+        _blacklistedRanges = blacklist
+            .Where(entry => !IpMatcher.TryNormalize(entry, out _))
+            .Select(entry => IpMatcher.TryNormalizeRange(entry, out var canonical) ? canonical : null)
+            .Where(canonical => canonical is not null && IpMatcher.IsBannableRange(canonical))
+            .Select(canonical => canonical!)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
     }
 
     private async Task<BanEntry?> SafeGetBanAsync(string ip, CancellationToken ct)
@@ -812,6 +976,33 @@ public sealed partial class BanEngine
         }
     }
 
+    /// <summary>
+    /// Enforcement-side block, honoring report-only mode: in monitoring mode the ban is still
+    /// recorded in the store (and its history row written), but the firewall is left untouched.
+    /// </summary>
+    private void TryBlock(string ipOrRange)
+    {
+        if (_settingsAccessor().ReportOnly)
+        {
+            return;
+        }
+
+        TryFirewall(() => _firewall.Block(ipOrRange), "block", ipOrRange);
+    }
+
+    /// <summary>Appends a ban-history row; failures are logged, never propagated.</summary>
+    private async Task AddBanHistoryCoreAsync(BanHistoryEntry entry, CancellationToken ct)
+    {
+        try
+        {
+            await _store.AddBanHistoryAsync(entry, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not append ban history for {Ip}.", entry.IpAddress);
+        }
+    }
+
     private async Task TryAddEventAsync(LogEvent logEvent, CancellationToken ct)
     {
         try
@@ -821,6 +1012,17 @@ public sealed partial class BanEngine
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to record WinGuard event '{Message}'.", logEvent.Message);
+        }
+
+        // Fan out to notification sinks (webhook / Telegram / SMTP / Windows Event Log).
+        // Publishers contract: non-blocking, exception-free.
+        try
+        {
+            _publisher.Publish(logEvent);
+        }
+        catch (Exception)
+        {
+            // Isolated in the composite; belt and braces.
         }
     }
 

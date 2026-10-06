@@ -56,20 +56,142 @@ public abstract class EventLogDetectorBase : IDetector
     /// <summary>Structured queries to try, in order; the first one the channel accepts is used.</summary>
     protected abstract IReadOnlyList<(string Query, bool TolerateQueryErrors)> Queries { get; }
 
+    /// <summary>
+    /// Raw XPath selecting the interesting events (no QueryList wrapper), used by the start-up
+    /// backlog replay. Null (default) disables the replay for this detector.
+    /// </summary>
+    protected virtual string? BacklogEventXPath => null;
+
+    /// <summary>
+    /// How much history to replay at start-up (covers failures logged while the service was
+    /// stopped). Derived classes read the live setting; zero disables the replay.
+    /// </summary>
+    protected virtual TimeSpan BacklogWindow() => TimeSpan.Zero;
+
     /// <summary>Whether the engine is currently enabled in the live settings.</summary>
     protected abstract bool IsEnabled();
 
     /// <summary>Turns one event record into a failure, or null when it is not one.</summary>
     protected abstract FailedLogin? Parse(EventRecord record);
 
+    /// <summary>Upper bound on records examined per replay, so a huge backlog cannot stall startup.</summary>
+    private const int MaxReplayRecords = 5000;
+
     /// <inheritdoc />
     public Task StartAsync(Channel<FailedLogin> sink, CancellationToken ct)
     {
         _sink = sink ?? throw new ArgumentNullException(nameof(sink));
-        TrySubscribe();
         ct.Register(Stop);
-        _ = Task.Run(() => MonitorAsync(ct), CancellationToken.None);
+
+        var backlog = BacklogWindow();
+        if (backlog > TimeSpan.Zero && BacklogEventXPath is not null)
+        {
+            // Replay first, subscribe after: events between the replay read and the subscription
+            // are missed (a tiny window, same as pre-replay behavior), never double-counted.
+            _ = Task.Run(() => StartWithBacklogAsync(backlog, ct), CancellationToken.None);
+        }
+        else
+        {
+            TrySubscribe();
+            _ = Task.Run(() => MonitorAsync(ct), CancellationToken.None);
+        }
+
         return Task.CompletedTask;
+    }
+
+    private async Task StartWithBacklogAsync(TimeSpan backlog, CancellationToken ct)
+    {
+        try
+        {
+            await ReplayBacklogAsync(backlog, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "{Detector}: start-up backlog replay failed; live detection is unaffected.", Name);
+        }
+
+        TrySubscribe();
+        _ = Task.Run(() => MonitorAsync(ct), CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Reads events from <see cref="BacklogWindow"/> ago up to now and pushes them through the
+    /// normal <see cref="Parse"/> path, so failures logged while the service was stopped still
+    /// count towards a ban. Honors the live enabled setting per record and stops early once
+    /// <see cref="MaxReplayRecords"/> records were seen.
+    /// </summary>
+    private async Task ReplayBacklogAsync(TimeSpan backlog, CancellationToken ct)
+    {
+        var milliseconds = Math.Max(0, (long)backlog.TotalMilliseconds);
+        var xpath = $"*[System[{BacklogEventXPath!.Trim('/', ' ')} and TimeCreated[timediff(@SystemTime) <= {milliseconds}]]]";
+        var query = new EventLogQuery(LogChannel, PathType.LogName, xpath)
+        {
+            TolerateQueryErrors = true,
+            ReverseDirection = true,
+        };
+
+        var replayed = 0;
+        var examined = 0;
+        using (var reader = new EventLogReader(query))
+        {
+            while (examined < MaxReplayRecords && !ct.IsCancellationRequested && !_stopped)
+            {
+                EventRecord? record;
+                try
+                {
+                    record = reader.ReadEvent();
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogDebug(ex, "{Detector}: backlog replay read failed (channel may not exist).", Name);
+                    break;
+                }
+
+                if (record is null)
+                {
+                    break;
+                }
+
+                examined++;
+                try
+                {
+                    if (!IsEnabled())
+                    {
+                        continue;
+                    }
+
+                    var failed = Parse(record);
+                    if (failed is not null && _sink is { } sink && sink.Writer.TryWrite(failed))
+                    {
+                        replayed++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogDebug(ex, "{Detector}: backlog replay parse failed for one record.", Name);
+                }
+                finally
+                {
+                    record.Dispose();
+                }
+
+                // The reads are synchronous COM calls; yield so cancellation is observed promptly.
+                if ((examined & 0x3F) == 0)
+                {
+                    await Task.Yield();
+                }            }
+        }
+
+        if (replayed > 0)
+        {
+            Logger.LogInformation(
+                "{Detector}: replayed {Replayed} failure(s) from the last {Minutes} minute(s) of the {Channel} channel.",
+                Name, replayed, (int)backlog.TotalMinutes, LogChannel);
+        }
     }
 
     private async Task MonitorAsync(CancellationToken ct)

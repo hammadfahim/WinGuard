@@ -8,6 +8,7 @@ using WinGuard.Core.Config;
 using WinGuard.Core.Detection;
 using WinGuard.Core.Engine;
 using WinGuard.Core.Firewall;
+using WinGuard.Core.Notifications;
 using WinGuard.Core.Store;
 using WinGuard.Service.Ipc;
 using WinGuard.Service.Logging;
@@ -22,6 +23,8 @@ namespace WinGuard.Service;
 ///   <item><c>--uninstall</c> — stop and delete the service.</item>
 ///   <item><c>--console</c> — run the host in the current console.</item>
 ///   <item><c>--clear-firewall</c> — delete every <c>WinGuard_Block_*</c> rule and exit 0.</item>
+///   <item><c>--status</c> / <c>--list-bans</c> / <c>--ban</c> / <c>--unban</c> / <c>--doctor</c> —
+///   manage the running service over its pipe (elevated console required).</item>
 ///   <item>no arguments — run as the Windows service.</item>
 /// </list>
 /// Exit codes: 0 success, non-zero on failure (message on stderr).
@@ -44,6 +47,16 @@ internal static class Program
                         return ClearFirewall();
                     case "--console":
                         return await RunHostAsync(args, console: true).ConfigureAwait(false);
+                    case "--status":
+                        return await CliCommands.StatusAsync().ConfigureAwait(false);
+                    case "--list-bans":
+                        return await CliCommands.ListBansAsync().ConfigureAwait(false);
+                    case "--ban":
+                        return await CliCommands.BanAsync(args).ConfigureAwait(false);
+                    case "--unban":
+                        return await CliCommands.UnbanAsync(args).ConfigureAwait(false);
+                    case "--doctor":
+                        return await CliCommands.DoctorAsync().ConfigureAwait(false);
                     case "--help":
                     case "-h":
                     case "/?":
@@ -156,13 +169,24 @@ internal static class Program
                 Defaults.MaxAddressesPerRule,
                 () => sp.GetRequiredService<SettingsHolder>().Current));
 
+        // Event fan-out: warning/error engine events are enqueued (never blocking the engine path)
+        // and delivered by one background loop — to the Windows Application event log (SIEM
+        // friendly, opt-out via settings) and to the configured notification channels.
+        builder.Services.AddSingleton(sp => new NotificationDispatcher(
+            () => sp.GetRequiredService<SettingsHolder>().Current,
+            sp.GetRequiredService<ILogger<NotificationDispatcher>>(),
+            new WindowsEventLogWriter(sp.GetRequiredService<ILogger<WindowsEventLogWriter>>())));
+
+        builder.Services.AddSingleton<IEventPublisher>(sp => sp.GetRequiredService<NotificationDispatcher>());
+
         builder.Services.AddSingleton(sp =>
             new BanEngine(
                 sp.GetRequiredService<IStore>(),
                 sp.GetRequiredService<IFirewall>(),
                 () => sp.GetRequiredService<SettingsHolder>().Current,
                 sp.GetRequiredService<ILogger<BanEngine>>(),
-                sp.GetRequiredService<TimeProvider>()));
+                sp.GetRequiredService<TimeProvider>(),
+                sp.GetRequiredService<IEventPublisher>()));
 
         builder.Services.AddSingleton<IDetector>(sp =>
             new RdpSecurityLogDetector(
@@ -196,6 +220,7 @@ internal static class Program
 
         builder.Services.AddSingleton<IpcRequestHandler>();
         builder.Services.AddHostedService<GuardWorker>();
+        builder.Services.AddHostedService<NotificationHostedService>();
         builder.Services.AddHostedService<PipeServer>();
     }
 
@@ -334,6 +359,13 @@ internal static class Program
           winguard-svc --install    Register and start the Windows service.
           winguard-svc --uninstall  Stop and delete the Windows service.
           winguard-svc --clear-firewall  Delete all WinGuard_Block_* firewall rules.
-          winguard-svc --help       Show this help.
+
+        Management (talk to the running service; needs an elevated console):
+          winguard-svc --status    Show service status and per-engine counters.
+          winguard-svc --list-bans List active bans.
+          winguard-svc --ban <ip> [--permanent] [--duration d.hh:mm:ss] [--note text]
+          winguard-svc --unban <ip>
+          winguard-svc --doctor    Health check: prerequisites, paths, firewall API.
+          winguard-svc --help      Show this help.
         """);
 }

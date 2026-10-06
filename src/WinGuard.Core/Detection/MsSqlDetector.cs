@@ -86,6 +86,15 @@ public sealed class MsSqlDetector : EventLogDetectorBase
         [(SubscriptionXPath, false), (FallbackSubscriptionXPath, true)];
 
     /// <inheritdoc />
+    /// <remarks>EventID-only: the provider is filtered in code by <see cref="Parse"/>, which also
+    /// covers the backlog the same way the fallback subscription does.</remarks>
+    protected override string? BacklogEventXPath => "EventID=18456";
+
+    /// <inheritdoc />
+    protected override TimeSpan BacklogWindow() =>
+        TimeSpan.FromMinutes(Math.Max(0, _settingsAccessor().EventBacklogReplayMinutes));
+
+    /// <inheritdoc />
     protected override bool IsEnabled() => _settingsAccessor().MsSql.Enabled;
 
     /// <inheritdoc />

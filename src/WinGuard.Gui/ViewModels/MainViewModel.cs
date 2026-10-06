@@ -39,6 +39,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         Dashboard = new DashboardViewModel(client);
         BlockedIps = new BlockedIpsViewModel(client);
         EventLog = new EventLogViewModel();
+        Statistics = new StatisticsViewModel(client);
         Settings = new SettingsViewModel(client);
         Lists = new ListsViewModel(client);
 
@@ -47,6 +48,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             new NavigationItem("Dashboard", Dashboard),
             new NavigationItem("Blocked IPs", BlockedIps),
             new NavigationItem("Event Log", EventLog),
+            new NavigationItem("Statistics", Statistics),
             new NavigationItem("Settings", Settings),
             new NavigationItem("Lists", Lists),
         ];
@@ -86,6 +88,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     /// <summary>Event Log view-model.</summary>
     public EventLogViewModel EventLog { get; }
+
+    /// <summary>Statistics view-model.</summary>
+    public StatisticsViewModel Statistics { get; }
 
     /// <summary>Settings view-model.</summary>
     public SettingsViewModel Settings { get; }
@@ -213,6 +218,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             {
                 await Settings.LoadAsync();
                 await Lists.LoadAsync();
+                await Statistics.LoadAsync();
             }
             catch
             {

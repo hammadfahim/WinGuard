@@ -53,6 +53,31 @@ public class SqliteMigrationTests
                 var fresh = await store.GetEventsAsync(10, null, cursor);
                 Assert.Single(fresh);
                 Assert.True(fresh[0].Id > cursor);
+
+                // v3: the statistics/history tables are usable right after the upgrade.
+                await store.AddBanHistoryAsync(new BanHistoryEntry
+                {
+                    TimestampUtc = DateTime.UtcNow,
+                    Action = BanHistoryAction.Banned,
+                    IpAddress = "203.0.113.5",
+                    Source = ProtocolSource.Rdp,
+                    OffenseCount = 1,
+                    Duration = TimeSpan.FromHours(24),
+                });
+                var history = await store.GetBanHistoryAsync(10);
+                Assert.Single(history);
+                Assert.Equal(BanHistoryAction.Banned, history[0].Action);
+                Assert.Equal(TimeSpan.FromHours(24), history[0].Duration);
+
+                await store.AddDailyStatsAsync(DateTime.UtcNow, ProtocolSource.Rdp, 5, 1);
+                var stats = await store.GetDailyStatsAsync(DateTime.UtcNow.AddDays(-1));
+                Assert.Single(stats);
+                Assert.Equal(5, stats[0].Detections);
+                Assert.Equal(1, stats[0].Bans);
+
+                var offenders = await store.GetTopOffendersAsync(10);
+                Assert.Single(offenders);
+                Assert.Equal("203.0.113.5", offenders[0].IpAddress);
             }
 
             await using (var check = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString()))
@@ -60,7 +85,7 @@ public class SqliteMigrationTests
                 await check.OpenAsync();
                 await using var cmd = check.CreateCommand();
                 cmd.CommandText = "PRAGMA user_version;";
-                Assert.Equal(2L, (long)(await cmd.ExecuteScalarAsync())!);
+                Assert.Equal(3L, (long)(await cmd.ExecuteScalarAsync())!);
                 cmd.CommandText = "SELECT COUNT(*) FROM failed_logins WHERE raw IS NOT NULL;";
                 Assert.Equal(0L, (long)(await cmd.ExecuteScalarAsync())!);
             }

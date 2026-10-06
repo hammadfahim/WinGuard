@@ -22,13 +22,18 @@ is **log/event based only** and uses the built-in Windows Firewall API.
 | 🔍 | **RDP detection** — Security log event **4625**, plus the **RdpCoreTS/Operational 140** TLS/NLA fallback, de-duplicated so one attempt counts once. |
 | 🗄️ | **MS SQL Server detection** — Application log event **18456**, client IP pulled from the `[CLIENT: x.x.x.x]` message. |
 | 📄 | **FTP detection** — IIS W3C logs (`PASS` + status `530`) and FileZilla Server text logs, tailed on disk (works for FTPS too). |
-| 🧩 | **Custom log sources** — point WinGuard at a file/folder plus a regex with named `ipaddress`/`username` groups. |
+| 🧩 | **Custom log sources** — point WinGuard at a file/folder plus a regex with named `ipaddress`/`username` groups, or start from a built-in **recipe** (Windows OpenSSH, hMailServer, IIS HTTP auth, VNC). |
 | ⏱️ | **Time-based bans** with **24 h / 7 d / 30 d** escalation, custom durations, and permanent blacklisting. |
 | ♻️ | **Auto-unblock** when a ban expires; counters reset after a configurable idle time. |
-| ✅ | **Whitelist / blacklist** with single IPs and CIDR ranges (IPv4 + IPv6). Whitelist always wins. |
+| ✅ | **Whitelist / blacklist** with single IPs and CIDR ranges (IPv4 + IPv6). Whitelist always wins. Blacklisted **subnets are enforced as whole-range firewall rules**. |
 | 🚫 | **Exclusions** to ignore known-benign failures (e.g. `LogonType=2`, `TargetUserName=backup-*`). |
-| 🖥️ | **WPF GUI** — dashboard, blocked-IP grid, live event log, settings and list editors; talks to the service over a local named pipe. |
-| 🔧 | **Service + CLI** — install/uninstall/console/clear-firewall verbs for automation. |
+| 🕵️ | **Report-only mode** — count and record would-be bans without touching the firewall (safe trial on production). |
+| ⏪ | **Backlog replay** — failures logged while the service was stopped are re-read at startup (default: last 30 minutes). |
+| 🧮 | **IPv6 /N aggregate bans** — an attacker rotating a /64 is banned as the whole prefix. |
+| 📊 | **Statistics & ban history** — per-day detections/bans chart, top attackers, full ban history (survives restarts and pruning). |
+| 🔔 | **Notifications** — webhook (JSON POST), Telegram, SMTP e-mail (opt-in, rate-limited) and Windows Event Log output for SIEM/WEF. |
+| 🖥️ | **WPF GUI** — dashboard, blocked-IP grid, live event log, statistics, settings and list editors; talks to the service over a local named pipe. |
+| 🔧 | **Service + CLI** — install/uninstall/console/clear-firewall verbs plus `--status`, `--list-bans`, `--ban`, `--unban`, `--doctor` for headless management. |
 | 📦 | **Single-file, self-contained x64 EXEs** and an **Inno Setup** installer, built by GitHub Actions. |
 
 ## Requirements
@@ -118,7 +123,9 @@ detect  ──►  count  ──►  block  ──►  expire
 
 1. **Detect.** Detectors read Windows event logs (push-based `EventLogWatcher`) or tail
    FTP/custom log files. Every observed failed login becomes a `FailedLogin` (normalized
-   IP, user, source, UTC timestamp) and is pushed into one channel. The service is the
+   IP, user, source, UTC timestamp) and is pushed into one channel. At startup the
+   event-log detectors also replay the last `EventBacklogReplayMinutes` minutes of history,
+   so failures logged while the service was stopped still count. The service is the
    only writer; the GUI never touches the database or firewall directly.
 2. **Count.** The `BanEngine` rejects invalid/non-IP tokens, skips the whitelist, ensures
    permanent bans for the blacklist, and counts attempts **per IP within a rolling
@@ -136,6 +143,20 @@ The first offense gets **24 hours**. If the same IP offends again (after the pre
 expires), the second gets **7 days** and the third **30 days**; further offenses stay at
 30 days (the cap). Set a single tier to disable escalation, or blacklist an IP for a
 permanent ban. `MaxBanDuration` (default 365 days) caps non-permanent tiers.
+
+### Monitoring extras
+
+- **Report-only mode** runs the whole pipeline (detect → count → record) without firewall writes,
+  so you can validate thresholds on production before enforcing them. Bans recorded in
+  report-only become enforced the moment the flag is switched off.
+- **Backlog replay** re-reads the last N minutes (default 30) of the event logs at startup, so
+  failures logged during a service restart or patch reboot still count.
+- **Ban history and daily statistics** are append-only: every ban, expiry and manual unban is
+  kept in `ban_history`, and per-day counters survive restarts and event pruning — visible in
+  the GUI's Statistics view.
+- **Notifications**: block/unblock events can be pushed to a webhook, Telegram or SMTP e-mail
+  (rate-limited), and are always available to SIEM tooling through the Windows Application event
+  log (source `WinGuard`, toggle in settings).
 
 ### De-duplication
 
@@ -158,12 +179,17 @@ GUI saves them. The GUI exposes all of the below under **Settings** and **Lists*
 | `HousekeepingInterval` | `00:00:15` | Expiry/reconcile cadence. |
 | `ClearBansOnStartup` | `false` | If true, flush firewall rules at service start instead of reconciling. |
 | `ProcessInternalIPs` | `false` | Ignore RFC1918/loopback/link-local addresses by default. |
+| `ReportOnly` | `false` | Monitoring mode: record would-be bans, never touch the firewall. Bans recorded while on become enforced when switched off. |
+| `EventBacklogReplayMinutes` | `30` | Event-log history re-read at startup (covers downtime); 0 = off. |
+| `Ipv6AggregatePrefixLength` | `0` (off) | Ban whole IPv6 /N prefixes (e.g. `64`) instead of single addresses. |
 | `MaxAddressesPerRule` | `1000` | Firewall addresses batched per rule. |
 | `BlockedPorts` | *empty* | Empty = block all ports (cheapest). Non-empty = block only those ports. |
+| `Notifications` | *off* | Webhook URL, Telegram bot/chat, SMTP relay, rate limit; plus `WriteToWindowsEventLog` (default on) for SIEM/WEF. |
 | `Rdp.UseRdpCoreTsFallback` | `true` | Also use RdpCoreTS/Operational 140. |
 | `Rdp.ExclusionRules` | *empty* | e.g. `LogonType=2`, `TargetUserName=backup-*`. |
 | `MsSql.IgnoreMessagePatterns` | `[Failed to open the explicitly specified database]` | 18456 reasons that are not brute force. |
 | `Ftp.Sources`, `Ftp.PollInterval` | *empty*, `00:00:03` | IIS log folders / FileZilla file-or-folder. |
+| `CustomSources` | *empty* | `{ PathGlob, Regex }` with `(?<ipaddress>…)` / `(?<username>…)`; recipes provided for OpenSSH, hMailServer, IIS HTTP auth and VNC. |
 | `CustomSources` | *empty* | `{ PathGlob, Regex }` with `(?<ipaddress>…)` / `(?<username>…)`. |
 
 **Exclusion rules** use `=` / `!=` and `*` wildcards over the 4625 EventData fields.
@@ -185,14 +211,20 @@ loopback are auto-whitelisted at startup to prevent self-lockout.
 - **FileZilla Server 1.x support is unverified.** The parser accepts the legacy 0.9.x log
   layout and any line with a `530 Login…` response whose prefix contains the session
   address, but it has only been tested against 0.9.x sample logs.
-- **A blacklisted range is enforced on first contact.** A single blacklisted IP is blocked
-  at once; for a CIDR range each address is banned permanently at its first failed login.
-- **Failures logged while the service is stopped are not counted.** Event-log and log-file
-  detectors start reading from the moment the service starts.
-- **IPv6 bans are per address.** An attacker with a whole /64 can rotate addresses.
+- **A blacklisted range is enforced as one firewall range rule** covering the whole subnet;
+  addresses inside it are additionally banned permanently at their first failed login.
+- **Backlog replay covers the event-log engines only** and is capped (default: last 30 minutes,
+  5000 records per channel). Failures older than that, logged while the service was down, are
+  not counted; file-based tailers skip to end-of-file on first sight by design.
+- **IPv4 bans stay per-address.** IPv6 can be aggregated to a /N prefix (recommended: /64) so a
+  rotating attacker is banned wholesale; IPv4 attackers do not rotate /24s in practice, so no
+  IPv4 aggregation is offered.
 - **Custom log sources share the FTP poll interval.** A single `Ftp.PollInterval`
   (default 3 s) drives the IIS/FileZilla tailers and every custom source; there is no
   per-source interval.
+- **Notification secrets (SMTP password, Telegram token) are stored in the settings database**
+  in plain text, like the rest of the configuration; the data folder is ACL-restricted to
+  SYSTEM + Administrators.
 - **Very broad list prefixes are rejected.** Whitelist/blacklist entries shorter than `/8`
   for IPv4 (such as `0.0.0.0/0`) or `/32` for IPv6 are refused by the IPC as a self-lockout
   footgun; use an explicit range instead.
@@ -213,6 +245,11 @@ loopback are auto-whitelisted at startup to prevent self-lockout.
 | `--install` | Register the service (`delayed-auto`), set its description and failure-restart actions, and start it. |
 | `--uninstall` | Stop and delete the service. |
 | `--clear-firewall` | Delete all `WinGuard_Block_*` rules and exit. Used by the uninstaller. |
+| `--status` | Print service status and per-engine counters (needs an elevated console). |
+| `--list-bans` | Print the active bans as a table. |
+| `--ban <ip> [--permanent] [--duration d.hh:mm:ss] [--note text]` | Manually block an address via the running service. |
+| `--unban <ip>` | Manually lift a ban. |
+| `--doctor` | Health check: service reachability, prerequisites, data/log folders, firewall COM API; non-zero exit when protection-critical checks fail. |
 
 ## Project layout
 
@@ -222,15 +259,17 @@ winguard/
 ├─ Directory.Build.props              # shared TFM/version/nullable/langversion props
 ├─ global.json                        # pins the .NET 10 SDK
 ├─ src/
-│  ├─ WinGuard.Core/                  # logic only: models, detectors, engine, firewall, store, config
-│  │  ├─ Model/  Abstractions/  Detection/  Engine/  Firewall/  Store/  Config/  Ipc/
+│  ├─ WinGuard.Core/                  # logic only: models, detectors, engine, firewall, store, config, notifications
+│  │  ├─ Model/  Abstractions/  Detection/  Engine/  Firewall/  Store/  Config/  Notifications/  Ipc/
 │  ├─ WinGuard.Service/               # Windows Service host + CLI + named-pipe server
 │  └─ WinGuard.Gui/                   # WPF dashboard (net10.0-windows)
-├─ tests/WinGuard.Core.Tests/         # xUnit: parsers, engine, IP matcher, store, integration
+├─ tests/WinGuard.Core.Tests/         # xUnit: parsers, engine, IP matcher, store, notifications, integration
 ├─ installer/
 │  ├─ winguard.iss                    # Inno Setup script
 │  └─ assets/                         # license.txt (+ optional icon.ico)
 ├─ samples/logs/                      # parser fixtures and their expected results
+├─ CHANGELOG.md                       # release notes
+├─ SECURITY.md                        # vulnerability-reporting policy
 └─ .github/workflows/                 # ci.yml + release.yml
 ```
 

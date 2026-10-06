@@ -11,11 +11,16 @@ namespace WinGuard.Core.Abstractions;
 /// </summary>
 public interface IFirewall
 {
-    /// <summary>Add ip to a batch block rule (creating the next rule when full).</summary>
-    void Block(string ip);
+    /// <summary>
+    /// Adds a ban target to a batch block rule (creating the next rule when full). A target is
+    /// either a single host IP (normalized) or a canonical CIDR range such as
+    /// <c>2001:db8:1:2::/64</c> (IPv6 aggregate bans, blacklisted subnets). Anything else is
+    /// rejected — including firewall tokens like <c>LocalSubnet</c>.
+    /// </summary>
+    void Block(string ipOrRange);
 
-    /// <summary>Remove ip from whichever batch rule holds it.</summary>
-    void Unblock(string ip);
+    /// <summary>Removes the target from whichever batch rule holds it.</summary>
+    void Unblock(string ipOrRange);
 
     /// <summary>Rebuild all WinGuard_* batch rules from the given active bans (startup reconcile / self-heal).</summary>
     void SyncRules(IEnumerable<BanEntry> activeBans);

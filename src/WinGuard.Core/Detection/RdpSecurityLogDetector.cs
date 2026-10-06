@@ -64,6 +64,13 @@ public sealed class RdpSecurityLogDetector : EventLogDetectorBase
     protected override IReadOnlyList<(string Query, bool TolerateQueryErrors)> Queries => [(SubscriptionXPath, true)];
 
     /// <inheritdoc />
+    protected override string? BacklogEventXPath => "EventID=4625";
+
+    /// <inheritdoc />
+    protected override TimeSpan BacklogWindow() =>
+        TimeSpan.FromMinutes(Math.Max(0, _settingsAccessor().EventBacklogReplayMinutes));
+
+    /// <inheritdoc />
     protected override bool IsEnabled() => _settingsAccessor().Rdp.Enabled;
 
     /// <inheritdoc />

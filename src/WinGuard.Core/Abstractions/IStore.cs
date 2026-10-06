@@ -65,6 +65,28 @@ public interface IStore
 
     Task RemoveFromListAsync(ListKind kind, string value, CancellationToken ct = default);
 
+    // ---- ban history (append-only; survives ban deletion) ----
+
+    /// <summary>Appends one lifecycle row (banned / expired / unbanned / updated).</summary>
+    Task AddBanHistoryAsync(BanHistoryEntry entry, CancellationToken ct = default);
+
+    /// <summary>Newest-first ban-history rows, capped at <paramref name="limit"/>.</summary>
+    Task<IReadOnlyList<BanHistoryEntry>> GetBanHistoryAsync(int limit, CancellationToken ct = default);
+
+    // ---- daily statistics ----
+
+    /// <summary>
+    /// Adds deltas to the (day, source) counter row, creating it when missing. The engine buffers
+    /// increments in memory and flushes them here during housekeeping, so the write rate stays low.
+    /// </summary>
+    Task AddDailyStatsAsync(DateTime dayUtc, ProtocolSource source, int detectionsDelta, int bansDelta, CancellationToken ct = default);
+
+    /// <summary>Statistics rows for every day >= <paramref name="sinceDayUtc"/> (date part), oldest first.</summary>
+    Task<IReadOnlyList<DailyStatEntry>> GetDailyStatsAsync(DateTime sinceDayUtc, CancellationToken ct = default);
+
+    /// <summary>Most-banned IPs within the ban history (for the statistics view).</summary>
+    Task<IReadOnlyList<TopOffenderEntry>> GetTopOffendersAsync(int limit, CancellationToken ct = default);
+
     // ---- events ----
     Task AddEventAsync(LogEvent logEvent, CancellationToken ct = default);
 
