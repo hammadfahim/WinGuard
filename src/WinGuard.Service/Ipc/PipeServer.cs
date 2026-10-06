@@ -83,16 +83,12 @@ public sealed partial class PipeServer : BackgroundService
                 continue;
             }
 
-            var verdict = Authorize(pipe, out var clientName);
-            if (verdict == ClientVerdict.Denied)
-            {
-                Reject(pipe, clientName);
-                pipe.Dispose();
-                continue;
-            }
-
+            // Everything about this client — identifying it included — runs on its own task. The
+            // accept loop goes straight back to listening, so no single client (and nothing the
+            // identity check might wait on) can keep others from connecting.
             var clientId = Interlocked.Increment(ref _nextClientId);
-            var task = HandleClientAsync(pipe, verdict == ClientVerdict.Authorized, stoppingToken);
+            var accepted = pipe;
+            var task = Task.Run(() => HandleClientAsync(accepted, stoppingToken), CancellationToken.None);
             _clients[clientId] = task;
             _ = task.ContinueWith(
                 _ =>
@@ -137,7 +133,9 @@ public sealed partial class PipeServer : BackgroundService
                     return;
                 }
 
-                name = identity.Name ?? "unknown";
+                // The SID, not the account name: turning a SID into a name can wait on a domain
+                // controller or the cloud for a long time, and it is only wanted for the log.
+                name = identity.User?.Value ?? "unknown";
                 verdict = IsAuthorized(identity) ? ClientVerdict.Authorized : ClientVerdict.Denied;
             });
         }
@@ -186,13 +184,26 @@ public sealed partial class PipeServer : BackgroundService
         TryWriteRejection(pipe);
     }
 
-    private async Task HandleClientAsync(NamedPipeServerStream pipe, bool authorized, CancellationToken ct)
+    private async Task HandleClientAsync(NamedPipeServerStream pipe, CancellationToken ct)
     {
         try
         {
             using (pipe)
             using (var writer = new StreamWriter(pipe, new UTF8Encoding(false), bufferSize: 4096, leaveOpen: false) { AutoFlush = true, NewLine = "\n" })
             {
+                var verdict = Authorize(pipe, out var firstName);
+                if (verdict == ClientVerdict.Denied)
+                {
+                    Reject(pipe, firstName);
+                    return;
+                }
+
+                var authorized = verdict == ClientVerdict.Authorized;
+                if (authorized)
+                {
+                    _logger.LogInformation("Console connected (client {Client}).", firstName);
+                }
+
                 // Bounded reader: ReadLineAsync has no length cap; a runaway or hostile
                 // client could force unbounded (LOH) allocations (review S-N3).
                 var reader = new BoundedLineReader(pipe, _logger);
@@ -233,6 +244,7 @@ public sealed partial class PipeServer : BackgroundService
                         }
 
                         authorized = true;
+                        _logger.LogInformation("Console connected (client {Client}, identified after its first request).", clientName);
                     }
 
                     var response = await _handler.HandleLineAsync(line, ct).ConfigureAwait(false);

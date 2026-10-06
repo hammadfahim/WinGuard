@@ -36,9 +36,9 @@ namespace WinGuard.Core.Firewall;
 [SupportedOSPlatform("windows")]
 public sealed class WindowsFirewall : IFirewall
 {
-    private const int ProtocolAny = 256;        // NET_FW_IP_PROTOCOL_ANY
-    private const int ProtocolTcp = 6;          // NET_FW_IP_PROTOCOL_TCP
-    private const int ProtocolUdp = 17;         // NET_FW_IP_PROTOCOL_UDP
+    internal const int ProtocolAny = 256;        // NET_FW_IP_PROTOCOL_ANY
+    internal const int ProtocolTcp = 6;          // NET_FW_IP_PROTOCOL_TCP
+    internal const int ProtocolUdp = 17;         // NET_FW_IP_PROTOCOL_UDP
 
     private readonly ILogger<WindowsFirewall> _logger;
     private readonly IFirewallRuleStore _store;

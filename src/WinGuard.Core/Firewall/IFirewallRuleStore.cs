@@ -38,9 +38,12 @@ internal sealed class ComFirewallRuleStore : IFirewallRuleStore
     private const string PolicyProgId = "HNetCfg.FwPolicy2";
     private const string RuleProgId = "HNetCfg.FWRule";
 
-    private const int RuleDirectionIn = 1;      // NET_FW_RULE_DIR_IN
-    private const int RuleActionBlock = 2;      // NET_FW_ACTION_BLOCK
-    private const int ProfileAll = 0x7FFFFFFF;  // NET_FW_PROFILE2_ALL
+    // Values of the Windows Firewall API enumerations (netfw.h). NET_FW_ACTION is
+    // { BLOCK = 0, ALLOW = 1, MAX = 2 }: 2 is not an action and the API rejects it with
+    // E_INVALIDARG ("Value does not fall within the expected range").
+    internal const int RuleDirectionIn = 1;      // NET_FW_RULE_DIR_IN
+    internal const int RuleActionBlock = 0;      // NET_FW_ACTION_BLOCK
+    internal const int ProfileAll = 0x7FFFFFFF;  // NET_FW_PROFILE2_ALL
 
     private const string RuleDescription = "WinGuard managed block rule (auto-generated - do not edit).";
     private const string RuleGrouping = "WinGuard";
@@ -113,6 +116,16 @@ internal sealed class ComFirewallRuleStore : IFirewallRuleStore
             return;
         }
 
+        rules.Add(BuildRule(name, protocol, localPorts, remoteAddresses));
+    }
+
+    /// <summary>
+    /// Builds (but does not register) the inbound block rule. Creating and filling the rule object
+    /// needs no administrator rights, so the exact property values can be unit-tested against the
+    /// real COM API; only adding it to the firewall policy requires elevation.
+    /// </summary>
+    internal static object BuildRule(string name, int protocol, string? localPorts, string remoteAddresses)
+    {
         var type = Type.GetTypeFromProgID(RuleProgId, throwOnError: false)
             ?? throw new PlatformNotSupportedException(
                 "The Windows Firewall COM API (HNetCfg.FWRule) is unavailable. This operation requires Windows.");
@@ -132,7 +145,7 @@ internal sealed class ComFirewallRuleStore : IFirewallRuleStore
         }
 
         rule.RemoteAddresses = remoteAddresses;
-        rules.Add(rule);
+        return rule;
     }
 
     /// <inheritdoc />
