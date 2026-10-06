@@ -84,11 +84,11 @@ public sealed class WindowsFirewall : IFirewall
     }
 
     /// <inheritdoc />
-    public void Block(string ip)
+    public void Block(string ipOrRange)
     {
-        if (!IpMatcher.TryNormalize(ip, out var normalized))
+        if (!TryNormalizeTarget(ipOrRange, out var normalized))
         {
-            _logger.LogWarning("Refusing to block invalid IP value {Ip}; it was not added to any firewall rule.", ip);
+            _logger.LogWarning("Refusing to block invalid address value {Ip}; it was not added to any firewall rule.", ipOrRange);
             return;
         }
 
@@ -104,7 +104,7 @@ public sealed class WindowsFirewall : IFirewall
                 {
                     if (batch.Addresses.Contains(normalized))
                     {
-                        _logger.LogDebug("IP {Ip} is already present in firewall rule {Rule}; nothing to do.", normalized, RuleName(batch.Index));
+                        _logger.LogDebug("Address {Ip} is already present in firewall rule {Rule}; nothing to do.", normalized, RuleName(batch.Index));
                         return;
                     }
                 }
@@ -125,17 +125,17 @@ public sealed class WindowsFirewall : IFirewall
             catch (Exception ex)
             {
                 _batchCache = null;
-                _logger.LogError(ex, "Failed to block {Ip} in the Windows firewall.", ip);
+                _logger.LogError(ex, "Failed to block {Ip} in the Windows firewall.", ipOrRange);
             }
         }
     }
 
     /// <inheritdoc />
-    public void Unblock(string ip)
+    public void Unblock(string ipOrRange)
     {
-        if (!IpMatcher.TryNormalize(ip, out var normalized))
+        if (!TryNormalizeTarget(ipOrRange, out var normalized))
         {
-            _logger.LogWarning("Refusing to unblock invalid IP value {Ip}.", ip);
+            _logger.LogWarning("Refusing to unblock invalid address value {Ip}.", ipOrRange);
             return;
         }
 
@@ -170,7 +170,7 @@ public sealed class WindowsFirewall : IFirewall
             catch (Exception ex)
             {
                 _batchCache = null;
-                _logger.LogError(ex, "Failed to unblock {Ip} in the Windows firewall.", ip);
+                _logger.LogError(ex, "Failed to unblock {Ip} in the Windows firewall.", ipOrRange);
             }
         }
     }
@@ -195,7 +195,7 @@ public sealed class WindowsFirewall : IFirewall
 
                 foreach (var ban in activeBans)
                 {
-                    if (ban is null || !IpMatcher.TryNormalize(ban.IpAddress, out var normalized) || !seen.Add(normalized))
+                    if (ban is null || !TryNormalizeTarget(ban.IpAddress, out var normalized) || !seen.Add(normalized))
                     {
                         continue;
                     }
@@ -377,8 +377,9 @@ public sealed class WindowsFirewall : IFirewall
     /// <summary>
     /// Parses one entry of a rule's remote-address list as Windows reports it. Windows rewrites what
     /// was written: an IPv4 host comes back as <c>1.2.3.4/255.255.255.255</c> (or <c>/32</c>) and an
-    /// IPv6 host as the single-address range <c>a::1-a::1</c> (or <c>/128</c>). Real subnets and
-    /// ranges — which WinGuard never writes — return <see langword="false"/>.
+    /// IPv6 host as the single-address range <c>a::1-a::1</c> (or <c>/128</c>). Real subnets
+    /// (WinGuard's IPv6 aggregate bans and blacklisted ranges) are canonicalized to
+    /// <c>network/prefix</c>.
     /// </summary>
     internal static bool TryParseRuleAddress(string? token, out string normalized)
     {
@@ -403,13 +404,28 @@ public sealed class WindowsFirewall : IFirewall
             var isHostMask = isIPv4
                 ? suffix is "255.255.255.255" or "32"
                 : suffix == "128";
-            if (!isHostMask)
+            if (isHostMask)
             {
-                return false;
+                normalized = host;
+                return true;
             }
 
-            normalized = host;
-            return true;
+            // A real subnet: canonicalize to network/prefix. IPv4 may come back with a
+            // dotted netmask ("255.255.255.0") instead of a prefix length.
+            if (isIPv4 && TryNetmaskToPrefix(suffix, out var maskPrefix))
+            {
+                normalized = host + "/" + maskPrefix.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                return true;
+            }
+
+            if (int.TryParse(suffix, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var prefix)
+                && prefix is >= 0 and <= 128)
+            {
+                normalized = host + "/" + prefix.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                return true;
+            }
+
+            return false;
         }
 
         var dash = text.IndexOf('-');
@@ -427,6 +443,78 @@ public sealed class WindowsFirewall : IFirewall
         }
 
         return IpMatcher.TryNormalize(text, out normalized);
+    }
+
+    /// <summary>
+    /// Normalizes a block/unblock target: a single host IP (canonical bare form) or a canonical
+    /// CIDR range that passes the minimum-prefix guard (<see cref="IpMatcher.IsBannableRange"/>).
+    /// A /32 or /128 "range" is folded to the bare host so the same address always has one identity.
+    /// Everything else — firewall tokens, hostnames, over-broad prefixes — is rejected.
+    /// </summary>
+    private static bool TryNormalizeTarget(string? value, out string target)
+    {
+        if (IpMatcher.TryNormalize(value, out var host))
+        {
+            target = host;
+            return true;
+        }
+
+        if (IpMatcher.TryNormalizeRange(value, out var range) && IpMatcher.IsBannableRange(range))
+        {
+            // Single-host CIDR forms collapse to the bare host identity.
+            var slash = range.IndexOf('/');
+            if (int.TryParse(range[(slash + 1)..], out var prefix)
+                && (prefix == 32 || prefix == 128)
+                && IpMatcher.TryNormalize(range[..slash], out var single))
+            {
+                target = single;
+                return true;
+            }
+
+            target = range;
+            return true;
+        }
+
+        target = string.Empty;
+        return false;
+    }
+
+    /// <summary>Converts an IPv4 dotted netmask to its prefix length, e.g. 255.255.255.0 → 24.</summary>
+    private static bool TryNetmaskToPrefix(string suffix, out int prefix)
+    {
+        prefix = 0;
+        if (!System.Net.IPAddress.TryParse(suffix, out var mask)
+            || mask.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+        {
+            return false;
+        }
+
+        var bits = mask.GetAddressBytes();
+        var ones = 0;
+        var seenZero = false;
+        foreach (var b in bits)
+        {
+            for (var i = 7; i >= 0; i--)
+            {
+                var bit = (b >> i) & 1;
+                if (bit == 1)
+                {
+                    if (seenZero)
+                    {
+                        return false; // 255.0.255.0 is not a valid netmask
+                    }
+
+                    ones++;
+                }
+                else
+                {
+                    seenZero = true;
+                }
+            }
+        }
+
+        prefix = ones;
+        return true;
     }
 
     // ---- rule plumbing ----

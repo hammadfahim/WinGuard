@@ -71,6 +71,25 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private string _eventRetentionDaysText = "30";
 
+    /// <summary>
+    /// Monitoring mode: count and record would-be bans, but never touch the firewall. Ideal for a
+    /// trial run on a production server.
+    /// </summary>
+    [ObservableProperty]
+    private bool _reportOnly;
+
+    /// <summary>Minutes of event-log history replayed when the service starts (0 = off).</summary>
+    [ObservableProperty]
+    private string _eventBacklogReplayMinutesText = "30";
+
+    /// <summary>IPv6 prefix length to aggregate bans to (0 = off, 64 = one /64 per attacker).</summary>
+    [ObservableProperty]
+    private string _ipv6AggregatePrefixText = "0";
+
+    /// <summary>Maximum addresses batched into one firewall rule.</summary>
+    [ObservableProperty]
+    private string _maxAddressesPerRuleText = "1000";
+
     /// <summary>Editable escalation tiers (text rows).</summary>
     public ObservableCollection<StringRowViewModel> BanTiers { get; } = [];
 
@@ -146,6 +165,67 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private CustomSourceRow? _selectedCustomSource;
 
+    /// <summary>Ready-made custom-source recipes shown in the "Add from recipe" picker.</summary>
+    public static IReadOnlyList<Core.Config.CustomSourceRecipe> Recipes { get; } = Core.Config.CustomSourceRecipes.All;
+
+    /// <summary>Currently picked recipe (added to the sources grid on command).</summary>
+    [ObservableProperty]
+    private Core.Config.CustomSourceRecipe? _selectedRecipe;
+
+    // ---- notifications ----
+
+    /// <summary>Master switch for webhook / Telegram / e-mail notifications.</summary>
+    [ObservableProperty]
+    private bool _notificationsEnabled;
+
+    /// <summary>HTTPS URL receiving a JSON POST per block/unblock event.</summary>
+    [ObservableProperty]
+    private string _webhookUrl = string.Empty;
+
+    /// <summary>Telegram bot token (from @BotFather); empty disables Telegram.</summary>
+    [ObservableProperty]
+    private string _telegramBotToken = string.Empty;
+
+    /// <summary>Telegram chat id the notifications go to.</summary>
+    [ObservableProperty]
+    private string _telegramChatId = string.Empty;
+
+    /// <summary>SMTP smarthost host; empty disables e-mail.</summary>
+    [ObservableProperty]
+    private string _smtpHost = string.Empty;
+
+    /// <summary>SMTP port (text).</summary>
+    [ObservableProperty]
+    private string _smtpPortText = "25";
+
+    /// <summary>Use STARTTLS/TLS for SMTP.</summary>
+    [ObservableProperty]
+    private bool _smtpEnableSsl = true;
+
+    /// <summary>SMTP username (empty = anonymous relay).</summary>
+    [ObservableProperty]
+    private string _smtpUsername = string.Empty;
+
+    /// <summary>SMTP password.</summary>
+    [ObservableProperty]
+    private string _smtpPassword = string.Empty;
+
+    /// <value>Sender address, e.g. winguard@example.com.</value>
+    [ObservableProperty]
+    private string _smtpFrom = string.Empty;
+
+    /// <value>Recipient address for notifications.</value>
+    [ObservableProperty]
+    private string _smtpTo = string.Empty;
+
+    /// <summary>Maximum notifications per minute across all channels (text).</summary>
+    [ObservableProperty]
+    private string _rateLimitPerMinuteText = "20";
+
+    /// <summary>Also write warning/error events to the Windows Application event log (SIEM friendly).</summary>
+    [ObservableProperty]
+    private bool _writeToWindowsEventLog = true;
+
     // ---- UI state ----
 
     /// <summary>User-visible validation error(s).</summary>
@@ -203,6 +283,31 @@ public sealed partial class SettingsViewModel : ObservableObject
         if (!int.TryParse(EventRetentionDaysText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var retentionDays) || retentionDays is < 1 or > 3650)
         {
             errors.Add("Event history must be a whole number of days between 1 and 3650.");
+        }
+
+        if (!int.TryParse(EventBacklogReplayMinutesText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var backlogMinutes) || backlogMinutes is < 0 or > 1440)
+        {
+            errors.Add("Backlog replay must be a whole number of minutes between 0 and 1440.");
+        }
+
+        if (!int.TryParse(Ipv6AggregatePrefixText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ipv6Prefix) || ipv6Prefix != 0 && ipv6Prefix is < 32 or > 64)
+        {
+            errors.Add("IPv6 aggregate prefix must be 0 (off) or between 32 and 64.");
+        }
+
+        if (!int.TryParse(MaxAddressesPerRuleText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var maxAddresses) || maxAddresses is < 1 or > 1000)
+        {
+            errors.Add("Max addresses per rule must be between 1 and 1000.");
+        }
+
+        if (!int.TryParse(RateLimitPerMinuteText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rateLimit) || rateLimit is < 1 or > 1000)
+        {
+            errors.Add("Notification rate limit must be between 1 and 1000 per minute.");
+        }
+
+        if (!int.TryParse(SmtpPortText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var smtpPort) || smtpPort is < 1 or > 65535)
+        {
+            errors.Add("SMTP port must be between 1 and 65535.");
         }
 
         if (!int.TryParse(ThresholdText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var threshold) || threshold < 1)
@@ -282,6 +387,30 @@ public sealed partial class SettingsViewModel : ObservableObject
         settings.EventRetentionDays = retentionDays;
         settings.BlockedPorts = ports;
         settings.BanTiers = tiers.ToArray();
+        settings.ReportOnly = ReportOnly;
+        settings.EventBacklogReplayMinutes = backlogMinutes;
+        settings.Ipv6AggregatePrefixLength = ipv6Prefix;
+        settings.MaxAddressesPerRule = maxAddresses;
+
+        settings.Notifications = new Core.Config.NotificationSettings
+        {
+            Enabled = NotificationsEnabled,
+            WebhookUrl = WebhookUrl.Trim(),
+            TelegramBotToken = TelegramBotToken.Trim(),
+            TelegramChatId = TelegramChatId.Trim(),
+            RateLimitPerMinute = rateLimit,
+            WriteToWindowsEventLog = WriteToWindowsEventLog,
+            Smtp = new Core.Config.SmtpSettings
+            {
+                Host = SmtpHost.Trim(),
+                Port = smtpPort,
+                EnableSsl = SmtpEnableSsl,
+                Username = SmtpUsername,
+                Password = SmtpPassword,
+                From = SmtpFrom.Trim(),
+                To = SmtpTo.Trim(),
+            },
+        };
 
         settings.Rdp.Enabled = RdpEnabled;
         settings.Rdp.UseRdpCoreTsFallback = RdpUseRdpCoreTsFallback;
@@ -459,6 +588,28 @@ public sealed partial class SettingsViewModel : ObservableObject
         SelectedCustomSource = row;
     }
 
+    /// <summary>Adds a custom source row pre-filled from the selected recipe.</summary>
+    [RelayCommand]
+    private void AddFromRecipe()
+    {
+        if (SelectedRecipe is null)
+        {
+            StatusMessage = "Pick a recipe first, then press Add from recipe.";
+            return;
+        }
+
+        var row = new CustomSourceRow
+        {
+            Name = SelectedRecipe.Name,
+            PathGlob = SelectedRecipe.PathGlob,
+            Regex = SelectedRecipe.Regex,
+            Enabled = true,
+        };
+        CustomSources.Add(row);
+        SelectedCustomSource = row;
+        StatusMessage = $"Added the '{SelectedRecipe.Name}' recipe. Adjust the path to this server, then press Save settings. {SelectedRecipe.Description}";
+    }
+
     /// <summary>Removes the selected custom log source row.</summary>
     [RelayCommand]
     private void RemoveCustomSource()
@@ -481,6 +632,25 @@ public sealed partial class SettingsViewModel : ObservableObject
         ProcessInternalIPs = settings.ProcessInternalIPs;
         EventRetentionDaysText = settings.EventRetentionDays.ToString(CultureInfo.InvariantCulture);
         BlockedPortsText = string.Join(", ", settings.BlockedPorts);
+        ReportOnly = settings.ReportOnly;
+        EventBacklogReplayMinutesText = settings.EventBacklogReplayMinutes.ToString(CultureInfo.InvariantCulture);
+        Ipv6AggregatePrefixText = settings.Ipv6AggregatePrefixLength.ToString(CultureInfo.InvariantCulture);
+        MaxAddressesPerRuleText = settings.MaxAddressesPerRule.ToString(CultureInfo.InvariantCulture);
+
+        NotificationsEnabled = settings.Notifications.Enabled;
+        WebhookUrl = settings.Notifications.WebhookUrl ?? string.Empty;
+        TelegramBotToken = settings.Notifications.TelegramBotToken ?? string.Empty;
+        TelegramChatId = settings.Notifications.TelegramChatId ?? string.Empty;
+        RateLimitPerMinuteText = settings.Notifications.RateLimitPerMinute.ToString(CultureInfo.InvariantCulture);
+        WriteToWindowsEventLog = settings.Notifications.WriteToWindowsEventLog;
+        var smtp = settings.Notifications.Smtp ?? new Core.Config.SmtpSettings();
+        SmtpHost = smtp.Host ?? string.Empty;
+        SmtpPortText = (smtp.Port > 0 ? smtp.Port : 25).ToString(CultureInfo.InvariantCulture);
+        SmtpEnableSsl = smtp.EnableSsl;
+        SmtpUsername = smtp.Username ?? string.Empty;
+        SmtpPassword = smtp.Password ?? string.Empty;
+        SmtpFrom = smtp.From ?? string.Empty;
+        SmtpTo = smtp.To ?? string.Empty;
 
         SetTiers(settings.BanTiers.Select(tier => tier.ToString()));
 

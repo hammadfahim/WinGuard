@@ -20,9 +20,34 @@ public sealed class WinGuardSettings
     public bool ClearBansOnStartup { get; set; }
     public bool ProcessInternalIPs { get; set; }
 
+    /// <summary>
+    /// Monitoring mode: count failures, record would-be bans and log events, but never touch the
+    /// Windows firewall. Lets an administrator trial WinGuard on a production server with zero risk
+    /// of locking out a legitimate user. Bans recorded in report-only mode are enforced the moment
+    /// the flag is switched off (the next reconcile pass re-blocks every active ban).
+    /// </summary>
+    public bool ReportOnly { get; set; }
+
+    /// <summary>
+    /// How many minutes of event-log history to replay when the service starts (covers failures
+    /// logged while it was stopped, e.g. during a patch reboot). 0 disables the replay. The replay
+    /// is capped in row count internally so a huge backlog cannot stall startup.
+    /// </summary>
+    public int EventBacklogReplayMinutes { get; set; } = 30;
+
+    /// <summary>
+    /// Ban whole IPv6 /N prefixes instead of single addresses, so an attacker rotating addresses
+    /// inside their /64 cannot evade counting. 0 disables aggregation (per-address bans);
+    /// 64 is the recommended value (one customer site per prefix).
+    /// </summary>
+    public int Ipv6AggregatePrefixLength { get; set; }
+
     /// <summary>Days of event history kept before housekeeping prunes it.</summary>
     public int EventRetentionDays { get; set; } = 30;
     public int MaxAddressesPerRule { get; set; } = Defaults.MaxAddressesPerRule;
+
+    /// <summary>Out-of-band notifications (webhook / Telegram / e-mail / Windows Event Log).</summary>
+    public NotificationSettings Notifications { get; set; } = new();
 
     /// <summary>Empty = block all ports (1 firewall condition per IP; cheapest). Non-empty = block only these ports.</summary>
     public string[] BlockedPorts { get; set; } = [];
@@ -72,12 +97,24 @@ public sealed class WinGuardSettings
         Rdp ??= new();
         MsSql ??= new();
         Ftp ??= new();
+        Notifications ??= new();
         CustomSources ??= [];
         Ftp.Sources ??= [];
         MsSql.IgnoreMessagePatterns ??= [];
         Rdp.ExclusionRules ??= [];
         BlockedPorts ??= [];
         BanTiers ??= [];
+        Notifications.Smtp ??= new();
+
+        // Backlog replay: negative values make no sense; clamp to a sane upper bound (24 h).
+        EventBacklogReplayMinutes = Math.Clamp(EventBacklogReplayMinutes < 0 ? 0 : EventBacklogReplayMinutes, 0, 1440);
+
+        // IPv6 aggregation: 0 = off; otherwise a routable prefix length (>= /32 so a single
+        // "site" is never mistaken for an aggregate, <= /64 as the loosest useful default cap).
+        if (Ipv6AggregatePrefixLength != 0)
+        {
+            Ipv6AggregatePrefixLength = Math.Clamp(Ipv6AggregatePrefixLength, 32, 64);
+        }
 
         // DateTime + TimeSpan overflows past year 9999, which would abort the ban; cap durations.
         var maxSane = TimeSpan.FromDays(3650);
@@ -123,6 +160,10 @@ public sealed class WinGuardSettings
             .Where(p => System.Text.RegularExpressions.Regex.IsMatch(p, @"^\d+(-\d+)?$"))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+
+        // Notification rate limit: 0 would mean "drop everything", negative is nonsense.
+        Notifications.RateLimitPerMinute = Math.Clamp(
+            Notifications.RateLimitPerMinute <= 0 ? 20 : Notifications.RateLimitPerMinute, 1, 1000);
     }
 }
 
@@ -198,4 +239,60 @@ public sealed class CustomLogSource
 
     /// <summary>Regex with named groups (?&lt;ipaddress&gt;...) and optional (?&lt;username&gt;...). A match = one failed login.</summary>
     public string Regex { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Out-of-band notification settings. All channels are opt-in and independent; WinGuard itself
+/// never phones home — these settings only ever point at destinations the administrator entered.
+/// Notifications fire for warning-level engine events (blocks, unblocks, blacklist bans) and are
+/// rate-limited so a brute-force storm cannot flood the destination.
+/// </summary>
+public sealed class NotificationSettings
+{
+    /// <summary>Master switch for webhook/Telegram/SMTP delivery (the Windows Event Log has its own).</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// HTTPS URL that receives a JSON POST per notification, e.g. a Slack/Discord/Mattermost
+    /// incoming-webhook endpoint or an arbitrary automation receiver. Empty = disabled.
+    /// </summary>
+    public string WebhookUrl { get; set; } = string.Empty;
+
+    /// <summary>Telegram bot token (from @BotFather). Empty = Telegram disabled.</summary>
+    public string TelegramBotToken { get; set; } = string.Empty;
+
+    /// <summary>Telegram chat id the notifications go to (from @userinfobot or the bot API).</summary>
+    public string TelegramChatId { get; set; } = string.Empty;
+
+    /// <summary>SMTP relay settings. A null/empty host disables the e-mail channel.</summary>
+    public SmtpSettings? Smtp { get; set; } = new();
+
+    /// <summary>Maximum notifications delivered per minute across all channels (burst protection).</summary>
+    public int RateLimitPerMinute { get; set; } = 20;
+
+    /// <summary>Also write WinGuard events to the Windows Application event log (source "WinGuard")
+    /// so SIEM/Windows-Event-Forwarding setups can consume them without polling WinGuard's pipe.</summary>
+    public bool WriteToWindowsEventLog { get; set; } = true;
+}
+
+/// <summary>Minimal SMTP relay configuration for notifications.</summary>
+public sealed class SmtpSettings
+{
+    public string Host { get; set; } = string.Empty;
+
+    public int Port { get; set; } = 25;
+
+    public bool EnableSsl { get; set; } = true;
+
+    /// <summary>Username; empty = anonymous relay (typical for an internal smarthost).</summary>
+    public string Username { get; set; } = string.Empty;
+
+    /// <summary>Password; stored in the settings blob like the rest of the configuration.</summary>
+    public string Password { get; set; } = string.Empty;
+
+    /// <value>Display/sender address, e.g. winguard@example.com.</value>
+    public string From { get; set; } = string.Empty;
+
+    /// <value>Recipient address for the notifications.</value>
+    public string To { get; set; } = string.Empty;
 }

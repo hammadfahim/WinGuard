@@ -213,6 +213,114 @@ public sealed class FakeStore : IStore
         return Task.CompletedTask;
     }
 
+    // ---- ban history ----
+
+    private readonly List<BanHistoryEntry> _banHistory = new();
+    private long _nextHistoryId;
+
+    /// <summary>Snapshot of ban-history rows in insertion order.</summary>
+    public List<BanHistoryEntry> BanHistory
+    {
+        get { lock (_gate) { return _banHistory.Select(Clone).ToList(); } }
+    }
+
+    public Task AddBanHistoryAsync(BanHistoryEntry entry, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            var copy = Clone(entry);
+            copy.Id = ++_nextHistoryId;
+            _banHistory.Add(copy);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<BanHistoryEntry>> GetBanHistoryAsync(int limit, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            IReadOnlyList<BanHistoryEntry> result = _banHistory
+                .AsEnumerable()
+                .Reverse()
+                .Take(limit)
+                .Select(Clone)
+                .ToList();
+            return Task.FromResult(result);
+        }
+    }
+
+    // ---- daily statistics ----
+
+    private readonly Dictionary<(DateTime Day, ProtocolSource Source), (int Detections, int Bans)> _dailyStats = new();
+
+    /// <summary>Snapshot of the accumulated daily-statistics deltas.</summary>
+    public Dictionary<(DateTime Day, ProtocolSource Source), (int Detections, int Bans)> DailyStats
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return new Dictionary<(DateTime, ProtocolSource), (int, int)>(_dailyStats);
+            }
+        }
+    }
+
+    public Task AddDailyStatsAsync(DateTime dayUtc, ProtocolSource source, int detectionsDelta, int bansDelta, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            var key = (dayUtc.Date, source);
+            var current = _dailyStats.TryGetValue(key, out var existing)
+                ? existing
+                : (Detections: 0, Bans: 0);
+            _dailyStats[key] = (current.Detections + detectionsDelta, current.Bans + bansDelta);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<DailyStatEntry>> GetDailyStatsAsync(DateTime sinceDayUtc, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            IReadOnlyList<DailyStatEntry> result = _dailyStats
+                .Where(pair => pair.Key.Day >= sinceDayUtc.Date)
+                .OrderBy(pair => pair.Key.Day)
+                .ThenBy(pair => pair.Key.Source)
+                .Select(pair => new DailyStatEntry
+                {
+                    DayUtc = pair.Key.Day,
+                    Source = pair.Key.Source,
+                    Detections = pair.Value.Detections,
+                    Bans = pair.Value.Bans,
+                })
+                .ToList();
+            return Task.FromResult(result);
+        }
+    }
+
+    public Task<IReadOnlyList<TopOffenderEntry>> GetTopOffendersAsync(int limit, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            IReadOnlyList<TopOffenderEntry> result = _banHistory
+                .Where(entry => entry.Action == BanHistoryAction.Banned)
+                .GroupBy(entry => entry.IpAddress)
+                .Select(group => new TopOffenderEntry
+                {
+                    IpAddress = group.Key,
+                    BanCount = group.Count(),
+                    MaxOffense = group.Max(entry => entry.OffenseCount),
+                    LastSeenUtc = group.Max(entry => entry.TimestampUtc),
+                })
+                .OrderByDescending(entry => entry.BanCount)
+                .Take(limit)
+                .ToList();
+            return Task.FromResult(result);
+        }
+    }
+
     public Task AddEventAsync(LogEvent logEvent, CancellationToken ct = default)
     {
         lock (_gate)
@@ -297,5 +405,18 @@ public sealed class FakeStore : IStore
         Source = source.Source,
         IpAddress = source.IpAddress,
         Message = source.Message,
+    };
+
+    private static BanHistoryEntry Clone(BanHistoryEntry source) => new()
+    {
+        Id = source.Id,
+        TimestampUtc = source.TimestampUtc,
+        Action = source.Action,
+        IpAddress = source.IpAddress,
+        Source = source.Source,
+        OffenseCount = source.OffenseCount,
+        IsPermanent = source.IsPermanent,
+        Duration = source.Duration,
+        Note = source.Note,
     };
 }

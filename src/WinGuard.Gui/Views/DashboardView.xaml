@@ -22,6 +22,17 @@
                 </StackPanel>
             </Border>
 
+            <!-- Report-only banner -->
+            <Border CornerRadius="8" Padding="14" Margin="0,0,0,16" Background="{DynamicResource WarningBrush}"
+                    Visibility="{Binding ReportOnly, Converter={StaticResource BoolToVis}}">
+                <StackPanel>
+                    <TextBlock Text="Report-only mode" FontWeight="Bold"
+                               Foreground="{DynamicResource WarningForegroundBrush}" Margin="0,0,0,4" />
+                    <TextBlock Text="WinGuard is monitoring but NOT blocking: failures are counted and would-be bans are recorded, while the firewall stays untouched. Switch Report-only off under Settings to enforce the recorded bans."
+                               TextWrapping="Wrap" Foreground="{DynamicResource WarningForegroundBrush}" />
+                </StackPanel>
+            </Border>
+
             <!-- Service status -->
             <Border Style="{StaticResource CardBorderStyle}">
                 <Grid>

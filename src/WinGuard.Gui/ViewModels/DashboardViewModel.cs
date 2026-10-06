@@ -85,6 +85,10 @@ public sealed partial class DashboardViewModel : ObservableObject
     [ObservableProperty]
     private string _serviceActionMessage = string.Empty;
 
+    /// <summary>True when the service runs in report-only (monitoring) mode.</summary>
+    [ObservableProperty]
+    private bool _reportOnly;
+
     /// <summary>Pill caption.</summary>
     public string ConnectionText => IsConnected
         ? "Connected"
@@ -106,6 +110,7 @@ public sealed partial class DashboardViewModel : ObservableObject
             ? string.Empty
             : "Started " + status.StartedUtc.ToLocalTime().ToString("g");
         TotalActiveBansText = status.ActiveBans.ToString();
+        ReportOnly = status.ReportOnly;
         VersionMismatchText = status.ProtocolVersion == PipeConstants.ProtocolVersion
             ? string.Empty
             : "The service and this console are from different WinGuard versions; some features may not work. Reinstall so both match.";

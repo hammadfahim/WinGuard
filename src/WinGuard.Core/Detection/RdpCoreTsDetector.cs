@@ -64,6 +64,13 @@ public sealed class RdpCoreTsDetector : EventLogDetectorBase
     protected override IReadOnlyList<(string Query, bool TolerateQueryErrors)> Queries => [(SubscriptionXPath, true)];
 
     /// <inheritdoc />
+    protected override string? BacklogEventXPath => "EventID=140";
+
+    /// <inheritdoc />
+    protected override TimeSpan BacklogWindow() =>
+        TimeSpan.FromMinutes(Math.Max(0, _settingsAccessor().EventBacklogReplayMinutes));
+
+    /// <inheritdoc />
     protected override bool IsEnabled()
     {
         var rdp = _settingsAccessor().Rdp;

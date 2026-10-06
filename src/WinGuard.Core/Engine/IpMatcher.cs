@@ -125,6 +125,72 @@ public sealed class IpMatcher
     public static bool IsValid(string ip) => TryNormalize(ip, out _);
 
     /// <summary>
+    /// Normalizes a CIDR entry into its canonical text form (network address + "/prefix",
+    /// e.g. <c>203.0.113.0/24</c> or <c>2001:db8::/64</c>). Host bits are masked off. A bare
+    /// IP is accepted and returns <c>ip/32</c> (IPv4) or <c>ip/128</c> (IPv6). Returns
+    /// <see langword="false"/> for anything that is not an IP or CIDR literal.
+    /// </summary>
+    public static bool TryNormalizeRange(string? cidr, out string normalized)
+    {
+        normalized = string.Empty;
+        if (!TryParseCidr(cidr, out var network) || network.BaseAddress is not { } baseAddress)
+        {
+            return false;
+        }
+
+        normalized = baseAddress.ToString().ToLowerInvariant() + "/" + network.PrefixLength.ToString(CultureInfo.InvariantCulture);
+        return true;
+    }
+
+    /// <summary>
+    /// True for a canonical CIDR text produced by <see cref="TryNormalizeRange"/> whose prefix is at
+    /// least /8 (IPv4) or /32 (IPv6): the minimum WinGuard accepts for a firewall range entry, so a
+    /// crafted value can never collapse the whole internet into one rule.
+    /// </summary>
+    public static bool IsBannableRange(string normalizedRange)
+    {
+        if (!TryNormalizeRange(normalizedRange, out var canonical))
+        {
+            return false;
+        }
+
+        var slash = canonical.IndexOf('/');
+        if (!IPAddress.TryParse(canonical[..slash], out var address))
+        {
+            return false;
+        }
+
+        var prefix = int.Parse(canonical[(slash + 1)..], CultureInfo.InvariantCulture);
+        var isIPv6 = address.AddressFamily == AddressFamily.InterNetworkV6;
+        var minimum = isIPv6 ? 32 : 8;
+        return prefix >= minimum && prefix <= (isIPv6 ? 128 : 32);
+    }
+
+    /// <summary>
+    /// Aggregates an IPv6 host address to its /N network prefix in canonical form
+    /// (<c>2001:db8:1:2:3:4:5:6</c> with prefix 64 → <c>2001:db8:1:2::/64</c>). IPv4 inputs return
+    /// <see langword="false"/> (IPv4 aggregation is not supported; attackers do not rotate /24s the
+    /// way IPv6 clients rotate /64 interface identifiers).
+    /// </summary>
+    /// <param name="normalizedIp">A normalized IPv6 host address.</param>
+    /// <param name="prefixLength">Target prefix length, 32..128.</param>
+    /// <param name="prefix">Canonical prefix text (e.g. <c>2001:db8:1:2::/64</c>).</param>
+    public static bool TryAggregateIpv6(string normalizedIp, int prefixLength, out string prefix)
+    {
+        prefix = string.Empty;
+        if (prefixLength is < 32 or > 128
+            || !IPAddress.TryParse(normalizedIp, out var address)
+            || address.AddressFamily != AddressFamily.InterNetworkV6
+            || address.IsIPv4MappedToIPv6)
+        {
+            return false;
+        }
+
+        prefix = new IPNetwork(MaskAddress(address, prefixLength), prefixLength).ToString().ToLowerInvariant();
+        return true;
+    }
+
+    /// <summary>
     /// Returns <see langword="true"/> for non-routable / private addresses: loopback
     /// (127.0.0.0/8, ::1), RFC1918 (10/8, 172.16/12, 192.168/16), link-local
     /// (169.254/16, fe80::/10), IPv6 unique-local (fc00::/7) and site-local (fec0::/10).

@@ -20,6 +20,9 @@
         <DataTemplate DataType="{x:Type vm:EventLogViewModel}">
             <views:EventLogView />
         </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:StatisticsViewModel}">
+            <views:StatisticsView />
+        </DataTemplate>
         <DataTemplate DataType="{x:Type vm:SettingsViewModel}">
             <views:SettingsView />
         </DataTemplate>

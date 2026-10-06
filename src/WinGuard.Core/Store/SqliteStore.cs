@@ -382,6 +382,152 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
             ct).ConfigureAwait(false);
     }
 
+    // ---- ban history ----
+
+    /// <inheritdoc />
+    public async Task AddBanHistoryAsync(BanHistoryEntry entry, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "INSERT INTO ban_history (ts_utc, action, ip, source, offense_count, is_permanent, duration, note) " +
+                    "VALUES ($ts, $action, $ip, $source, $offense, $permanent, $duration, $note);";
+                cmd.Parameters.AddWithValue("$ts", ToDb(entry.TimestampUtc));
+                cmd.Parameters.AddWithValue("$action", (int)entry.Action);
+                cmd.Parameters.AddWithValue("$ip", entry.IpAddress);
+                cmd.Parameters.AddWithValue("$source", (int)entry.Source);
+                cmd.Parameters.AddWithValue("$offense", entry.OffenseCount);
+                cmd.Parameters.AddWithValue("$permanent", entry.IsPermanent ? 1 : 0);
+                cmd.Parameters.AddWithValue("$duration", (object?)(entry.Duration?.Ticks) ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$note", (object?)entry.Note ?? DBNull.Value);
+                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                return true;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<BanHistoryEntry>> GetBanHistoryAsync(int limit, CancellationToken ct = default)
+    {
+        var take = limit <= 0 ? 100 : Math.Min(limit, 1000);
+        return await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "SELECT ts_utc, action, ip, source, offense_count, is_permanent, duration, note FROM ban_history " +
+                    "ORDER BY id DESC LIMIT $limit;";
+                cmd.Parameters.AddWithValue("$limit", take);
+
+                var rows = new List<BanHistoryEntry>();
+                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    rows.Add(new BanHistoryEntry
+                    {
+                        TimestampUtc = FromDb(reader.GetString(0)),
+                        Action = (BanHistoryAction)reader.GetInt32(1),
+                        IpAddress = reader.GetString(2),
+                        Source = (ProtocolSource)reader.GetInt32(3),
+                        OffenseCount = reader.GetInt32(4),
+                        IsPermanent = reader.GetInt32(5) != 0,
+                        Duration = reader.IsDBNull(6) ? null : TimeSpan.FromTicks(reader.GetInt64(6)),
+                        Note = reader.IsDBNull(7) ? null : reader.GetString(7),
+                    });
+                }
+
+                return (IReadOnlyList<BanHistoryEntry>)rows;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    // ---- daily statistics ----
+
+    /// <inheritdoc />
+    public async Task AddDailyStatsAsync(DateTime dayUtc, ProtocolSource source, int detectionsDelta, int bansDelta, CancellationToken ct = default)
+    {
+        var day = dayUtc.Date;
+        await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "INSERT INTO daily_stats (day_utc, source, detections, bans) VALUES ($day, $source, $detections, $bans) " +
+                    "ON CONFLICT(day_utc, source) DO UPDATE SET " +
+                    "detections = detections + $detections, bans = bans + $bans;";
+                cmd.Parameters.AddWithValue("$day", ToDb(day));
+                cmd.Parameters.AddWithValue("$source", (int)source);
+                cmd.Parameters.AddWithValue("$detections", detectionsDelta);
+                cmd.Parameters.AddWithValue("$bans", bansDelta);
+                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                return true;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<DailyStatEntry>> GetDailyStatsAsync(DateTime sinceDayUtc, CancellationToken ct = default)
+    {
+        return await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "SELECT day_utc, source, detections, bans FROM daily_stats WHERE day_utc >= $since ORDER BY day_utc, source;";
+                cmd.Parameters.AddWithValue("$since", ToDb(sinceDayUtc.Date));
+
+                var rows = new List<DailyStatEntry>();
+                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    rows.Add(new DailyStatEntry
+                    {
+                        DayUtc = FromDb(reader.GetString(0)),
+                        Source = (ProtocolSource)reader.GetInt32(1),
+                        Detections = reader.GetInt32(2),
+                        Bans = reader.GetInt32(3),
+                    });
+                }
+
+                return (IReadOnlyList<DailyStatEntry>)rows;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<TopOffenderEntry>> GetTopOffendersAsync(int limit, CancellationToken ct = default)
+    {
+        var take = limit <= 0 ? 10 : Math.Min(limit, 100);
+        return await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "SELECT ip, COUNT(*), MAX(offense_count), MAX(ts_utc) FROM ban_history " +
+                    "WHERE action = 0 GROUP BY ip ORDER BY COUNT(*) DESC, MAX(ts_utc) DESC LIMIT $limit;";
+                cmd.Parameters.AddWithValue("$limit", take);
+
+                var rows = new List<TopOffenderEntry>();
+                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    rows.Add(new TopOffenderEntry
+                    {
+                        IpAddress = reader.GetString(0),
+                        BanCount = reader.GetInt32(1),
+                        MaxOffense = reader.GetInt32(2),
+                        LastSeenUtc = FromDb(reader.GetString(3)),
+                    });
+                }
+
+                return (IReadOnlyList<TopOffenderEntry>)rows;
+            },
+            ct).ConfigureAwait(false);
+    }
+
     // ---- events ----
 
     /// <inheritdoc />
@@ -635,7 +781,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
             ct).ConfigureAwait(false);
     }
 
-    private const int SchemaVersion = 2;
+    private const int SchemaVersion = 3;
 
     private static async Task ExecuteNonQueryAsync(SqliteConnection connection, string sql, CancellationToken ct)
     {
@@ -870,6 +1016,28 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
         CREATE TABLE IF NOT EXISTS settings (
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS ban_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts_utc TEXT NOT NULL,
+          action INTEGER NOT NULL,
+          ip TEXT NOT NULL,
+          source INTEGER NOT NULL,
+          offense_count INTEGER NOT NULL DEFAULT 1,
+          is_permanent INTEGER NOT NULL DEFAULT 0,
+          duration INTEGER,
+          note TEXT
+        );
+        CREATE INDEX IF NOT EXISTS ix_ban_history_ts ON ban_history(ts_utc);
+        CREATE INDEX IF NOT EXISTS ix_ban_history_ip_ts ON ban_history(ip, ts_utc);
+
+        CREATE TABLE IF NOT EXISTS daily_stats (
+          day_utc TEXT NOT NULL,
+          source INTEGER NOT NULL,
+          detections INTEGER NOT NULL DEFAULT 0,
+          bans INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (day_utc, source)
         );
 
         CREATE INDEX IF NOT EXISTS ix_bans_expires ON bans(expires_utc);

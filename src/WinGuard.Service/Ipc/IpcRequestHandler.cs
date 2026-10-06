@@ -23,6 +23,7 @@ public sealed partial class IpcRequestHandler
     private readonly IFirewall _firewall;
     private readonly DetectorRuntimeState _state;
     private readonly ILogger<IpcRequestHandler> _logger;
+    private readonly TimeProvider _timeProvider;
     private readonly DateTime _startedUtc;
 
     /// <summary>Creates the handler.</summary>
@@ -31,7 +32,7 @@ public sealed partial class IpcRequestHandler
     /// <param name="settings">Live settings holder.</param>
     /// <param name="firewall">Firewall abstraction (prerequisite probe).</param>
     /// <param name="state">Shared detector running flags.</param>
-    /// <param name="timeProvider">Clock used for the reported service start time.</param>
+    /// <param name="timeProvider">Clock used for the reported service start time and statistics windows.</param>
     /// <param name="logger">Diagnostic logger.</param>
     public IpcRequestHandler(
         IStore store,
@@ -48,6 +49,7 @@ public sealed partial class IpcRequestHandler
         _firewall = firewall ?? throw new ArgumentNullException(nameof(firewall));
         _state = state ?? throw new ArgumentNullException(nameof(state));
         ArgumentNullException.ThrowIfNull(timeProvider);
+        _timeProvider = timeProvider;
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _startedUtc = timeProvider.GetUtcNow().UtcDateTime;
     }
@@ -106,6 +108,8 @@ public sealed partial class IpcRequestHandler
         IpcMethods.GetSettings => IpcResponse.Success(request.Id, _settings.Current),
         IpcMethods.UpdateSettings => await UpdateSettingsAsync(request, ct).ConfigureAwait(false),
         IpcMethods.CheckPrereqs => IpcResponse.Success(request.Id, await CheckPrereqsAsync(ct).ConfigureAwait(false)),
+        IpcMethods.GetStatistics => IpcResponse.Success(request.Id, await GetStatisticsAsync(Params<GetStatisticsParams>(request), ct).ConfigureAwait(false)),
+        IpcMethods.ListBanHistory => IpcResponse.Success(request.Id, await ListBanHistoryAsync(Params<ListBanHistoryParams>(request), ct).ConfigureAwait(false)),
         _ => IpcResponse.Fail(request.Id, $"Unknown method '{request.Method}'."),
     };
 
@@ -136,6 +140,7 @@ public sealed partial class IpcRequestHandler
             StartedUtc = _startedUtc,
             ActiveBans = bans.Count,
             Engines = engines,
+            ReportOnly = settings.ReportOnly,
         };
     }
 
@@ -150,6 +155,32 @@ public sealed partial class IpcRequestHandler
         var limit = Math.Clamp(parameters.Limit <= 0 ? 200 : parameters.Limit, 1, 1000);
         var events = await _store.GetEventsAsync(limit, parameters.SinceUtc, parameters.AfterId, ct).ConfigureAwait(false);
         return events.Select(EventDto.From).ToList();
+    }
+
+    private async Task<StatisticsDto> GetStatisticsAsync(GetStatisticsParams parameters, CancellationToken ct)
+    {
+        var days = Math.Clamp(parameters.Days <= 0 ? 30 : parameters.Days, 1, 365);
+        var since = _timeProvider.GetUtcNow().UtcDateTime.Date.AddDays(-(days - 1));
+
+        var daily = await _store.GetDailyStatsAsync(since, ct).ConfigureAwait(false);
+        var topOffenders = await _store.GetTopOffendersAsync(10, ct).ConfigureAwait(false);
+        var history = await _store.GetBanHistoryAsync(1000, ct).ConfigureAwait(false);
+        var bans = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
+
+        return new StatisticsDto
+        {
+            Daily = daily.Select(DailyStatDto.From).ToList(),
+            TopOffenders = topOffenders.Select(TopOffenderDto.From).ToList(),
+            TotalActiveBans = bans.Count,
+            HistoryRows = history.Count,
+        };
+    }
+
+    private async Task<List<BanHistoryDto>> ListBanHistoryAsync(ListBanHistoryParams parameters, CancellationToken ct)
+    {
+        var limit = Math.Clamp(parameters.Limit <= 0 ? 100 : parameters.Limit, 1, 1000);
+        var history = await _store.GetBanHistoryAsync(limit, ct).ConfigureAwait(false);
+        return history.Select(BanHistoryDto.From).ToList();
     }
 
     private async Task<List<ListEntryDto>> ListListsAsync(CancellationToken ct)
@@ -177,7 +208,7 @@ public sealed partial class IpcRequestHandler
             // re-ban the IP in the window before the next housekeeping pass (review S-M7).
             await _store.AddToListAsync(ListKind.Whitelist, ip, ct).ConfigureAwait(false);
             await _store.RemoveFromListAsync(ListKind.Blacklist, ip, ct).ConfigureAwait(false);
-            await _engine.ReloadListsAsync(ct).ConfigureAwait(false);
+            await _engine.HousekeepOnceAsync(ct).ConfigureAwait(false);
         }
 
         await _engine.UnbanAsync(ip, ct).ConfigureAwait(false);
@@ -207,7 +238,7 @@ public sealed partial class IpcRequestHandler
         await _store.AddToListAsync(ListKind.Whitelist, value, ct).ConfigureAwait(false);
 
         // Reload the engine's in-memory matcher so the new entry takes effect immediately.
-        await _engine.ReloadListsAsync(ct).ConfigureAwait(false);
+        await _engine.HousekeepOnceAsync(ct).ConfigureAwait(false);
 
         // A whitelisted single host should immediately stop being blocked.
         if (IpMatcher.TryNormalize(value, out var ip))
@@ -241,7 +272,7 @@ public sealed partial class IpcRequestHandler
         await _store.AddToListAsync(ListKind.Blacklist, value, ct).ConfigureAwait(false);
 
         // Reload the engine's in-memory matcher so the new entry takes effect immediately.
-        await _engine.ReloadListsAsync(ct).ConfigureAwait(false);
+        await _engine.HousekeepOnceAsync(ct).ConfigureAwait(false);
 
         // A blacklisted single host is blocked right away (RdpGuard-style). CIDR ranges
         // take effect at detection time via PLAN §5 step 3. A whitelisted IP is refused
@@ -272,7 +303,7 @@ public sealed partial class IpcRequestHandler
         await _store.RemoveFromListAsync(parameters.Kind, value, ct).ConfigureAwait(false);
 
         // Reload the engine's in-memory matcher so the removal takes effect immediately.
-        await _engine.ReloadListsAsync(ct).ConfigureAwait(false);
+        await _engine.HousekeepOnceAsync(ct).ConfigureAwait(false);
 
         // Taking an entry off the blacklist also lifts the permanent bans it created, unless
         // another blacklist entry still covers the address. Manual bans are left alone.

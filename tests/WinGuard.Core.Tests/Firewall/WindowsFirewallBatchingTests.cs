@@ -30,14 +30,27 @@ public sealed class WindowsFirewallBatchingTests
     }
 
     [Theory]
-    [InlineData("10.0.0.0/255.0.0.0")]
     [InlineData("10.0.0.1-10.0.0.9")]
     [InlineData("LocalSubnet")]
     [InlineData("*")]
     [InlineData("")]
-    public void Subnets_ranges_and_keywords_are_not_single_hosts(string token)
+    public void Multi_address_ranges_and_keywords_are_rejected(string token)
     {
         Assert.False(WindowsFirewall.TryParseRuleAddress(token, out _));
+    }
+
+    [Theory]
+    [InlineData("10.0.0.0/255.0.0.0", "10.0.0.0/8")]
+    [InlineData("10.0.0.0/8", "10.0.0.0/8")]
+    [InlineData("203.0.113.0/255.255.255.0", "203.0.113.0/24")]
+    [InlineData("2001:db8:1:2::/64", "2001:db8:1:2::/64")]
+    [InlineData("2001:db8::/32", "2001:db8::/32")]
+    public void Real_subnets_are_canonicalized_to_prefix_form(string token, string expected)
+    {
+        // WinGuard writes subnets itself (IPv6 aggregate bans, blacklisted ranges); Windows
+        // reports them back with either a prefix or a dotted netmask.
+        Assert.True(WindowsFirewall.TryParseRuleAddress(token, out var normalized));
+        Assert.Equal(expected, normalized);
     }
 
     [Fact]

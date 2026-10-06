@@ -237,6 +237,14 @@ public sealed class PipeClient : IDisposable
     public Task<PrereqsDto?> CheckPrereqsAsync(CancellationToken ct = default) =>
         GetAsync<PrereqsDto>(IpcMethods.CheckPrereqs, null, ct, LongRequestTimeout);
 
+    /// <summary>Statistics for the GUI view (daily counters, top offenders), or null when unavailable.</summary>
+    public Task<StatisticsDto?> GetStatisticsAsync(int days = 30, CancellationToken ct = default) =>
+        GetAsync<StatisticsDto>(IpcMethods.GetStatistics, new GetStatisticsParams { Days = days }, ct);
+
+    /// <summary>Ban-history rows newest-first, or null when the service is unavailable.</summary>
+    public Task<List<BanHistoryDto>?> ListBanHistoryAsync(int limit = 100, CancellationToken ct = default) =>
+        GetAsync<List<BanHistoryDto>>(IpcMethods.ListBanHistory, new ListBanHistoryParams { Limit = limit }, ct);
+
     /// <inheritdoc />
     public void Dispose()
     {

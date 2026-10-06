@@ -246,6 +246,96 @@ public sealed class IpcRequestHandlerTests
         Assert.NotNull(prereqs.Warnings);
     }
 
+    // ---------- v0.2: report-only, statistics, ban history ----------
+
+    [Fact]
+    public async Task Status_reports_report_only_mode()
+    {
+        await using var h = await Harness.StartAsync();
+
+        Assert.False((await h.GetAsync<ServiceStatusDto>(IpcMethods.GetStatus)).ReportOnly);
+
+        var settings = await h.GetAsync<WinGuardSettings>(IpcMethods.GetSettings);
+        settings.ReportOnly = true;
+        await h.SendAsync(IpcMethods.UpdateSettings, new UpdateSettingsParams { Settings = settings });
+
+        Assert.True((await h.GetAsync<ServiceStatusDto>(IpcMethods.GetStatus)).ReportOnly);
+    }
+
+    [Fact]
+    public async Task Statistics_and_ban_history_round_trip()
+    {
+        await using var h = await Harness.StartAsync();
+
+        // A manual ban (and its manual unban) produce history + stats rows.
+        await h.SendAsync(IpcMethods.BlockNow, new BlockNowParams { Ip = "203.0.113.60", Duration = TimeSpan.FromHours(2) });
+        await h.SendAsync(IpcMethods.Unblock, new UnblockParams { Ip = "203.0.113.60" });
+
+        // Flush the buffered daily stats through a housekeeping pass.
+        await h.Engine.HousekeepOnceAsync();
+
+        var statistics = await h.GetAsync<StatisticsDto>(IpcMethods.GetStatistics, new GetStatisticsParams { Days = 7 });
+        Assert.Equal(0, statistics.TotalActiveBans); // the unban removed the active ban
+        Assert.True(statistics.HistoryRows >= 2);
+        var bannedDay = Assert.Single(statistics.Daily, entry => entry.Bans == 1);
+        Assert.Equal(ProtocolSource.Custom, bannedDay.Source); // manual bans are attributed to Custom
+        Assert.Equal(0, bannedDay.Detections); // no detector ran; only the ban was recorded
+
+        var history = await h.GetAsync<List<BanHistoryDto>>(IpcMethods.ListBanHistory, new ListBanHistoryParams { Limit = 50 });
+        Assert.Contains(history, row => row.Action == "Banned" && row.IpAddress == "203.0.113.60" && row.DurationTicks == TimeSpan.FromHours(2).Ticks);
+        Assert.Contains(history, row => row.Action == "Unbanned" && row.IpAddress == "203.0.113.60");
+        Assert.Contains(statistics.TopOffenders, offender => offender.IpAddress == "203.0.113.60" && offender.BanCount == 1);
+    }
+
+    [Fact]
+    public async Task Settings_for_new_features_round_trip()
+    {
+        await using var h = await Harness.StartAsync();
+
+        var settings = await h.GetAsync<WinGuardSettings>(IpcMethods.GetSettings);
+        settings.ReportOnly = true;
+        settings.EventBacklogReplayMinutes = 90;
+        settings.Ipv6AggregatePrefixLength = 64;
+        settings.Notifications = new NotificationSettings
+        {
+            Enabled = true,
+            WebhookUrl = "https://example.invalid/hook",
+            TelegramBotToken = "123:abc",
+            TelegramChatId = "42",
+            RateLimitPerMinute = 5,
+            WriteToWindowsEventLog = false,
+            Smtp = new SmtpSettings { Host = "smtp.example.invalid", Port = 587, From = "wg@example.invalid", To = "ops@example.invalid" },
+        };
+
+        var stored = await h.GetAsync<WinGuardSettings>(IpcMethods.UpdateSettings, new UpdateSettingsParams { Settings = settings });
+
+        Assert.True(stored.ReportOnly);
+        Assert.Equal(90, stored.EventBacklogReplayMinutes);
+        Assert.Equal(64, stored.Ipv6AggregatePrefixLength);
+        Assert.Equal("https://example.invalid/hook", stored.Notifications.WebhookUrl);
+        Assert.Equal("42", stored.Notifications.TelegramChatId);
+        Assert.Equal(5, stored.Notifications.RateLimitPerMinute);
+        Assert.False(stored.Notifications.WriteToWindowsEventLog);
+        Assert.Equal(587, stored.Notifications.Smtp!.Port);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(5000)]
+    public async Task Out_of_range_backlog_and_prefix_values_are_clamped(int _)
+    {
+        await using var h = await Harness.StartAsync();
+
+        var settings = await h.GetAsync<WinGuardSettings>(IpcMethods.GetSettings);
+        settings.EventBacklogReplayMinutes = 5000; // over the 24 h cap
+        settings.Ipv6AggregatePrefixLength = 128;  // over the /64 cap
+
+        var stored = await h.GetAsync<WinGuardSettings>(IpcMethods.UpdateSettings, new UpdateSettingsParams { Settings = settings });
+
+        Assert.Equal(1440, stored.EventBacklogReplayMinutes);
+        Assert.Equal(64, stored.Ipv6AggregatePrefixLength);
+    }
+
     /// <summary>The handler wired the way Program.cs wires it, with in-memory store and firewall.</summary>
     private sealed class Harness : IAsyncDisposable
     {

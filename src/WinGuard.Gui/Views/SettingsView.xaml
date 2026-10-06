@@ -44,12 +44,37 @@
                             <TextBox Text="{Binding BlockedPortsText, UpdateSourceTrigger=PropertyChanged}"
                                      ToolTip="Comma separated. Leave empty to block all ports. Example: 3389, 1433" />
                         </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Backlog replay (minutes)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding EventBacklogReplayMinutesText, UpdateSourceTrigger=PropertyChanged}"
+                                     ToolTip="How many minutes of event-log history to re-read when the service starts, covering failures logged while it was stopped. 0 = off." />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="IPv6 aggregate prefix" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding Ipv6AggregatePrefixText, UpdateSourceTrigger=PropertyChanged}"
+                                     ToolTip="0 = ban single IPv6 addresses. 64 = count and ban the whole /64 prefix, so address rotation cannot evade banning." />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Max addresses per firewall rule" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding MaxAddressesPerRuleText, UpdateSourceTrigger=PropertyChanged}"
+                                     ToolTip="Windows practical limit is 1000 addresses per rule; WinGuard batches into numbered rules automatically." />
+                        </StackPanel>
                     </WrapPanel>
                     <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
                         <CheckBox Style="{StaticResource ToggleSwitch}" IsChecked="{Binding ClearBansOnStartup, Mode=TwoWay}" />
                         <TextBlock Text="Clear all bans on service startup" Margin="10,0,24,0" VerticalAlignment="Center" />
                         <CheckBox Style="{StaticResource ToggleSwitch}" IsChecked="{Binding ProcessInternalIPs, Mode=TwoWay}" />
                         <TextBlock Text="Process internal / private IPs" Margin="10,0,0,0" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <Border Background="{DynamicResource WarningBrush}" CornerRadius="6" Padding="10,6" Margin="0,10,0,0"
+                            Visibility="{Binding ReportOnly, Converter={StaticResource BoolToVis}}">
+                        <TextBlock Text="Report-only mode is ON: failures are counted and would-be bans are recorded, but the firewall is NOT modified."
+                                   TextWrapping="Wrap" Foreground="Black" FontWeight="SemiBold" />
+                    </Border>
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <CheckBox Style="{StaticResource ToggleSwitch}" IsChecked="{Binding ReportOnly, Mode=TwoWay}" />
+                        <TextBlock Text="Report-only mode (monitor without blocking)" Margin="10,0,0,0" VerticalAlignment="Center"
+                                   ToolTip="Trial WinGuard safely: count failures and record would-be bans without touching the firewall" />
                     </StackPanel>
                 </StackPanel>
             </Border>
@@ -227,6 +252,81 @@
                         <Button Content="Add source" Command="{Binding AddCustomSourceCommand}" />
                         <Button Content="Remove selected" Margin="6,0,0,0" Command="{Binding RemoveCustomSourceCommand}" />
                     </StackPanel>
+                    <TextBlock Text="Add from recipe" FontWeight="SemiBold" Margin="0,14,0,4" />
+                    <TextBlock Text="Pre-configured sources for common servers. The path still needs to match this machine."
+                               Foreground="{DynamicResource SubtleForegroundBrush}" TextWrapping="Wrap" Margin="0,0,0,6" />
+                    <StackPanel Orientation="Horizontal">
+                        <ComboBox Width="260" ItemsSource="{Binding Recipes}" SelectedItem="{Binding SelectedRecipe}"
+                                  DisplayMemberPath="Name" />
+                        <Button Content="Add from recipe" Margin="6,0,0,0" Command="{Binding AddFromRecipeCommand}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Notifications -->
+            <Border Style="{StaticResource CardBorderStyle}" Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock Text="Notifications" Style="{StaticResource SectionHeaderStyle}" />
+                    <TextBlock Text="Out-of-band alerts when WinGuard blocks or unblocks an attacker. All channels are opt-in and rate-limited; WinGuard itself never contacts anything but the destinations below."
+                               Foreground="{DynamicResource SubtleForegroundBrush}" TextWrapping="Wrap" Margin="0,0,0,8" />
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                        <CheckBox Style="{StaticResource ToggleSwitch}" IsChecked="{Binding NotificationsEnabled, Mode=TwoWay}" />
+                        <TextBlock Text="Enable webhook / Telegram / e-mail" Margin="10,0,24,0" VerticalAlignment="Center" />
+                        <CheckBox Style="{StaticResource ToggleSwitch}" IsChecked="{Binding WriteToWindowsEventLog, Mode=TwoWay}" />
+                        <TextBlock Text="Write to Windows Event Log (Application)" Margin="10,0,0,0" VerticalAlignment="Center"
+                                   ToolTip="Also records WinGuard events under the 'WinGuard' source so SIEM / Windows Event Forwarding can consume them" />
+                    </StackPanel>
+                    <WrapPanel>
+                        <StackPanel Width="300" Margin="0,0,16,10">
+                            <TextBlock Text="Webhook URL (JSON POST)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding WebhookUrl, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="Telegram bot token" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding TelegramBotToken, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="180" Margin="0,0,16,10">
+                            <TextBlock Text="Telegram chat id" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding TelegramChatId, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="140" Margin="0,0,16,10">
+                            <TextBlock Text="Rate limit (per minute)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding RateLimitPerMinuteText, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                    </WrapPanel>
+                    <TextBlock Text="E-mail (SMTP)" FontWeight="SemiBold" Margin="0,4,0,6" />
+                    <WrapPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="SMTP host" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding SmtpHost, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="100" Margin="0,0,16,10">
+                            <TextBlock Text="Port" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding SmtpPortText, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="180" Margin="0,0,16,10" VerticalAlignment="Bottom">
+                            <StackPanel Orientation="Horizontal">
+                                <CheckBox Style="{StaticResource ToggleSwitch}" IsChecked="{Binding SmtpEnableSsl, Mode=TwoWay}" />
+                                <TextBlock Text="Use TLS" Margin="10,0,0,0" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </StackPanel>
+                        <StackPanel Width="180" Margin="0,0,16,10">
+                            <TextBlock Text="Username (empty = anonymous)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding SmtpUsername, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="180" Margin="0,0,16,10">
+                            <TextBlock Text="Password" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding SmtpPassword, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="From (e.g. winguard@example.com)" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding SmtpFrom, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Width="220" Margin="0,0,16,10">
+                            <TextBlock Text="To" Style="{StaticResource FieldLabelStyle}" />
+                            <TextBox Text="{Binding SmtpTo, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                    </WrapPanel>
                 </StackPanel>
             </Border>
 
