@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="clr-namespace:WinGuard.Gui.ViewModels"
         xmlns:views="clr-namespace:WinGuard.Gui.Views"
-        Title="WinGuard"
+        Title="{Binding WindowTitle}"
         Height="760" Width="1180"
         MinHeight="520" MinWidth="900"
         WindowStartupLocation="CenterScreen"

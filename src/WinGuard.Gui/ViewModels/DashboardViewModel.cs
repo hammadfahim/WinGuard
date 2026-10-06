@@ -99,7 +99,9 @@ public sealed partial class DashboardViewModel : ObservableObject
     /// <param name="status">Status from the service.</param>
     public void UpdateStatus(ServiceStatusDto status)
     {
-        VersionText = string.IsNullOrWhiteSpace(status.Version) ? string.Empty : "v" + status.Version;
+        VersionText = string.IsNullOrWhiteSpace(status.Version)
+            ? string.Empty
+            : $"Service v{status.Version} · console v{MainViewModel.ConsoleVersion}";
         StartedText = status.StartedUtc == default
             ? string.Empty
             : "Started " + status.StartedUtc.ToLocalTime().ToString("g");

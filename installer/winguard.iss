@@ -91,7 +91,10 @@ Filename: "{sys}\sc.exe"; Parameters: "start {#MyAppServiceName}"; Flags: runhid
 ; Optional prerequisites. The subcategory GUID is locale-independent (the English name
 ; "Logon" silently fails on non-English Windows).
 Filename: "{sys}\auditpol.exe"; Parameters: "/set /subcategory:""{{0CCE9215-69AE-11D9-BED3-505054503030}"" /success:enable /failure:enable"; Flags: runhidden; Tasks: auditpolicy; StatusMsg: "Enabling logon failure auditing..."
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+; The console requires elevation (its manifest says requireAdministrator). A postinstall entry
+; is started as the ORIGINAL, non-elevated user by default, which fails with "CreateProcess
+; failed; code 740". runascurrentuser starts it with Setup's own (already elevated) rights.
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent runascurrentuser
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
@@ -163,8 +166,17 @@ end;
 
 { Stop any existing service before [Files] overwrites the running EXE. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
 begin
   Result := '';
+  { Close a running console first. It lives in the tray and turns a normal close
+    request into "hide", so without this an upgrade can leave the OLD console
+    running: its EXE cannot be replaced, and starting WinGuard afterwards only
+    brings that old window back. taskkill returns non-zero when nothing is
+    running, which is fine. }
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyAppExeName}', '',
+    SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if ServiceExistsFlag then
     StopServiceAndWait();
 end;
@@ -198,6 +210,10 @@ begin
 
   if CurUninstallStep = usUninstall then
   begin
+    { The console may still be running in the tray; close it so its EXE can be removed. }
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyAppExeName}', '',
+      SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
     { Stop the service and wait for STOPPED before deleting it, so clear-firewall
       runs against a quiet firewall and the binary can still be started here. }
     if ServiceExistsFlag then

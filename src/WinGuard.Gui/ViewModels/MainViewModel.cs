@@ -109,6 +109,16 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [NotifyPropertyChangedFor(nameof(ThemeButtonText))]
     private ThemeChoice _themeChoice = ThemeChoice.System;
 
+    /// <summary>
+    /// Window caption including this console's version, so it is always visible which build is
+    /// on screen (an upgrade can leave an older console running in the tray).
+    /// </summary>
+    public string WindowTitle { get; } = "WinGuard " + ConsoleVersion;
+
+    /// <summary>This console's version, e.g. "0.1.8".</summary>
+    public static string ConsoleVersion { get; } =
+        typeof(MainViewModel).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+
     /// <summary>Caption of the theme button.</summary>
     public string ThemeButtonText => "Theme: " + (ThemeChoice switch
     {
