@@ -3,6 +3,7 @@ using System.Globalization;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using WinGuard.Core.Config;
+using WinGuard.Core.Ipc;
 using WinGuard.Gui.Services;
 
 namespace WinGuard.Gui.ViewModels;

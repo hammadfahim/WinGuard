@@ -3,6 +3,7 @@ using Microsoft.Win32;
 using System.IO;
 using System.Windows;
 using System.Windows.Threading;
+using WinGuard.Core.Ipc;
 using WinGuard.Gui.Services;
 using WinGuard.Gui.ViewModels;
 

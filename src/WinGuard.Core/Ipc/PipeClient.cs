@@ -4,13 +4,14 @@ using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using WinGuard.Core.Config;
-using WinGuard.Core.Ipc;
 using WinGuard.Core.Model;
 
-namespace WinGuard.Gui.Services;
+namespace WinGuard.Core.Ipc;
 
 /// <summary>
-/// GUI side of the WinGuard named-pipe JSON-line protocol (PLAN.md §8, CONTRACTS.md Agent D).
+/// Console side of the WinGuard named-pipe JSON-line protocol (PLAN.md §8, CONTRACTS.md Agent D).
+/// It lives in the shared library (not in the GUI project) so the end-to-end tests can run this
+/// exact client against the service's real pipe server.
 /// One request is written as a single UTF-8 line and exactly one response line is read back.
 /// A background loop reconnects every two seconds while the service is down; callers observe
 /// <see cref="IsConnected"/> / <see cref="StateChanged"/>. All public typed helpers never throw
@@ -31,6 +32,8 @@ public sealed class PipeClient : IDisposable
     private readonly SemaphoreSlim _connectLock = new(1, 1);
     private readonly object _stateLock = new();
 
+    private readonly string _pipeName;
+
     private NamedPipeClientStream? _pipe;
     private StreamReader? _reader;
     private StreamWriter? _writer;
@@ -43,6 +46,13 @@ public sealed class PipeClient : IDisposable
     // identity) escalate the reconnect delay exponentially instead of hammering.
     private int _rapidFailures;
     private DateTime _connectedAtUtc;
+
+    /// <summary>Creates the client.</summary>
+    /// <param name="pipeName">Pipe to connect to; the service's pipe when omitted (tests pass their own).</param>
+    public PipeClient(string? pipeName = null)
+    {
+        _pipeName = string.IsNullOrWhiteSpace(pipeName) ? PipeConstants.PipeName : pipeName;
+    }
 
     /// <summary>Raised whenever the connection state changes (true = connected).</summary>
     public event Action<bool>? StateChanged;
@@ -301,7 +311,7 @@ public sealed class PipeClient : IDisposable
             // which is what lets the service identify us before we have sent anything.
             var pipe = new NamedPipeClientStream(
                 ".",
-                PipeConstants.PipeName,
+                _pipeName,
                 PipeDirection.InOut,
                 PipeOptions.Asynchronous,
                 TokenImpersonationLevel.Identification);
@@ -357,12 +367,26 @@ public sealed class PipeClient : IDisposable
             // Handshake: the connection only counts once the service has answered. A service that
             // refuses this caller answers with a reason and closes the pipe; reporting "connected"
             // before knowing that would make the window flicker and start loads that cannot work.
-            var problem = await HandshakeAsync(reader, writer, ct).ConfigureAwait(false);
+            string? problem;
+            try
+            {
+                problem = await HandshakeAsync(reader, writer, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                CloseQuietly(reader, writer, pipe);
+                throw;
+            }
+            catch (Exception ex)
+            {
+                problem = "Could not talk to the WinGuard service: " + ex.Message;
+            }
+
             if (problem is not null)
             {
-                reader.Dispose();
-                writer.Dispose();
-                pipe.Dispose();
+                // The reason must reach the screen whatever happens while closing: closing a pipe
+                // the service has already hung up on throws, and that used to swallow the reason.
+                CloseQuietly(reader, writer, pipe);
                 SetProblem(problem);
                 NoteFailedAttempt();
                 return false;
@@ -405,7 +429,7 @@ public sealed class PipeClient : IDisposable
         {
             throw;
         }
-        catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException)
+        catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException or InvalidOperationException)
         {
             return "The WinGuard service is running but did not answer this console.";
         }
@@ -444,13 +468,13 @@ public sealed class PipeClient : IDisposable
     /// Whether the service's pipe exists at all. The pipe directory is listed rather than probing
     /// the name, because probing a pipe name opens (and uses up) one of its instances.
     /// </summary>
-    private static bool ServicePipeExists()
+    private bool ServicePipeExists()
     {
         try
         {
             foreach (var path in Directory.EnumerateFiles(@"\\.\pipe\"))
             {
-                if (string.Equals(Path.GetFileName(path), PipeConstants.PipeName, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(Path.GetFileName(path), _pipeName, StringComparison.OrdinalIgnoreCase))
                 {
                     return true;
                 }
@@ -462,6 +486,38 @@ public sealed class PipeClient : IDisposable
         }
 
         return false;
+    }
+
+    /// <summary>Closes a connection that is being given up; never throws.</summary>
+    private static void CloseQuietly(StreamReader? reader, StreamWriter? writer, NamedPipeClientStream? pipe)
+    {
+        // The writer first: disposing it flushes, which fails once the stream is closed or broken.
+        try
+        {
+            writer?.Dispose();
+        }
+        catch (Exception)
+        {
+            // Already closed or broken.
+        }
+
+        try
+        {
+            reader?.Dispose();
+        }
+        catch (Exception)
+        {
+            // Already closed.
+        }
+
+        try
+        {
+            pipe?.Dispose();
+        }
+        catch (Exception)
+        {
+            // Already closed.
+        }
     }
 
     private void SetProblem(string? problem)
@@ -553,32 +609,7 @@ public sealed class PipeClient : IDisposable
 
     private void DisposePipeLocked()
     {
-        try
-        {
-            _reader?.Dispose();
-        }
-        catch
-        {
-            // Ignore.
-        }
-
-        try
-        {
-            _writer?.Dispose();
-        }
-        catch
-        {
-            // Ignore.
-        }
-
-        try
-        {
-            _pipe?.Dispose();
-        }
-        catch
-        {
-            // Ignore.
-        }
+        CloseQuietly(_reader, _writer, _pipe);
 
         _reader = null;
         _writer = null;

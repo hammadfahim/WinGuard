@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
-using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
@@ -20,18 +19,15 @@ namespace WinGuard.Service.Ipc;
 /// only — plus <c>PIPE_REJECT_REMOTE_CLIENTS</c> and first-instance anti-squatting, via P/Invoke
 /// (<c>PipeSecurity</c> lives in the System.IO.Pipes.AccessControl package, which is intentionally
 /// not referenced). No other account can open the pipe or create another instance of it. Every
-/// connection is additionally authorized by impersonating the client
-/// (<see cref="NamedPipeServerStream.RunAsClient"/>): only LocalSystem and elevated
-/// administrators are accepted; everything else fails closed. This enforces the PLAN.md §8
-/// "Administrators + LocalSystem only" intent (reviews S-M1/S-M2).
+/// connection is additionally authorized by <see cref="PipeClientIdentity"/>, which reads the
+/// access token of the client process: only LocalSystem and elevated administrators are accepted;
+/// everything else fails closed. This enforces the PLAN.md §8 "Administrators + LocalSystem only"
+/// intent (reviews S-M1/S-M2).
 /// </para>
 /// <para>
-/// <b>When the caller is identified:</b> Windows can only impersonate a pipe client at once if
-/// the client fixed its identity when it connected (the WinGuard console does, by asking for
-/// <see cref="TokenImpersonationLevel.Identification"/>). For any other client the identity only
-/// becomes available after data from it has been read, so such a client is identified after its
-/// first request line has been read and BEFORE that request is executed. No request is ever
-/// executed for a caller that has not been authorized.
+/// A caller that cannot be identified straight away is given one more chance after its first
+/// request line has been read (impersonation, the fallback, can need that) and BEFORE that request
+/// is executed. No request is ever executed for a caller that has not been authorized.
 /// </para>
 /// </summary>
 public sealed partial class PipeServer : BackgroundService
@@ -41,6 +37,8 @@ public sealed partial class PipeServer : BackgroundService
 
     private readonly IpcRequestHandler _handler;
     private readonly ILogger<PipeServer> _logger;
+    private readonly Func<NamedPipeServerStream>? _pipeFactory;
+    private readonly Func<NamedPipeServerStream, PipeClientIdentity.Result> _identify;
     private readonly ConcurrentDictionary<int, Task> _clients = new();
 
     private int _nextClientId;
@@ -51,14 +49,34 @@ public sealed partial class PipeServer : BackgroundService
     /// <param name="handler">Executes the requests of authorized clients.</param>
     /// <param name="logger">Diagnostic logger.</param>
     public PipeServer(IpcRequestHandler handler, ILogger<PipeServer> logger)
+        : this(handler, logger, pipeFactory: null, identify: null)
+    {
+    }
+
+    /// <summary>
+    /// For the end-to-end tests only (not reachable from the service's composition): lets a test
+    /// serve on its own pipe and stand in for the caller check, so the accept loop, the handshake
+    /// and every request can be exercised without administrator rights. The service always uses
+    /// the public constructor: the secured pipe and <see cref="PipeClientIdentity.Identify"/>.
+    /// </summary>
+    internal PipeServer(
+        IpcRequestHandler handler,
+        ILogger<PipeServer> logger,
+        Func<NamedPipeServerStream>? pipeFactory,
+        Func<NamedPipeServerStream, PipeClientIdentity.Result>? identify)
     {
         _handler = handler ?? throw new ArgumentNullException(nameof(handler));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _pipeFactory = pipeFactory;
+        _identify = identify ?? PipeClientIdentity.Identify;
     }
 
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Load everything the caller check uses now, under the service's own identity.
+        PipeClientIdentity.Prewarm();
+
         _logger.LogInformation("Pipe server listening on \\\\.\\pipe\\{Pipe}.", PipeConstants.PipeName);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -66,7 +84,7 @@ public sealed partial class PipeServer : BackgroundService
             NamedPipeServerStream? pipe = null;
             try
             {
-                pipe = CreateSecuredPipe();
+                pipe = _pipeFactory is null ? CreateSecuredPipe() : _pipeFactory();
 
                 await pipe.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
             }
@@ -118,67 +136,32 @@ public sealed partial class PipeServer : BackgroundService
         NotYetKnown,
     }
 
-    private ClientVerdict Authorize(NamedPipeServerStream pipe, out string clientName)
+    private ClientVerdict Authorize(NamedPipeServerStream pipe, out string clientName, out string? detail)
     {
-        var verdict = ClientVerdict.NotYetKnown;
-        var name = "unknown";
-        try
+        var result = _identify(pipe);
+        clientName = result.Client;
+        detail = result.Error;
+        if (!result.Identified)
         {
-            pipe.RunAsClient(() =>
-            {
-                using var identity = WindowsIdentity.GetCurrent(true);
-                if (identity is null)
-                {
-                    verdict = ClientVerdict.Denied;
-                    return;
-                }
-
-                // The SID, not the account name: turning a SID into a name can wait on a domain
-                // controller or the cloud for a long time, and it is only wanted for the log.
-                name = identity.User?.Value ?? "unknown";
-                verdict = IsAuthorized(identity) ? ClientVerdict.Authorized : ClientVerdict.Denied;
-            });
-        }
-        catch (Exception ex)
-        {
-            // "Unable to impersonate using a named pipe until data has been read from that pipe":
-            // the client did not fix its identity at connect time. Not a refusal — the caller
-            // reads the first request and asks again before executing anything.
-            _logger.LogDebug(ex, "The named-pipe client cannot be identified yet.");
-            verdict = ClientVerdict.NotYetKnown;
+            return ClientVerdict.NotYetKnown;
         }
 
-        clientName = name;
-        return verdict;
-    }
-
-    private static bool IsAuthorized(WindowsIdentity identity)
-    {
-        // PLAN §8: Administrators + LocalSystem ONLY. Service accounts (LocalService /
-        // NetworkService) are NOT trusted: any third-party service running under them
-        // must not be able to unban attackers or rewrite policy (review S-M1).
-        if (identity.User is { } sid && sid.IsWellKnown(WellKnownSidType.LocalSystemSid))
-        {
-            return true;
-        }
-
-        // Only an ELEVATED administrator: IsInRole is true when the Administrators group is
-        // enabled in the token. Under UAC a non-elevated process of an admin user carries that
-        // group as deny-only and is refused, which is why the GUI's manifest requests elevation.
-        return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+        return result.Authorized ? ClientVerdict.Authorized : ClientVerdict.Denied;
     }
 
     /// <summary>Tells the client why it is refused and counts the refusal (logging is rate-limited).</summary>
-    private void Reject(NamedPipeServerStream pipe, string clientName)
+    private void Reject(NamedPipeServerStream pipe, string clientName, string? detail)
     {
         // Rate-limited logging: a local connect loop must not exhaust the disk (review S-N2).
+        // The reason is always included: "who" alone does not say why a caller was turned away.
         var rejected = Interlocked.Increment(ref _rejectedConnections);
-        if (rejected == 1 || rejected % 100 == 0)
+        if (rejected <= 3 || rejected % 100 == 0)
         {
             _logger.LogWarning(
-                "Rejected unauthorized named-pipe connection from {Client} (total rejected: {Count}).",
+                "Rejected named-pipe connection from {Client} (total rejected: {Count}). Reason: {Reason}",
                 clientName,
-                rejected);
+                rejected,
+                detail ?? "the caller is neither LocalSystem nor an elevated administrator");
         }
 
         TryWriteRejection(pipe);
@@ -191,10 +174,10 @@ public sealed partial class PipeServer : BackgroundService
             using (pipe)
             using (var writer = new StreamWriter(pipe, new UTF8Encoding(false), bufferSize: 4096, leaveOpen: false) { AutoFlush = true, NewLine = "\n" })
             {
-                var verdict = Authorize(pipe, out var firstName);
+                var verdict = Authorize(pipe, out var firstName, out var firstDetail);
                 if (verdict == ClientVerdict.Denied)
                 {
-                    Reject(pipe, firstName);
+                    Reject(pipe, firstName, firstDetail);
                     return;
                 }
 
@@ -237,9 +220,9 @@ public sealed partial class PipeServer : BackgroundService
                     {
                         // Data has now been read from the client, so Windows can identify it.
                         // The request that was just read is only executed if this succeeds.
-                        if (Authorize(pipe, out var clientName) != ClientVerdict.Authorized)
+                        if (Authorize(pipe, out var clientName, out var detail) != ClientVerdict.Authorized)
                         {
-                            Reject(pipe, clientName);
+                            Reject(pipe, clientName, detail);
                             break;
                         }
 
