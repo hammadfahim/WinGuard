@@ -27,7 +27,7 @@ public sealed partial class IpcRequestHandler
     {
         var dto = new PrereqsDto();
 
-        var auditEnabled = await QueryAuditLogonFailureAsync(ct).ConfigureAwait(false);
+        var (successAudited, auditEnabled) = await QueryAuditLogonAsync(ct).ConfigureAwait(false);
         dto.AuditLogonFailureEnabled = auditEnabled;
 
         var firewallRunning = false;
@@ -62,6 +62,11 @@ public sealed partial class IpcRequestHandler
             warnings.Add("Logon failure auditing is disabled; RDP 4625 events will not be recorded. Enable it with: auditpol /set /subcategory:\"{0CCE9215-69AE-11D9-BED3-505054503030}\" /success:enable /failure:enable (the GUID form also works on localized Windows)");
         }
 
+        if (LogonSuccessAuditWarning(_settings.Current, successAudited) is { } successWarning)
+        {
+            warnings.Add(successWarning);
+        }
+
         if (!firewallRunning)
         {
             warnings.Add("Windows Defender Firewall service (MpsSvc) is not running; block rules will not take effect.");
@@ -80,7 +85,13 @@ public sealed partial class IpcRequestHandler
         return dto;
     }
 
-    private async Task<bool> QueryAuditLogonFailureAsync(CancellationToken ct)
+    /// <summary>The warning for a logon feature that cannot work because 4624 is not being logged, or null.</summary>
+    internal static string? LogonSuccessAuditWarning(WinGuardSettings settings, bool successAudited) =>
+        settings.Rules.ObservesLogons() && !successAudited
+            ? "Logon success auditing is disabled; event 4624 will not be recorded, so logon alerts and temporary trust will not work. Enable it with: auditpol /set /subcategory:\"{0CCE9215-69AE-11D9-BED3-505054503030}\" /success:enable"
+            : null;
+
+    private async Task<(bool Success, bool Failure)> QueryAuditLogonAsync(CancellationToken ct)
     {
         try
         {
@@ -102,7 +113,7 @@ public sealed partial class IpcRequestHandler
             using var process = Process.Start(startInfo);
             if (process is null)
             {
-                return false;
+                return (false, false);
             }
 
             string output;
@@ -132,22 +143,25 @@ public sealed partial class IpcRequestHandler
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Could not query the audit policy with auditpol.");
-            return false;
+            return (false, false);
         }
     }
 
-    private static bool ParseAuditCsv(string csv)
+    /// <summary>Reads which outcomes the Logon subcategory audits from <c>auditpol /r</c> output.</summary>
+    internal static (bool Success, bool Failure) ParseAuditCsv(string csv)
     {
         var lines = csv.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         if (lines.Length == 0)
         {
-            return false;
+            return (false, false);
         }
 
         var header = SplitCsvLine(lines[0]);
         var subcategoryIndex = FindColumn(header, "Subcategory");
         var inclusionIndex = FindColumn(header, "Inclusion Setting");
         var settingValueIndex = FindColumn(header, "Setting Value");
+        var success = false;
+        var failure = false;
 
         for (var i = 1; i < lines.Length; i++)
         {
@@ -166,23 +180,21 @@ public sealed partial class IpcRequestHandler
             }
 
             // Prefer the numeric Setting Value (0=none,1=success,2=failure,3=both): it is
-            // locale-independent, unlike the "Failure" text.
+            // locale-independent, unlike the "Success" and "Failure" text.
             if (settingValueIndex >= 0 && settingValueIndex < cells.Length
                 && int.TryParse(cells[settingValueIndex].Trim(), out var settingValue))
             {
-                return (settingValue & 2) != 0;
+                return ((settingValue & 1) != 0, (settingValue & 2) != 0);
             }
 
             var inclusion = inclusionIndex >= 0 && inclusionIndex < cells.Length
                 ? cells[inclusionIndex]
                 : string.Join(",", cells);
-            if (inclusion.Contains("Failure", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
+            success |= inclusion.Contains("Success", StringComparison.OrdinalIgnoreCase);
+            failure |= inclusion.Contains("Failure", StringComparison.OrdinalIgnoreCase);
         }
 
-        return false;
+        return (success, failure);
     }
 
     private static string[] SplitCsvLine(string line)
