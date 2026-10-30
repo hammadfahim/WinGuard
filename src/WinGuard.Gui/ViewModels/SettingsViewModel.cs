@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using System.Globalization;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using WinGuard.Core.Config;
@@ -8,431 +7,486 @@ using WinGuard.Gui.Services;
 
 namespace WinGuard.Gui.ViewModels;
 
+/// <summary>One page of settings, with its entry in the side navigation.</summary>
+public sealed partial class SettingsSection : ObservableObject
+{
+    /// <summary>Creates a section.</summary>
+    public SettingsSection(string title, string glyph, string description, params SettingField[] fields)
+    {
+        Title = title;
+        Glyph = glyph;
+        Description = description;
+        Fields = fields;
+    }
+
+    /// <summary>Heading.</summary>
+    public string Title { get; }
+
+    /// <summary>Icon.</summary>
+    public string Glyph { get; }
+
+    /// <summary>What lives here.</summary>
+    public string Description { get; }
+
+    /// <summary>The fields, in order.</summary>
+    public IReadOnlyList<SettingField> Fields { get; }
+
+    /// <summary>Whether the page body shows this section.</summary>
+    [ObservableProperty]
+    private bool _isShown;
+
+    /// <summary>Whether the side navigation lists this section.</summary>
+    [ObservableProperty]
+    private bool _isListed = true;
+
+    /// <summary>Whether a field differs from what was loaded.</summary>
+    [ObservableProperty]
+    private bool _isDirty;
+
+    /// <summary>How many fields are invalid.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasErrors))]
+    private int _errorCount;
+
+    /// <summary>Whether a field is invalid.</summary>
+    public bool HasErrors => ErrorCount > 0;
+
+    /// <summary>Re-reads dirty and error state from the fields.</summary>
+    public void Refresh()
+    {
+        IsDirty = Fields.Any(field => field.IsDirty);
+        ErrorCount = Fields.Count(field => field.HasError);
+    }
+}
+
 /// <summary>
-/// Settings view-model (PLAN.md §9.4). Bound to a working copy of <see cref="WinGuardSettings"/>
-/// fetched via GetSettings. Durations are edited as text and validated on save so invalid input
-/// produces a clear message instead of a crash. All edits are pushed back with UpdateSettings.
+/// Settings view-model (PLAN.md §9.4): sections with side navigation and search, a dirty-state bar with
+/// Save and Discard, inline validation and friendly durations. Fields hold text and validate as they
+/// change; <see cref="BuildSettings"/> turns them into the object pushed with UpdateSettings.
 /// </summary>
 public sealed partial class SettingsViewModel : ObservableObject
 {
     private readonly PipeClient _client;
+    private readonly ToastCenter _toasts;
     private WinGuardSettings _baseSettings = new();
 
     // Until the live settings have been fetched the editors show defaults; saving then would
     // overwrite the service's real configuration with them.
     private bool _loaded;
+    private bool _applying;
 
-    /// <summary>Creates the view-model and seeds the ban-tier editor with the defaults.</summary>
+    /// <summary>Creates the view-model.</summary>
     /// <param name="client">Pipe client used to load and save settings.</param>
-    public SettingsViewModel(PipeClient client)
+    /// <param name="toasts">Where results are reported.</param>
+    public SettingsViewModel(PipeClient client, ToastCenter toasts)
     {
         _client = client;
-        SetTiers(["24:00:00", "7.00:00:00", "30.00:00:00"]);
+        _toasts = toasts;
+
+        FtpSources = new FtpSourcesField(toasts);
+
+        Sections =
+        [
+            new SettingsSection(
+                "Detection", "", "When a failed login counts, and how many it takes.",
+                Threshold, CountWindow, ExpireTime, BacklogReplay, ProcessInternalIps),
+            new SettingsSection(
+                "Ban policy", "", "What happens to an address once it crosses the threshold.",
+                ReportOnly, BanTiers, MaxBanDuration, BlockedPorts, Ipv6Prefix),
+            new SettingsSection(
+                SourceLabels.Rdp, "", "Failed Windows logons from Security event 4625 and the RdpCoreTS log.",
+                RdpEnabled, RdpFallback, RdpThreshold, RdpWindow, RdpExclusions),
+            new SettingsSection(
+                SourceLabels.MsSql, "", "Failed SQL Server logins from Application event 18456.",
+                MsSqlEnabled, MsSqlThreshold, MsSqlWindow, MsSqlIgnore),
+            new SettingsSection(
+                SourceLabels.Ftp, "", "Failed logins read from IIS FTP and FileZilla logs.",
+                FtpEnabled, FtpThreshold, FtpWindow, FtpPoll, FtpSources),
+            new SettingsSection(
+                "Custom sources", "", "Any other log, read with your own regex.",
+                CustomSources),
+            new SettingsSection(
+                "Notifications", "", "Alerts when an attacker is blocked or unblocked. Opt-in and rate-limited.",
+                NotificationsEnabled, WebhookUrl, TelegramToken, TelegramChat, SmtpHost, SmtpPort, SmtpTls, SmtpUser, SmtpPassword, SmtpFrom, SmtpTo, RateLimit, WindowsEventLog),
+            new SettingsSection(
+                "Service", "", "Housekeeping and limits. The defaults suit most servers.",
+                Housekeeping, EventRetention, MaxAddressesPerRule, ClearBansOnStartup),
+        ];
+
+        foreach (var field in Sections.SelectMany(section => section.Fields))
+        {
+            field.Changed += OnFieldChanged;
+        }
+
+        _selectedSection = Sections[0];
+        ApplySectionVisibility();
+        Apply(new WinGuardSettings(), markLoaded: false);
     }
 
-    /// <summary>FTP server kinds available in the sources grid.</summary>
-    public static FtpServerKind[] FtpKinds { get; } = Enum.GetValues<FtpServerKind>();
+    /// <summary>The sections, in navigation order.</summary>
+    public IReadOnlyList<SettingsSection> Sections { get; }
 
-    // ---- global engine ----
+    // ---- detection ----
 
-    /// <summary>Failed attempts before a ban (text).</summary>
-    [ObservableProperty]
-    private string _thresholdText = "5";
+    /// <summary>Failed attempts before a ban.</summary>
+    public NumberField Threshold { get; } = new("Failed-login threshold", "Failed attempts from one address before it is banned.", 1, 100_000);
 
-    /// <summary>Rolling count window, e.g. 00:10:00 (text).</summary>
-    [ObservableProperty]
-    private string _countWindowText = "00:10:00";
+    /// <summary>Rolling count window.</summary>
+    public DurationField CountWindow { get; } = new("Count window", "Attempts older than this stop counting towards the threshold.", TimeSpan.FromSeconds(1));
 
-    /// <summary>Idle time before counters reset, e.g. 1.00:00:00 (text).</summary>
-    [ObservableProperty]
-    private string _expireTimeText = "1.00:00:00";
+    /// <summary>Idle time before counters reset.</summary>
+    public DurationField ExpireTime { get; } = new("Forget after", "An address that stays quiet this long starts again from zero.", TimeSpan.FromSeconds(1));
 
-    /// <summary>Housekeeping cadence, e.g. 00:00:15 (text).</summary>
-    [ObservableProperty]
-    private string _housekeepingText = "00:00:15";
+    /// <summary>Minutes of event-log history replayed at service start.</summary>
+    public NumberField BacklogReplay { get; } = new("Backlog replay (minutes)", "How far back the service re-reads the event logs when it starts, covering failures logged while it was stopped. 0 turns this off.", 0, 1440);
 
-    /// <summary>Maximum ban duration cap, e.g. 365.00:00:00 (text).</summary>
-    [ObservableProperty]
-    private string _maxBanDurationText = "365.00:00:00";
+    /// <summary>Process private / loopback IPs.</summary>
+    public ToggleField ProcessInternalIps { get; } = new("Process internal addresses", "Also count private, loopback and link-local addresses.", "Internal addresses can now be banned, including your own network. Make sure your management hosts are whitelisted.");
 
-    /// <summary>Flush firewall rules at service start.</summary>
-    [ObservableProperty]
-    private bool _clearBansOnStartup;
+    // ---- ban policy ----
 
-    /// <summary>Process private / loopback IPs instead of ignoring them.</summary>
-    [ObservableProperty]
-    private bool _processInternalIPs;
+    /// <summary>Monitoring mode.</summary>
+    public ToggleField ReportOnly { get; } = new("Report-only mode", "Count failures and record would-be bans, without touching the firewall. A safe way to trial thresholds on a production server.", "Nothing is being blocked. Recorded bans are enforced the moment this is switched off.");
 
-    /// <summary>Comma-separated ports to block; empty = all ports.</summary>
-    [ObservableProperty]
-    private string _blockedPortsText = string.Empty;
+    /// <summary>Escalation ladder.</summary>
+    public BanTiersField BanTiers { get; } = new();
 
-    /// <summary>Days of event history the service keeps (text).</summary>
-    [ObservableProperty]
-    private string _eventRetentionDaysText = "30";
+    /// <summary>Maximum ban duration.</summary>
+    public DurationField MaxBanDuration { get; } = new("Longest ban", "Caps every timed tier. Permanent bans are not affected.", TimeSpan.FromSeconds(1));
 
-    /// <summary>
-    /// Monitoring mode: count and record would-be bans, but never touch the firewall. Ideal for a
-    /// trial run on a production server.
-    /// </summary>
-    [ObservableProperty]
-    private bool _reportOnly;
+    /// <summary>Ports to block.</summary>
+    public TextField BlockedPorts { get; } = new("Blocked ports", "Leave empty to block every port, which is the cheapest rule. Otherwise a list such as 3389, 1433, 5000-5100.", "All ports", SettingChecks.PortsError);
 
-    /// <summary>Minutes of event-log history replayed when the service starts (0 = off).</summary>
-    [ObservableProperty]
-    private string _eventBacklogReplayMinutesText = "30";
-
-    /// <summary>IPv6 prefix length to aggregate bans to (0 = off, 64 = one /64 per attacker).</summary>
-    [ObservableProperty]
-    private string _ipv6AggregatePrefixText = "0";
-
-    /// <summary>Maximum addresses batched into one firewall rule.</summary>
-    [ObservableProperty]
-    private string _maxAddressesPerRuleText = "1000";
-
-    /// <summary>Editable escalation tiers (text rows).</summary>
-    public ObservableCollection<StringRowViewModel> BanTiers { get; } = [];
+    /// <summary>IPv6 aggregation.</summary>
+    public NumberField Ipv6Prefix { get; } = new("IPv6 aggregate prefix", "0 bans single addresses. 64 bans the whole /64, so rotating addresses inside it cannot evade a ban. Allowed: 0, or 32 to 64.", 0, 64);
 
     // ---- RDP ----
 
     /// <summary>RDP engine enabled.</summary>
-    [ObservableProperty]
-    private bool _rdpEnabled = true;
+    public ToggleField RdpEnabled { get; } = new("Enabled", "Watch for failed Windows logons.");
 
-    /// <summary>Also use the RdpCoreTS/Operational 140 fallback.</summary>
-    [ObservableProperty]
-    private bool _rdpUseRdpCoreTsFallback = true;
+    /// <summary>RdpCoreTS fallback.</summary>
+    public ToggleField RdpFallback { get; } = new("Use the RdpCoreTS fallback", "Also read RdpCoreTS/Operational event 140, which sees TLS and NLA failures that 4625 misses.");
 
-    /// <summary>RDP threshold override (empty = global).</summary>
-    [ObservableProperty]
-    private string _rdpThresholdText = string.Empty;
+    /// <summary>RDP threshold override.</summary>
+    public NumberField RdpThreshold { get; } = new("Threshold override", "Leave empty to use the global threshold.", 1, 100_000, optional: true, placeholder: "Global");
 
-    /// <summary>RDP count-window override (empty = global).</summary>
-    [ObservableProperty]
-    private string _rdpCountWindowText = string.Empty;
+    /// <summary>RDP window override.</summary>
+    public DurationField RdpWindow { get; } = new("Count window override", "Leave empty to use the global count window.", TimeSpan.FromSeconds(1), optional: true, placeholder: "Global");
 
-    /// <summary>RDP 4625 exclusion rules.</summary>
-    public ObservableCollection<StringRowViewModel> RdpExclusions { get; } = [];
+    /// <summary>RDP exclusion rules.</summary>
+    public StringListField RdpExclusions { get; } = new("Exclusion rules", "Failures matching a rule are ignored. Comma = AND within a rule, separate rows = OR, * is a wildcard, != negates.", "Add rule", "LogonType=2, TargetUserName=backup-*");
 
     // ---- MS SQL ----
 
     /// <summary>MS SQL engine enabled.</summary>
-    [ObservableProperty]
-    private bool _msSqlEnabled = true;
+    public ToggleField MsSqlEnabled { get; } = new("Enabled", "Watch for failed SQL Server logins. Login auditing must include failed logins.");
 
-    /// <summary>MS SQL threshold override (empty = global).</summary>
-    [ObservableProperty]
-    private string _msSqlThresholdText = string.Empty;
+    /// <summary>MS SQL threshold override.</summary>
+    public NumberField MsSqlThreshold { get; } = new("Threshold override", "Leave empty to use the global threshold.", 1, 100_000, optional: true, placeholder: "Global");
 
-    /// <summary>MS SQL count-window override (empty = global).</summary>
-    [ObservableProperty]
-    private string _msSqlCountWindowText = string.Empty;
+    /// <summary>MS SQL window override.</summary>
+    public DurationField MsSqlWindow { get; } = new("Count window override", "Leave empty to use the global count window.", TimeSpan.FromSeconds(1), optional: true, placeholder: "Global");
 
-    /// <summary>Substrings that mark an 18456 as non-bruteforce.</summary>
-    public ObservableCollection<StringRowViewModel> MsSqlIgnorePatterns { get; } = [];
+    /// <summary>MS SQL ignore patterns.</summary>
+    public StringListField MsSqlIgnore { get; } = new("Ignore message patterns", "Failures whose message contains one of these texts are not brute force, and do not count.", "Add pattern", "Failed to open the explicitly specified database");
 
     // ---- FTP ----
 
     /// <summary>FTP engine enabled.</summary>
-    [ObservableProperty]
-    private bool _ftpEnabled = true;
+    public ToggleField FtpEnabled { get; } = new("Enabled", "Watch the FTP log sources below.");
 
-    /// <summary>FTP threshold override (empty = global).</summary>
-    [ObservableProperty]
-    private string _ftpThresholdText = string.Empty;
+    /// <summary>FTP threshold override.</summary>
+    public NumberField FtpThreshold { get; } = new("Threshold override", "Leave empty to use the global threshold.", 1, 100_000, optional: true, placeholder: "Global");
 
-    /// <summary>FTP count-window override (empty = global).</summary>
-    [ObservableProperty]
-    private string _ftpCountWindowText = string.Empty;
+    /// <summary>FTP window override.</summary>
+    public DurationField FtpWindow { get; } = new("Count window override", "Leave empty to use the global count window.", TimeSpan.FromSeconds(1), optional: true, placeholder: "Global");
 
-    /// <summary>FTP file-tail poll interval, e.g. 00:00:03 (text).</summary>
-    [ObservableProperty]
-    private string _ftpPollIntervalText = "00:00:03";
+    /// <summary>File poll interval.</summary>
+    public DurationField FtpPoll { get; } = new("Poll interval", "How often log files are read. Custom sources share this interval.", TimeSpan.FromSeconds(1));
 
     /// <summary>FTP log sources.</summary>
-    public ObservableCollection<FtpSourceRow> FtpSources { get; } = [];
-
-    /// <summary>Selected FTP source row.</summary>
-    [ObservableProperty]
-    private FtpSourceRow? _selectedFtpSource;
+    public FtpSourcesField FtpSources { get; }
 
     // ---- custom ----
 
     /// <summary>Custom log sources.</summary>
-    public ObservableCollection<CustomSourceRow> CustomSources { get; } = [];
-
-    /// <summary>Selected custom source row.</summary>
-    [ObservableProperty]
-    private CustomSourceRow? _selectedCustomSource;
-
-    /// <summary>Ready-made custom-source recipes shown in the "Add from recipe" picker.</summary>
-    public static IReadOnlyList<Core.Config.CustomSourceRecipe> Recipes { get; } = Core.Config.CustomSourceRecipes.All;
-
-    /// <summary>Currently picked recipe (added to the sources grid on command).</summary>
-    [ObservableProperty]
-    private Core.Config.CustomSourceRecipe? _selectedRecipe;
+    public CustomSourcesField CustomSources { get; } = new();
 
     // ---- notifications ----
 
-    /// <summary>Master switch for webhook / Telegram / e-mail notifications.</summary>
-    [ObservableProperty]
-    private bool _notificationsEnabled;
+    /// <summary>Master switch for outbound notifications.</summary>
+    public ToggleField NotificationsEnabled { get; } = new("Send notifications", "Master switch for webhook, Telegram and e-mail. WinGuard only ever contacts the destinations below.");
 
-    /// <summary>HTTPS URL receiving a JSON POST per block/unblock event.</summary>
-    [ObservableProperty]
-    private string _webhookUrl = string.Empty;
+    /// <summary>Webhook address.</summary>
+    public TextField WebhookUrl { get; } = new("Webhook URL", "Receives a JSON POST for each event, for example a Slack or Teams incoming webhook.", "https://", SettingChecks.UrlError);
 
-    /// <summary>Telegram bot token (from @BotFather); empty disables Telegram.</summary>
-    [ObservableProperty]
-    private string _telegramBotToken = string.Empty;
+    /// <summary>Telegram token.</summary>
+    public SecretField TelegramToken { get; } = new("Telegram bot token", "From @BotFather. Leave empty to turn Telegram off.");
 
-    /// <summary>Telegram chat id the notifications go to.</summary>
-    [ObservableProperty]
-    private string _telegramChatId = string.Empty;
+    /// <summary>Telegram chat.</summary>
+    public TextField TelegramChat { get; } = new("Telegram chat id", "The chat notifications go to.");
 
-    /// <summary>SMTP smarthost host; empty disables e-mail.</summary>
-    [ObservableProperty]
-    private string _smtpHost = string.Empty;
+    /// <summary>SMTP relay host.</summary>
+    public TextField SmtpHost { get; } = new("SMTP host", "Your mail relay. Leave empty to turn e-mail off.", "smtp.example.com");
 
-    /// <summary>SMTP port (text).</summary>
-    [ObservableProperty]
-    private string _smtpPortText = "25";
+    /// <summary>SMTP port.</summary>
+    public NumberField SmtpPort { get; } = new("SMTP port", "Usually 25, 465 or 587.", 1, 65535);
 
-    /// <summary>Use STARTTLS/TLS for SMTP.</summary>
-    [ObservableProperty]
-    private bool _smtpEnableSsl = true;
+    /// <summary>SMTP TLS.</summary>
+    public ToggleField SmtpTls { get; } = new("Use TLS", "Encrypt the connection to the relay.");
 
-    /// <summary>SMTP username (empty = anonymous relay).</summary>
-    [ObservableProperty]
-    private string _smtpUsername = string.Empty;
+    /// <summary>SMTP user.</summary>
+    public TextField SmtpUser { get; } = new("SMTP username", "Leave empty for an anonymous relay.");
 
     /// <summary>SMTP password.</summary>
+    public SecretField SmtpPassword { get; } = new("SMTP password", "Stored in the settings database, which only SYSTEM and Administrators can read.");
+
+    /// <summary>SMTP sender.</summary>
+    public TextField SmtpFrom { get; } = new("From address", "Who the mail appears to come from.", "winguard@example.com");
+
+    /// <summary>SMTP recipient.</summary>
+    public TextField SmtpTo { get; } = new("To address", "Who receives the mail.", "admin@example.com");
+
+    /// <summary>Notification rate limit.</summary>
+    public NumberField RateLimit { get; } = new("Rate limit (per minute)", "The most notifications sent per minute across all channels, so an attack cannot flood them.", 1, 1000);
+
+    /// <summary>Windows Event Log output.</summary>
+    public ToggleField WindowsEventLog { get; } = new("Write to the Windows Event Log", "Record events under the WinGuard source in the Application log, for SIEM and Windows Event Forwarding.");
+
+    // ---- service ----
+
+    /// <summary>Housekeeping cadence.</summary>
+    public DurationField Housekeeping { get; } = new("Housekeeping interval", "How often expired bans are lifted and the firewall is reconciled.", TimeSpan.FromSeconds(1));
+
+    /// <summary>Event retention.</summary>
+    public NumberField EventRetention { get; } = new("Event history (days)", "How long entries stay in the Event Log.", 1, 3650);
+
+    /// <summary>Addresses per firewall rule.</summary>
+    public NumberField MaxAddressesPerRule { get; } = new("Addresses per firewall rule", "WinGuard batches into numbered rules automatically. Windows' practical limit is 1000.", 1, 1000);
+
+    /// <summary>Flush at startup.</summary>
+    public ToggleField ClearBansOnStartup { get; } = new("Clear all bans on service start", "Flush firewall rules at start instead of reconciling them.", "Every active ban is lifted each time the service starts.");
+
+    // ---- page state ----
+
+    /// <summary>The section shown in the page body.</summary>
     [ObservableProperty]
-    private string _smtpPassword = string.Empty;
+    private SettingsSection _selectedSection;
 
-    /// <value>Sender address, e.g. winguard@example.com.</value>
+    /// <summary>Search over every field.</summary>
     [ObservableProperty]
-    private string _smtpFrom = string.Empty;
+    [NotifyPropertyChangedFor(nameof(IsSearching))]
+    private string _searchText = string.Empty;
 
-    /// <value>Recipient address for notifications.</value>
+    /// <summary>Whether anything differs from what was loaded.</summary>
     [ObservableProperty]
-    private string _smtpTo = string.Empty;
+    [NotifyPropertyChangedFor(nameof(CanSave))]
+    [NotifyPropertyChangedFor(nameof(DirtyText))]
+    [NotifyCanExecuteChangedFor(nameof(SaveCommand))]
+    [NotifyCanExecuteChangedFor(nameof(DiscardCommand))]
+    private bool _isDirty;
 
-    /// <summary>Maximum notifications per minute across all channels (text).</summary>
+    /// <summary>How many fields are invalid.</summary>
     [ObservableProperty]
-    private string _rateLimitPerMinuteText = "20";
+    [NotifyPropertyChangedFor(nameof(CanSave))]
+    [NotifyPropertyChangedFor(nameof(DirtyText))]
+    [NotifyPropertyChangedFor(nameof(HasErrors))]
+    [NotifyCanExecuteChangedFor(nameof(SaveCommand))]
+    private int _errorCount;
 
-    /// <summary>Also write warning/error events to the Windows Application event log (SIEM friendly).</summary>
+    /// <summary>Which shared state the page is in.</summary>
     [ObservableProperty]
-    private bool _writeToWindowsEventLog = true;
+    private ViewState _state = ViewState.Loading;
 
-    // ---- UI state ----
-
-    /// <summary>User-visible validation error(s).</summary>
+    /// <summary>Why the settings are unavailable.</summary>
     [ObservableProperty]
-    private string _errorMessage = string.Empty;
+    private string _errorText = string.Empty;
 
-    /// <summary>User-visible status message.</summary>
+    /// <summary>True while saving.</summary>
     [ObservableProperty]
-    private string _statusMessage = string.Empty;
+    [NotifyPropertyChangedFor(nameof(CanSave))]
+    [NotifyCanExecuteChangedFor(nameof(SaveCommand))]
+    private bool _isSaving;
 
-    /// <summary>True while loading or saving.</summary>
+    /// <summary>The service's settings changed while there were unsaved edits here.</summary>
     [ObservableProperty]
-    private bool _isBusy;
+    private bool _remoteChangePending;
 
-    /// <summary>Fetches the live settings and populates the editors.</summary>
-    public async Task LoadAsync()
+    /// <summary>Whether the search box holds text.</summary>
+    public bool IsSearching => !string.IsNullOrWhiteSpace(SearchText);
+
+    /// <summary>Whether a field is invalid.</summary>
+    public bool HasErrors => ErrorCount > 0;
+
+    /// <summary>Whether Save is available.</summary>
+    public bool CanSave => IsDirty && ErrorCount == 0 && !IsSaving && _loaded;
+
+    /// <summary>The message on the dirty bar.</summary>
+    public string DirtyText
     {
-        IsBusy = true;
-        try
+        get
         {
-            var settings = await _client.GetSettingsAsync();
-            if (settings is null)
+            if (ErrorCount > 0)
             {
-                StatusMessage = "Settings are unavailable: the service is not running.";
-                return;
+                return ErrorCount == 1 ? "Fix 1 problem to save" : $"Fix {ErrorCount} problems to save";
             }
 
-            settings.Normalize();
-            _baseSettings = settings;
-            _loaded = true;
-            PopulateFrom(settings);
-            ErrorMessage = string.Empty;
-            StatusMessage = "Settings loaded.";
-        }
-        finally
-        {
-            IsBusy = false;
+            var sections = Sections?.Count(section => section.IsDirty) ?? 0;
+            return sections <= 1 ? "Unsaved changes" : $"Unsaved changes in {sections} sections";
         }
     }
 
-    /// <summary>Validates and pushes the working copy to the service.</summary>
-    [RelayCommand]
-    private async Task SaveAsync()
+    /// <summary>
+    /// Fetches the live settings. Unsaved edits are never overwritten: a reload that arrives while the
+    /// page is dirty (a reconnect, or an engine toggled on the dashboard) only raises a notice.
+    /// </summary>
+    public async Task LoadAsync()
     {
         if (!_loaded)
         {
-            ErrorMessage = "The current settings have not been loaded from the service yet. Press Reset to load them, then edit and save.";
-            StatusMessage = string.Empty;
+            State = ViewState.Loading;
+        }
+
+        var settings = await _client.GetSettingsAsync();
+        if (settings is null)
+        {
+            SetDisconnected("Settings come from the service, which is not answering.");
             return;
         }
 
-        var errors = new List<string>();
+        if (IsDirty)
+        {
+            RemoteChangePending = true;
+            return;
+        }
+
+        Apply(settings);
+    }
+
+    /// <summary>Marks the page unavailable; settings on hand stay visible.</summary>
+    public void SetDisconnected(string reason)
+    {
+        if (!_loaded)
+        {
+            ErrorText = reason;
+            State = ViewState.Error;
+        }
+    }
+
+    /// <summary>Shows loaded settings and treats them as the clean state.</summary>
+    public void Apply(WinGuardSettings settings, bool markLoaded = true)
+    {
+        settings.Normalize();
+        _baseSettings = settings;
+        _applying = true;
+
+        Threshold.Set(settings.FailedLoginThreshold);
+        CountWindow.Set(settings.CountWindow);
+        ExpireTime.Set(settings.ExpireTime);
+        BacklogReplay.Set(settings.EventBacklogReplayMinutes);
+        ProcessInternalIps.IsOn = settings.ProcessInternalIPs;
+
+        ReportOnly.IsOn = settings.ReportOnly;
+        BanTiers.Set(settings.BanTiers);
+        MaxBanDuration.Set(settings.MaxBanDuration);
+        BlockedPorts.Text = string.Join(", ", settings.BlockedPorts);
+        Ipv6Prefix.Set(settings.Ipv6AggregatePrefixLength);
+
+        RdpEnabled.IsOn = settings.Rdp.Enabled;
+        RdpFallback.IsOn = settings.Rdp.UseRdpCoreTsFallback;
+        RdpThreshold.Set(settings.Rdp.Threshold);
+        RdpWindow.Set(settings.Rdp.CountWindow);
+        RdpExclusions.Set(settings.Rdp.ExclusionRules);
+
+        MsSqlEnabled.IsOn = settings.MsSql.Enabled;
+        MsSqlThreshold.Set(settings.MsSql.Threshold);
+        MsSqlWindow.Set(settings.MsSql.CountWindow);
+        MsSqlIgnore.Set(settings.MsSql.IgnoreMessagePatterns);
+
+        FtpEnabled.IsOn = settings.Ftp.Enabled;
+        FtpThreshold.Set(settings.Ftp.Threshold);
+        FtpWindow.Set(settings.Ftp.CountWindow);
+        FtpPoll.Set(settings.Ftp.PollInterval);
+        FtpSources.Set(settings.Ftp.Sources);
+
+        CustomSources.Set(settings.CustomSources);
+
+        var notifications = settings.Notifications;
+        var smtp = notifications.Smtp ?? new SmtpSettings();
+        NotificationsEnabled.IsOn = notifications.Enabled;
+        WebhookUrl.Text = notifications.WebhookUrl ?? string.Empty;
+        TelegramToken.Text = notifications.TelegramBotToken ?? string.Empty;
+        TelegramChat.Text = notifications.TelegramChatId ?? string.Empty;
+        SmtpHost.Text = smtp.Host ?? string.Empty;
+        SmtpPort.Set(smtp.Port > 0 ? smtp.Port : 25);
+        SmtpTls.IsOn = smtp.EnableSsl;
+        SmtpUser.Text = smtp.Username ?? string.Empty;
+        SmtpPassword.Text = smtp.Password ?? string.Empty;
+        SmtpFrom.Text = smtp.From ?? string.Empty;
+        SmtpTo.Text = smtp.To ?? string.Empty;
+        RateLimit.Set(notifications.RateLimitPerMinute);
+        WindowsEventLog.IsOn = notifications.WriteToWindowsEventLog;
+
+        Housekeeping.Set(settings.HousekeepingInterval);
+        EventRetention.Set(settings.EventRetentionDays);
+        MaxAddressesPerRule.Set(settings.MaxAddressesPerRule);
+        ClearBansOnStartup.IsOn = settings.ClearBansOnStartup;
+
+        foreach (var field in Sections.SelectMany(section => section.Fields))
+        {
+            field.MarkClean();
+        }
+
+        _applying = false;
+        if (markLoaded)
+        {
+            _loaded = true;
+            RemoteChangePending = false;
+            State = ViewState.Ready;
+        }
+
+        RefreshState();
+    }
+
+    /// <summary>Turns the fields into the settings to push. Only call while there are no errors.</summary>
+    public WinGuardSettings BuildSettings()
+    {
         var settings = _baseSettings.Clone();
 
-        if (!int.TryParse(EventRetentionDaysText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var retentionDays) || retentionDays is < 1 or > 3650)
-        {
-            errors.Add("Event history must be a whole number of days between 1 and 3650.");
-        }
+        settings.FailedLoginThreshold = Threshold.Number ?? settings.FailedLoginThreshold;
+        settings.CountWindow = CountWindow.Duration ?? settings.CountWindow;
+        settings.ExpireTime = ExpireTime.Duration ?? settings.ExpireTime;
+        settings.EventBacklogReplayMinutes = BacklogReplay.Number ?? settings.EventBacklogReplayMinutes;
+        settings.ProcessInternalIPs = ProcessInternalIps.IsOn;
 
-        if (!int.TryParse(EventBacklogReplayMinutesText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var backlogMinutes) || backlogMinutes is < 0 or > 1440)
-        {
-            errors.Add("Backlog replay must be a whole number of minutes between 0 and 1440.");
-        }
+        settings.ReportOnly = ReportOnly.IsOn;
+        settings.BanTiers = BanTiers.Values;
+        settings.MaxBanDuration = MaxBanDuration.Duration ?? settings.MaxBanDuration;
+        settings.BlockedPorts = SettingChecks.SplitPorts(BlockedPorts.Value);
+        settings.Ipv6AggregatePrefixLength = Ipv6Prefix.Number ?? 0;
 
-        if (!int.TryParse(Ipv6AggregatePrefixText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ipv6Prefix) || ipv6Prefix != 0 && ipv6Prefix is < 32 or > 64)
-        {
-            errors.Add("IPv6 aggregate prefix must be 0 (off) or between 32 and 64.");
-        }
+        settings.Rdp.Enabled = RdpEnabled.IsOn;
+        settings.Rdp.UseRdpCoreTsFallback = RdpFallback.IsOn;
+        settings.Rdp.Threshold = RdpThreshold.Number;
+        settings.Rdp.CountWindow = RdpWindow.Duration;
+        settings.Rdp.ExclusionRules = RdpExclusions.Values;
 
-        if (!int.TryParse(MaxAddressesPerRuleText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var maxAddresses) || maxAddresses is < 1 or > 1000)
-        {
-            errors.Add("Max addresses per rule must be between 1 and 1000.");
-        }
+        settings.MsSql.Enabled = MsSqlEnabled.IsOn;
+        settings.MsSql.Threshold = MsSqlThreshold.Number;
+        settings.MsSql.CountWindow = MsSqlWindow.Duration;
+        settings.MsSql.IgnoreMessagePatterns = MsSqlIgnore.Values;
 
-        if (!int.TryParse(RateLimitPerMinuteText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rateLimit) || rateLimit is < 1 or > 1000)
-        {
-            errors.Add("Notification rate limit must be between 1 and 1000 per minute.");
-        }
-
-        if (!int.TryParse(SmtpPortText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var smtpPort) || smtpPort is < 1 or > 65535)
-        {
-            errors.Add("SMTP port must be between 1 and 65535.");
-        }
-
-        if (!int.TryParse(ThresholdText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var threshold) || threshold < 1)
-        {
-            errors.Add("Failed login threshold must be a whole number >= 1.");
-        }
-
-        if (!TryParseDuration(CountWindowText, out var countWindow) || countWindow <= TimeSpan.Zero)
-        {
-            errors.Add("Count window must be a positive duration (e.g. 00:10:00).");
-        }
-
-        if (!TryParseDuration(ExpireTimeText, out var expireTime) || expireTime <= TimeSpan.Zero)
-        {
-            errors.Add("Expire time must be a positive duration (e.g. 1.00:00:00).");
-        }
-
-        if (!TryParseDuration(HousekeepingText, out var housekeeping) || housekeeping < TimeSpan.FromSeconds(1))
-        {
-            errors.Add("Housekeeping interval must be at least one second (e.g. 00:00:15).");
-        }
-
-        if (!TryParseDuration(MaxBanDurationText, out var maxBan) || maxBan <= TimeSpan.Zero)
-        {
-            errors.Add("Max ban duration must be a positive duration (e.g. 365.00:00:00).");
-        }
-
-        if (!TryParseDuration(FtpPollIntervalText, out var ftpPoll) || ftpPoll < TimeSpan.FromSeconds(1))
-        {
-            errors.Add("FTP poll interval must be at least one second (e.g. 00:00:03).");
-        }
-
-        var tiers = new List<TimeSpan>();
-        for (var i = 0; i < BanTiers.Count; i++)
-        {
-            if (!TryParseDuration(BanTiers[i].Value, out var tier) || tier <= TimeSpan.Zero)
-            {
-                errors.Add($"Ban tier #{i + 1} is not a valid positive duration.");
-            }
-            else
-            {
-                tiers.Add(tier);
-            }
-        }
-
-        if (tiers.Count == 0)
-        {
-            errors.Add("At least one ban tier is required.");
-        }
-
-        if (!TryParsePorts(BlockedPortsText, out var ports, out var portsError))
-        {
-            errors.Add(portsError!);
-        }
-
-        var rdpThreshold = ParseOptionalThreshold(RdpThresholdText, "RDP threshold", errors);
-        var rdpWindow = ParseOptionalDuration(RdpCountWindowText, "RDP count window", errors);
-        var msSqlThreshold = ParseOptionalThreshold(MsSqlThresholdText, "MS SQL threshold", errors);
-        var msSqlWindow = ParseOptionalDuration(MsSqlCountWindowText, "MS SQL count window", errors);
-        var ftpThreshold = ParseOptionalThreshold(FtpThresholdText, "FTP threshold", errors);
-        var ftpWindow = ParseOptionalDuration(FtpCountWindowText, "FTP count window", errors);
-
-        if (errors.Count > 0)
-        {
-            ErrorMessage = string.Join(Environment.NewLine, errors);
-            StatusMessage = string.Empty;
-            return;
-        }
-
-        settings.FailedLoginThreshold = threshold;
-        settings.CountWindow = countWindow;
-        settings.ExpireTime = expireTime;
-        settings.HousekeepingInterval = housekeeping;
-        settings.MaxBanDuration = maxBan;
-        settings.ClearBansOnStartup = ClearBansOnStartup;
-        settings.ProcessInternalIPs = ProcessInternalIPs;
-        settings.EventRetentionDays = retentionDays;
-        settings.BlockedPorts = ports;
-        settings.BanTiers = tiers.ToArray();
-        settings.ReportOnly = ReportOnly;
-        settings.EventBacklogReplayMinutes = backlogMinutes;
-        settings.Ipv6AggregatePrefixLength = ipv6Prefix;
-        settings.MaxAddressesPerRule = maxAddresses;
-
-        settings.Notifications = new Core.Config.NotificationSettings
-        {
-            Enabled = NotificationsEnabled,
-            WebhookUrl = WebhookUrl.Trim(),
-            TelegramBotToken = TelegramBotToken.Trim(),
-            TelegramChatId = TelegramChatId.Trim(),
-            RateLimitPerMinute = rateLimit,
-            WriteToWindowsEventLog = WriteToWindowsEventLog,
-            Smtp = new Core.Config.SmtpSettings
-            {
-                Host = SmtpHost.Trim(),
-                Port = smtpPort,
-                EnableSsl = SmtpEnableSsl,
-                Username = SmtpUsername,
-                Password = SmtpPassword,
-                From = SmtpFrom.Trim(),
-                To = SmtpTo.Trim(),
-            },
-        };
-
-        settings.Rdp.Enabled = RdpEnabled;
-        settings.Rdp.UseRdpCoreTsFallback = RdpUseRdpCoreTsFallback;
-        settings.Rdp.Threshold = rdpThreshold;
-        settings.Rdp.CountWindow = rdpWindow;
-        settings.Rdp.ExclusionRules = Collect(RdpExclusions);
-
-        settings.MsSql.Enabled = MsSqlEnabled;
-        settings.MsSql.Threshold = msSqlThreshold;
-        settings.MsSql.CountWindow = msSqlWindow;
-        settings.MsSql.IgnoreMessagePatterns = Collect(MsSqlIgnorePatterns);
-
-        settings.Ftp.Enabled = FtpEnabled;
-        settings.Ftp.Threshold = ftpThreshold;
-        settings.Ftp.CountWindow = ftpWindow;
-        settings.Ftp.PollInterval = ftpPoll;
-        settings.Ftp.Sources = FtpSources
+        settings.Ftp.Enabled = FtpEnabled.IsOn;
+        settings.Ftp.Threshold = FtpThreshold.Number;
+        settings.Ftp.CountWindow = FtpWindow.Duration;
+        settings.Ftp.PollInterval = FtpPoll.Duration ?? settings.Ftp.PollInterval;
+        settings.Ftp.Sources = FtpSources.Rows
             .Where(row => !string.IsNullOrWhiteSpace(row.Name) || !string.IsNullOrWhiteSpace(row.Path))
             .Select(row => new FtpLogSource { Name = row.Name.Trim(), Kind = row.Kind, Path = row.Path.Trim() })
             .ToList();
 
-        settings.CustomSources = CustomSources
+        settings.CustomSources = CustomSources.Rows
             .Where(row => !string.IsNullOrWhiteSpace(row.Name) || !string.IsNullOrWhiteSpace(row.PathGlob) || !string.IsNullOrWhiteSpace(row.Regex))
             .Select(row => new CustomLogSource
             {
@@ -443,335 +497,185 @@ public sealed partial class SettingsViewModel : ObservableObject
             })
             .ToList();
 
-        IsBusy = true;
+        settings.Notifications = new NotificationSettings
+        {
+            Enabled = NotificationsEnabled.IsOn,
+            WebhookUrl = WebhookUrl.Value,
+            TelegramBotToken = TelegramToken.Value,
+            TelegramChatId = TelegramChat.Value,
+            RateLimitPerMinute = RateLimit.Number ?? settings.Notifications.RateLimitPerMinute,
+            WriteToWindowsEventLog = WindowsEventLog.IsOn,
+            Smtp = new SmtpSettings
+            {
+                Host = SmtpHost.Value,
+                Port = SmtpPort.Number ?? 25,
+                EnableSsl = SmtpTls.IsOn,
+                Username = SmtpUser.Text,
+                Password = SmtpPassword.Text,
+                From = SmtpFrom.Value,
+                To = SmtpTo.Value,
+            },
+        };
+
+        settings.HousekeepingInterval = Housekeeping.Duration ?? settings.HousekeepingInterval;
+        settings.EventRetentionDays = EventRetention.Number ?? settings.EventRetentionDays;
+        settings.MaxAddressesPerRule = MaxAddressesPerRule.Number ?? settings.MaxAddressesPerRule;
+        settings.ClearBansOnStartup = ClearBansOnStartup.IsOn;
+        return settings;
+    }
+
+    /// <summary>Saves; returns whether the settings are now saved, for the leave-page prompt.</summary>
+    public async Task<bool> TrySaveAsync()
+    {
+        if (!_loaded)
+        {
+            _toasts.Warning("Settings not loaded yet", "Connect to the service, then edit and save.");
+            return false;
+        }
+
+        if (ErrorCount > 0)
+        {
+            ShowFirstProblem();
+            return false;
+        }
+
+        var settings = BuildSettings();
+
+        // The same rules the service applies, caught before the round trip.
+        var problems = SettingsValidator.Validate(settings);
+        if (problems.Count > 0)
+        {
+            _toasts.Error("Settings not saved", problems[0]);
+            return false;
+        }
+
+        IsSaving = true;
         try
         {
             // Show what the service actually stored (it normalizes, e.g. caps very long durations).
             var saved = await _client.UpdateSettingsAsync(settings) ?? settings;
-            saved.Normalize();
-            _baseSettings = saved;
-            PopulateFrom(saved);
-            ErrorMessage = string.Empty;
-            StatusMessage = "Settings saved.";
+            Apply(saved);
+            _toasts.Success("Settings saved", "The service is using them now.");
+            return true;
         }
         catch (Exception ex)
         {
-            ErrorMessage = "Save failed: " + ex.Message;
+            _toasts.Error("Save failed", ex.Message);
+            return false;
         }
         finally
         {
-            IsBusy = false;
+            IsSaving = false;
         }
     }
 
-    /// <summary>Discards edits by re-fetching the live settings.</summary>
-    [RelayCommand]
-    private Task ResetAsync() => LoadAsync();
-
-    /// <summary>Sets the default 24h / 7d / 30d escalation tiers.</summary>
-    [RelayCommand]
-    private void PresetTiersDefault() => SetTiers(["24:00:00", "7.00:00:00", "30.00:00:00"]);
-
-    /// <summary>Sets a single 24-hour tier.</summary>
-    [RelayCommand]
-    private void PresetTiers24h() => SetTiers(["24:00:00"]);
-
-    /// <summary>Sets a single 7-day tier.</summary>
-    [RelayCommand]
-    private void PresetTiers7d() => SetTiers(["7.00:00:00"]);
-
-    /// <summary>Sets a single 30-day tier.</summary>
-    [RelayCommand]
-    private void PresetTiers30d() => SetTiers(["30.00:00:00"]);
-
-    /// <summary>Adds an empty ban-tier row.</summary>
-    [RelayCommand]
-    private void AddTier() => BanTiers.Add(new StringRowViewModel("24:00:00"));
-
-    /// <summary>Removes a ban-tier row.</summary>
-    [RelayCommand]
-    private void RemoveTier(StringRowViewModel? row)
+    /// <summary>Opens a section by title.</summary>
+    public void Show(string title)
     {
-        if (row is not null)
+        SearchText = string.Empty;
+        var section = Sections.FirstOrDefault(candidate => candidate.Title == title);
+        if (section is not null)
         {
-            BanTiers.Remove(row);
+            SelectedSection = section;
         }
     }
 
-    /// <summary>Adds an empty RDP exclusion rule.</summary>
-    [RelayCommand]
-    private void AddExclusion() => RdpExclusions.Add(new StringRowViewModel(string.Empty));
+    /// <summary>Validates and pushes the working copy to the service.</summary>
+    [RelayCommand(CanExecute = nameof(CanSave))]
+    private Task SaveAsync() => TrySaveAsync();
 
-    /// <summary>Removes an RDP exclusion rule.</summary>
-    [RelayCommand]
-    private void RemoveExclusion(StringRowViewModel? row)
+    /// <summary>Throws away edits and shows the service's current settings.</summary>
+    [RelayCommand(CanExecute = nameof(IsDirty))]
+    public async Task DiscardAsync()
     {
-        if (row is not null)
+        // Restores at once from what was loaded: a dead pipe must not leave Discard hanging on a
+        // connect timeout. The service's copy follows, and only lands if nothing was edited since.
+        Apply(_baseSettings);
+        _toasts.Info("Changes discarded");
+
+        if (_client.IsConnected && await _client.GetSettingsAsync() is { } settings && !IsDirty)
         {
-            RdpExclusions.Remove(row);
+            Apply(settings);
         }
     }
 
-    /// <summary>Adds an empty MSSQL ignore pattern.</summary>
+    /// <summary>Loads again after a failure.</summary>
     [RelayCommand]
-    private void AddIgnorePattern() => MsSqlIgnorePatterns.Add(new StringRowViewModel(string.Empty));
+    private Task ReloadAsync() => LoadAsync();
 
-    /// <summary>Removes an MSSQL ignore pattern.</summary>
-    [RelayCommand]
-    private void RemoveIgnorePattern(StringRowViewModel? row)
+    partial void OnSearchTextChanged(string value) => ApplySectionVisibility();
+
+    partial void OnSelectedSectionChanged(SettingsSection value)
     {
-        if (row is not null)
+        // While searching every matching section is on screen, so picking one means "go there".
+        if (IsSearching)
         {
-            MsSqlIgnorePatterns.Remove(row);
+            SearchText = string.Empty;
+        }
+        else
+        {
+            ApplySectionVisibility();
         }
     }
 
-    /// <summary>Adds the IIS FTP log folders found on this machine that are not listed yet.</summary>
-    [RelayCommand]
-    private void DetectIisFtp()
+    private void OnFieldChanged()
     {
-        var added = 0;
-        try
+        if (!_applying)
         {
-            var root = Environment.ExpandEnvironmentVariables(@"%SystemDrive%\inetpub\logs\LogFiles");
-            if (System.IO.Directory.Exists(root))
+            RefreshState();
+        }
+    }
+
+    private void RefreshState()
+    {
+        foreach (var section in Sections)
+        {
+            section.Refresh();
+        }
+
+        IsDirty = Sections.Any(section => section.IsDirty);
+        ErrorCount = Sections.Sum(section => section.ErrorCount);
+        OnPropertyChanged(nameof(DirtyText));
+        OnPropertyChanged(nameof(CanSave));
+        SaveCommand.NotifyCanExecuteChanged();
+        DiscardCommand.NotifyCanExecuteChanged();
+    }
+
+    private void ShowFirstProblem()
+    {
+        var section = Sections.FirstOrDefault(candidate => candidate.HasErrors);
+        if (section is not null)
+        {
+            SearchText = string.Empty;
+            SelectedSection = section;
+        }
+    }
+
+    private void ApplySectionVisibility()
+    {
+        var query = SearchText?.Trim() ?? string.Empty;
+        foreach (var section in Sections)
+        {
+            if (query.Length == 0)
             {
-                foreach (var folder in System.IO.Directory.EnumerateDirectories(root, "FTPSVC*"))
+                foreach (var field in section.Fields)
                 {
-                    if (FtpSources.Any(row => string.Equals(row.Path.Trim(), folder, StringComparison.OrdinalIgnoreCase)))
-                    {
-                        continue;
-                    }
-
-                    FtpSources.Add(new FtpSourceRow { Name = "IIS " + System.IO.Path.GetFileName(folder), Kind = FtpServerKind.IisFtp, Path = folder });
-                    added++;
+                    field.IsShown = true;
                 }
-            }
-        }
-        catch (Exception ex)
-        {
-            ErrorMessage = "Could not look for IIS FTP logs: " + ex.Message;
-            return;
-        }
 
-        StatusMessage = added > 0
-            ? $"Added {added} IIS FTP log folder(s). Press Save settings to apply."
-            : "No new IIS FTP log folders were found under %SystemDrive%\\inetpub\\logs\\LogFiles.";
-    }
-
-    /// <summary>Adds an FTP log source row.</summary>
-    [RelayCommand]
-    private void AddFtpSource()
-    {
-        var row = new FtpSourceRow();
-        FtpSources.Add(row);
-        SelectedFtpSource = row;
-    }
-
-    /// <summary>Removes the selected FTP log source row.</summary>
-    [RelayCommand]
-    private void RemoveFtpSource()
-    {
-        if (SelectedFtpSource is not null)
-        {
-            FtpSources.Remove(SelectedFtpSource);
-            SelectedFtpSource = null;
-        }
-    }
-
-    /// <summary>Adds a custom log source row.</summary>
-    [RelayCommand]
-    private void AddCustomSource()
-    {
-        var row = new CustomSourceRow();
-        CustomSources.Add(row);
-        SelectedCustomSource = row;
-    }
-
-    /// <summary>Adds a custom source row pre-filled from the selected recipe.</summary>
-    [RelayCommand]
-    private void AddFromRecipe()
-    {
-        if (SelectedRecipe is null)
-        {
-            StatusMessage = "Pick a recipe first, then press Add from recipe.";
-            return;
-        }
-
-        var row = new CustomSourceRow
-        {
-            Name = SelectedRecipe.Name,
-            PathGlob = SelectedRecipe.PathGlob,
-            Regex = SelectedRecipe.Regex,
-            Enabled = true,
-        };
-        CustomSources.Add(row);
-        SelectedCustomSource = row;
-        StatusMessage = $"Added the '{SelectedRecipe.Name}' recipe. Adjust the path to this server, then press Save settings. {SelectedRecipe.Description}";
-    }
-
-    /// <summary>Removes the selected custom log source row.</summary>
-    [RelayCommand]
-    private void RemoveCustomSource()
-    {
-        if (SelectedCustomSource is not null)
-        {
-            CustomSources.Remove(SelectedCustomSource);
-            SelectedCustomSource = null;
-        }
-    }
-
-    private void PopulateFrom(WinGuardSettings settings)
-    {
-        ThresholdText = settings.FailedLoginThreshold.ToString(CultureInfo.InvariantCulture);
-        CountWindowText = settings.CountWindow.ToString();
-        ExpireTimeText = settings.ExpireTime.ToString();
-        HousekeepingText = settings.HousekeepingInterval.ToString();
-        MaxBanDurationText = settings.MaxBanDuration.ToString();
-        ClearBansOnStartup = settings.ClearBansOnStartup;
-        ProcessInternalIPs = settings.ProcessInternalIPs;
-        EventRetentionDaysText = settings.EventRetentionDays.ToString(CultureInfo.InvariantCulture);
-        BlockedPortsText = string.Join(", ", settings.BlockedPorts);
-        ReportOnly = settings.ReportOnly;
-        EventBacklogReplayMinutesText = settings.EventBacklogReplayMinutes.ToString(CultureInfo.InvariantCulture);
-        Ipv6AggregatePrefixText = settings.Ipv6AggregatePrefixLength.ToString(CultureInfo.InvariantCulture);
-        MaxAddressesPerRuleText = settings.MaxAddressesPerRule.ToString(CultureInfo.InvariantCulture);
-
-        NotificationsEnabled = settings.Notifications.Enabled;
-        WebhookUrl = settings.Notifications.WebhookUrl ?? string.Empty;
-        TelegramBotToken = settings.Notifications.TelegramBotToken ?? string.Empty;
-        TelegramChatId = settings.Notifications.TelegramChatId ?? string.Empty;
-        RateLimitPerMinuteText = settings.Notifications.RateLimitPerMinute.ToString(CultureInfo.InvariantCulture);
-        WriteToWindowsEventLog = settings.Notifications.WriteToWindowsEventLog;
-        var smtp = settings.Notifications.Smtp ?? new Core.Config.SmtpSettings();
-        SmtpHost = smtp.Host ?? string.Empty;
-        SmtpPortText = (smtp.Port > 0 ? smtp.Port : 25).ToString(CultureInfo.InvariantCulture);
-        SmtpEnableSsl = smtp.EnableSsl;
-        SmtpUsername = smtp.Username ?? string.Empty;
-        SmtpPassword = smtp.Password ?? string.Empty;
-        SmtpFrom = smtp.From ?? string.Empty;
-        SmtpTo = smtp.To ?? string.Empty;
-
-        SetTiers(settings.BanTiers.Select(tier => tier.ToString()));
-
-        RdpEnabled = settings.Rdp.Enabled;
-        RdpUseRdpCoreTsFallback = settings.Rdp.UseRdpCoreTsFallback;
-        RdpThresholdText = settings.Rdp.Threshold?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
-        RdpCountWindowText = settings.Rdp.CountWindow?.ToString() ?? string.Empty;
-        Replace(RdpExclusions, settings.Rdp.ExclusionRules);
-
-        MsSqlEnabled = settings.MsSql.Enabled;
-        MsSqlThresholdText = settings.MsSql.Threshold?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
-        MsSqlCountWindowText = settings.MsSql.CountWindow?.ToString() ?? string.Empty;
-        Replace(MsSqlIgnorePatterns, settings.MsSql.IgnoreMessagePatterns);
-
-        FtpEnabled = settings.Ftp.Enabled;
-        FtpThresholdText = settings.Ftp.Threshold?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
-        FtpCountWindowText = settings.Ftp.CountWindow?.ToString() ?? string.Empty;
-        FtpPollIntervalText = settings.Ftp.PollInterval.ToString();
-        FtpSources.Clear();
-        foreach (var source in settings.Ftp.Sources)
-        {
-            FtpSources.Add(new FtpSourceRow { Name = source.Name, Kind = source.Kind, Path = source.Path });
-        }
-
-        CustomSources.Clear();
-        foreach (var source in settings.CustomSources)
-        {
-            CustomSources.Add(new CustomSourceRow
-            {
-                Name = source.Name,
-                Enabled = source.Enabled,
-                PathGlob = source.PathGlob,
-                Regex = source.Regex,
-            });
-        }
-    }
-
-    private void SetTiers(IEnumerable<string> values)
-    {
-        BanTiers.Clear();
-        foreach (var value in values)
-        {
-            BanTiers.Add(new StringRowViewModel(value));
-        }
-    }
-
-    private static void Replace(ObservableCollection<StringRowViewModel> target, IEnumerable<string> values)
-    {
-        target.Clear();
-        foreach (var value in values)
-        {
-            target.Add(new StringRowViewModel(value));
-        }
-    }
-
-    private static string[] Collect(IEnumerable<StringRowViewModel> rows) =>
-        rows.Select(row => row.Value.Trim())
-            .Where(value => value.Length > 0)
-            .ToArray();
-
-    private static int? ParseOptionalThreshold(string? text, string label, List<string> errors)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return null;
-        }
-
-        if (!int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) || value < 1)
-        {
-            errors.Add($"{label} must be a whole number >= 1, or left empty for the global setting.");
-            return null;
-        }
-
-        return value;
-    }
-
-    private static TimeSpan? ParseOptionalDuration(string? text, string label, List<string> errors)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return null;
-        }
-
-        if (!TryParseDuration(text, out var value) || value <= TimeSpan.Zero)
-        {
-            errors.Add($"{label} must be a positive duration (e.g. 00:10:00), or left empty for the global setting.");
-            return null;
-        }
-
-        return value;
-    }
-
-    private static bool TryParseDuration(string? text, out TimeSpan value)
-    {
-        value = default;
-        return !string.IsNullOrWhiteSpace(text) &&
-               TimeSpan.TryParse(text.Trim(), CultureInfo.InvariantCulture, out value);
-    }
-
-    private static bool TryParsePorts(string? text, out string[] ports, out string? error)
-    {
-        ports = [];
-        error = null;
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return true;
-        }
-
-        var parsed = new List<string>();
-        foreach (var part in text.Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            if (!int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out var port) || port is < 1 or > 65535)
-            {
-                error = $"Blocked port '{part}' is not a valid port (1-65535).";
-                return false;
+                section.IsListed = true;
+                section.IsShown = ReferenceEquals(section, SelectedSection);
+                continue;
             }
 
-            parsed.Add(port.ToString(CultureInfo.InvariantCulture));
-        }
+            var titleMatches = section.Title.Contains(query, StringComparison.OrdinalIgnoreCase);
+            foreach (var field in section.Fields)
+            {
+                field.IsShown = titleMatches || field.Matches(query);
+            }
 
-        ports = parsed.ToArray();
-        return true;
+            section.IsListed = section.Fields.Any(field => field.IsShown);
+            section.IsShown = section.IsListed;
+        }
     }
 }

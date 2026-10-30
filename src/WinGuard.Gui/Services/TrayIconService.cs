@@ -53,8 +53,11 @@ public sealed class TrayIconService : IDisposable
         _notifyIcon.DoubleClick += (_, _) => ShowRequested?.Invoke(this, EventArgs.Empty);
     }
 
-    /// <summary>Switches the icon and tooltip between connected (blue) and service-offline (grey).</summary>
-    public void SetConnected(bool connected)
+    /// <summary>
+    /// Shows the console's overall state: the blue icon while connected, grey otherwise, with the same
+    /// words as the banner, so the tray never says "protecting" while nothing is being enforced.
+    /// </summary>
+    public void SetStatus(bool connected, string status)
     {
         if (_disposed)
         {
@@ -62,7 +65,7 @@ public sealed class TrayIconService : IDisposable
         }
 
         _notifyIcon.Icon = connected ? _icon : _offlineIcon;
-        _notifyIcon.Text = connected ? "WinGuard - protecting" : "WinGuard - service not running";
+        _notifyIcon.Text = "WinGuard - " + status;
     }
 
     /// <inheritdoc />
