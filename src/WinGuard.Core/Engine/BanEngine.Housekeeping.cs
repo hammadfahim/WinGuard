@@ -219,6 +219,17 @@ public sealed partial class BanEngine
             _logger.LogError(ex, "Housekeeping failed to prune old events.");
         }
 
+        // Ban-history retention: a bounded batch per pass, the rest follows on the next ones.
+        try
+        {
+            var retention = TimeSpan.FromDays(settings.BanHistoryRetentionDays > 0 ? settings.BanHistoryRetentionDays : Defaults.BanHistoryRetentionDays);
+            await _store.PruneBanHistoryAsync(now - retention, BanHistoryPruneBatch, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Housekeeping failed to prune old ban history.");
+        }
+
         // Trim the in-memory RDP de-dup window.
         _rdpDedup.Trim(now);
         if (now - _startedUtc > ReplayDedupLifetime)

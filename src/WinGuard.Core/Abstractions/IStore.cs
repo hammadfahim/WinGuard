@@ -76,13 +76,23 @@ public interface IStore
 
     Task RemoveFromListAsync(ListKind kind, string value, CancellationToken ct = default);
 
-    // ---- ban history (append-only; survives ban deletion) ----
+    // ---- ban history (append-only until retention drops it; survives ban deletion) ----
 
     /// <summary>Appends one lifecycle row (banned / expired / unbanned / updated).</summary>
     Task AddBanHistoryAsync(BanHistoryEntry entry, CancellationToken ct = default);
 
     /// <summary>Newest-first ban-history rows, capped at <paramref name="limit"/>.</summary>
     Task<IReadOnlyList<BanHistoryEntry>> GetBanHistoryAsync(int limit, CancellationToken ct = default);
+
+    /// <summary>Total number of ban-history rows.</summary>
+    Task<int> CountBanHistoryAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Deletes up to <paramref name="maxRows"/> rows older than the given UTC time, oldest first, so
+    /// a large backlog is worked off over several calls instead of holding the database in one.
+    /// </summary>
+    /// <returns>Number of rows deleted.</returns>
+    Task<int> PruneBanHistoryAsync(DateTime olderThanUtc, int maxRows, CancellationToken ct = default);
 
     // ---- daily statistics ----
 

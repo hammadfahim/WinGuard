@@ -217,6 +217,94 @@ public sealed class ReviewRound5Tests
         });
     }
 
+    // ---------- ban-history retention ----------
+
+    [Fact]
+    public async Task Housekeeping_prunes_ban_history_past_its_retention_in_bounded_batches()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, s => s.BanHistoryRetentionDays = 30);
+        for (var i = 0; i < 5010; i++)
+        {
+            await h.Store.AddBanHistoryAsync(History("203.0.113.1", T0.UtcDateTime.AddDays(-31).AddSeconds(i)));
+        }
+
+        await h.Store.AddBanHistoryAsync(History("203.0.113.2", T0.UtcDateTime.AddDays(-29)));
+
+        await h.Engine.HousekeepOnceAsync();
+        Assert.Equal(11, await h.Store.CountBanHistoryAsync());
+
+        await h.Engine.HousekeepOnceAsync();
+        Assert.Equal("203.0.113.2", Assert.Single(h.Store.BanHistory).IpAddress);
+    }
+
+    [Fact]
+    public async Task The_store_prunes_the_oldest_history_rows_first_and_counts_them_all()
+    {
+        await WithSqliteStoreAsync(async (store, _) =>
+        {
+            var cutoff = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc);
+            await store.AddBanHistoryAsync(History("203.0.113.3", cutoff.AddDays(-1)));
+            await store.AddBanHistoryAsync(History("203.0.113.1", cutoff.AddDays(-3)));
+            await store.AddBanHistoryAsync(History("203.0.113.2", cutoff.AddDays(-2)));
+            await store.AddBanHistoryAsync(History("203.0.113.4", cutoff));
+
+            Assert.Equal(2, await store.PruneBanHistoryAsync(cutoff, maxRows: 2));
+            Assert.Equal(new[] { "203.0.113.3", "203.0.113.4" }, (await store.GetBanHistoryAsync(10)).Select(r => r.IpAddress).Order());
+
+            Assert.Equal(1, await store.PruneBanHistoryAsync(cutoff, maxRows: 2));
+            Assert.Equal(0, await store.PruneBanHistoryAsync(cutoff, maxRows: 2));
+            Assert.Equal(1, await store.CountBanHistoryAsync());
+        });
+    }
+
+    [Fact]
+    public async Task Statistics_report_the_real_number_of_history_rows()
+    {
+        await using var h = await IpcHarness.StartAsync(T0, TimeSpan.Zero);
+        for (var i = 0; i < 1500; i++)
+        {
+            await h.Store.AddBanHistoryAsync(History("203.0.113.1", T0.UtcDateTime));
+        }
+
+        var statistics = await h.GetAsync<StatisticsDto>(IpcMethods.GetStatistics, new GetStatisticsParams { Days = 7 });
+
+        Assert.Equal(1500, statistics.HistoryRows);
+    }
+
+    [Fact]
+    public async Task Top_offenders_are_answered_from_a_covering_index()
+    {
+        await WithSqliteStoreAsync(async (store, path) =>
+        {
+            var at = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc);
+            await store.AddBanHistoryAsync(History("203.0.113.1", at, offense: 2));
+            await store.AddBanHistoryAsync(History("203.0.113.1", at.AddDays(1), offense: 1));
+            await store.AddBanHistoryAsync(History("203.0.113.2", at));
+            await store.AddBanHistoryAsync(new BanHistoryEntry { TimestampUtc = at, Action = BanHistoryAction.Expired, IpAddress = "203.0.113.3" });
+
+            var top = await store.GetTopOffendersAsync(10);
+            Assert.Equal(new[] { "203.0.113.1", "203.0.113.2" }, top.Select(t => t.IpAddress));
+            Assert.Equal(2, top[0].BanCount);
+            Assert.Equal(2, top[0].MaxOffense);
+            Assert.Equal(at.AddDays(1), top[0].LastSeenUtc);
+
+            await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
+            await connection.OpenAsync();
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText =
+                "EXPLAIN QUERY PLAN SELECT ip, COUNT(*), MAX(offense_count), MAX(ts_utc) FROM ban_history " +
+                "WHERE action = 0 GROUP BY ip ORDER BY COUNT(*) DESC, MAX(ts_utc) DESC LIMIT 10;";
+            await using var reader = await cmd.ExecuteReaderAsync();
+            var plan = new List<string>();
+            while (await reader.ReadAsync())
+            {
+                plan.Add(reader.GetString(3));
+            }
+
+            Assert.Contains(plan, step => step.Contains("COVERING INDEX ix_ban_history_top", StringComparison.Ordinal));
+        });
+    }
+
     // ---------- internal addresses ----------
 
     [Theory]

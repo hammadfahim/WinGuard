@@ -17,9 +17,10 @@ public enum BanHistoryAction
 }
 
 /// <summary>
-/// One append-only row of the ban history: every ban, expiry and manual unban is recorded so
-/// administrators can answer "how many attacks happened last month?" even though active bans
-/// are deleted on expiry. Written by the engine, read by the statistics view.
+/// One row of the ban history: every ban, expiry and manual unban is recorded so administrators
+/// can answer "how many attacks happened last month?" even though active bans are deleted on
+/// expiry. Written by the engine, read by the statistics view; rows are never changed, and
+/// housekeeping drops them once they are older than the retention period.
 /// </summary>
 public sealed class BanHistoryEntry
 {

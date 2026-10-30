@@ -164,7 +164,7 @@ public sealed partial class IpcRequestHandler
 
         var daily = await _store.GetDailyStatsAsync(since, ct).ConfigureAwait(false);
         var topOffenders = await _store.GetTopOffendersAsync(10, ct).ConfigureAwait(false);
-        var history = await _store.GetBanHistoryAsync(1000, ct).ConfigureAwait(false);
+        var historyRows = await _store.CountBanHistoryAsync(ct).ConfigureAwait(false);
         var bans = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
 
         return new StatisticsDto
@@ -172,7 +172,7 @@ public sealed partial class IpcRequestHandler
             Daily = daily.Select(DailyStatDto.From).ToList(),
             TopOffenders = topOffenders.Select(TopOffenderDto.From).ToList(),
             TotalActiveBans = bans.Count,
-            HistoryRows = history.Count,
+            HistoryRows = historyRows,
         };
     }
 

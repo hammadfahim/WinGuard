@@ -526,6 +526,37 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
             ct).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
+    public async Task<int> CountBanHistoryAsync(CancellationToken ct = default)
+    {
+        return await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText = "SELECT COUNT(*) FROM ban_history;";
+                var result = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+                return Convert.ToInt32(result, CultureInfo.InvariantCulture);
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<int> PruneBanHistoryAsync(DateTime olderThanUtc, int maxRows, CancellationToken ct = default)
+    {
+        return await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "DELETE FROM ban_history WHERE id IN (" +
+                    "SELECT id FROM ban_history WHERE ts_utc < $before ORDER BY ts_utc LIMIT $limit);";
+                cmd.Parameters.AddWithValue("$before", ToDb(olderThanUtc));
+                cmd.Parameters.AddWithValue("$limit", maxRows);
+                return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            },
+            ct).ConfigureAwait(false);
+    }
+
     // ---- daily statistics ----
 
     /// <inheritdoc />

@@ -343,6 +343,28 @@ public sealed class FakeStore : IStore
         }
     }
 
+    public Task<int> CountBanHistoryAsync(CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult(_banHistory.Count);
+        }
+    }
+
+    public Task<int> PruneBanHistoryAsync(DateTime olderThanUtc, int maxRows, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            var doomed = _banHistory
+                .Where(entry => entry.TimestampUtc < olderThanUtc)
+                .OrderBy(entry => entry.TimestampUtc)
+                .Take(maxRows)
+                .ToHashSet();
+            _banHistory.RemoveAll(doomed.Contains);
+            return Task.FromResult(doomed.Count);
+        }
+    }
+
     // ---- daily statistics ----
 
     private readonly Dictionary<(DateTime Day, ProtocolSource Source), (int Detections, int Bans)> _dailyStats = new();
