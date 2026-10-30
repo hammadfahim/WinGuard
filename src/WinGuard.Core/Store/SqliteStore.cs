@@ -156,6 +156,51 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<string>> GetFailedLoginUsersAsync(string ip, DateTime sinceUtc, CancellationToken ct = default)
+    {
+        return await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "SELECT DISTINCT user FROM failed_logins WHERE ip = $ip AND ts_utc >= $since AND user IS NOT NULL;";
+                cmd.Parameters.AddWithValue("$ip", ip);
+                cmd.Parameters.AddWithValue("$since", ToDb(sinceUtc));
+
+                var users = new List<string>();
+                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    users.Add(reader.GetString(0));
+                }
+
+                return (IReadOnlyList<string>)users;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task SetFailedLoginUserAsync(string ip, ProtocolSource source, string user, DateTime sinceUtc, CancellationToken ct = default)
+    {
+        await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "UPDATE failed_logins SET user = $user WHERE rowid = (" +
+                    "SELECT rowid FROM failed_logins WHERE ip = $ip AND source = $source AND ts_utc >= $since AND user IS NULL " +
+                    "ORDER BY ts_utc DESC, rowid DESC LIMIT 1);";
+                cmd.Parameters.AddWithValue("$user", user);
+                cmd.Parameters.AddWithValue("$ip", ip);
+                cmd.Parameters.AddWithValue("$source", (int)source);
+                cmd.Parameters.AddWithValue("$since", ToDb(sinceUtc));
+                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                return true;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task ClearFailedLoginsAsync(string ip, CancellationToken ct = default)
     {
         await WithConnectionAsync(

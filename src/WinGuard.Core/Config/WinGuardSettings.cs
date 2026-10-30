@@ -67,6 +67,9 @@ public sealed class WinGuardSettings
     public FtpSettings Ftp { get; set; } = new();
     public List<CustomLogSource> CustomSources { get; set; } = [];
 
+    /// <summary>Honeypot names, spraying, slow brute force and logon alerts; all off by default.</summary>
+    public DetectionRuleSettings Rules { get; set; } = new();
+
     /// <summary>Effective threshold for a protocol (per-protocol override wins).</summary>
     public int ThresholdFor(ProtocolSource source) => source switch
     {
@@ -115,6 +118,8 @@ public sealed class WinGuardSettings
         BlockedPorts ??= [];
         BanTiers ??= [];
         Notifications.Smtp ??= new();
+        Rules ??= new();
+        Rules.Normalize();
 
         foreach (var source in CustomSources)
         {
@@ -165,6 +170,7 @@ public sealed class WinGuardSettings
         ExpireTime = Max(ExpireTime, Rdp.CountWindow ?? TimeSpan.Zero);
         ExpireTime = Max(ExpireTime, MsSql.CountWindow ?? TimeSpan.Zero);
         ExpireTime = Max(ExpireTime, Ftp.CountWindow ?? TimeSpan.Zero);
+        ExpireTime = Max(ExpireTime, Rules.LongestFailureWindow());
 
         OffenseMemory = OffenseMemory <= TimeSpan.Zero ? Defaults.OffenseMemory : Min(OffenseMemory, maxSane);
 

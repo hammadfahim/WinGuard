@@ -28,6 +28,54 @@ public sealed class SqliteStoreTests
     // ---------- failed_logins ----------
 
     [Fact]
+    public async Task Failed_login_users_are_distinct_recent_and_cross_source()
+    {
+        await WithStoreAsync(async store =>
+        {
+            var now = DateTime.UtcNow;
+            await store.AddFailedLoginAsync(Named("1.2.3.4", now.AddMinutes(-1), ProtocolSource.Rdp, "alice"));
+            await store.AddFailedLoginAsync(Named("1.2.3.4", now.AddMinutes(-2), ProtocolSource.Ftp, "alice"));
+            await store.AddFailedLoginAsync(Named("1.2.3.4", now.AddMinutes(-3), ProtocolSource.Ftp, "bob"));
+            await store.AddFailedLoginAsync(Named("1.2.3.4", now.AddMinutes(-3), ProtocolSource.Rdp, null));
+            await store.AddFailedLoginAsync(Named("1.2.3.4", now.AddMinutes(-30), ProtocolSource.Rdp, "old"));
+            await store.AddFailedLoginAsync(Named("5.6.7.8", now.AddMinutes(-1), ProtocolSource.Rdp, "other"));
+
+            var users = await store.GetFailedLoginUsersAsync("1.2.3.4", now.AddMinutes(-10));
+
+            Assert.Equal(new[] { "alice", "bob" }, users.OrderBy(user => user, StringComparer.Ordinal));
+        });
+    }
+
+    [Fact]
+    public async Task Naming_a_failed_login_fills_the_newest_nameless_row_of_that_source()
+    {
+        await WithStoreAsync(async store =>
+        {
+            var now = DateTime.UtcNow;
+            await store.AddFailedLoginAsync(Named("1.2.3.4", now.AddMinutes(-20), ProtocolSource.Rdp, null));
+            await store.AddFailedLoginAsync(Named("1.2.3.4", now.AddSeconds(-3), ProtocolSource.Rdp, "named"));
+            await store.AddFailedLoginAsync(Named("1.2.3.4", now.AddSeconds(-2), ProtocolSource.Rdp, null));
+            await store.AddFailedLoginAsync(Named("1.2.3.4", now.AddSeconds(-1), ProtocolSource.Ftp, null));
+
+            await store.SetFailedLoginUserAsync("1.2.3.4", ProtocolSource.Rdp, "alice", now.AddMinutes(-1));
+
+            Assert.Equal(new[] { "alice", "named" }, (await store.GetFailedLoginUsersAsync("1.2.3.4", now.AddMinutes(-1))).OrderBy(user => user, StringComparer.Ordinal));
+            Assert.Equal(4, await store.CountFailedLoginsSinceAsync(DateTime.MinValue));
+
+            // Nothing nameless left in range: a no-op, not a rename of an older or named row.
+            await store.SetFailedLoginUserAsync("1.2.3.4", ProtocolSource.Rdp, "bob", now.AddMinutes(-1));
+            Assert.DoesNotContain("bob", await store.GetFailedLoginUsersAsync("1.2.3.4", DateTime.MinValue));
+        });
+    }
+
+    private static FailedLogin Named(string ip, DateTime at, ProtocolSource source, string? user)
+    {
+        var failed = Failed(ip, at, source);
+        failed.UserName = user;
+        return failed;
+    }
+
+    [Fact]
     public async Task Count_failed_logins_respects_since_and_source()
     {
         await WithStoreAsync(async store =>

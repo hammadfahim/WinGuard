@@ -29,13 +29,23 @@ internal sealed class RdpDeduplicator
     /// True when the event is the second half of an attempt already seen through the other detector
     /// (or the counterpart of an excluded event). Otherwise the event is remembered and counts.
     /// </summary>
-    public bool IsDuplicateAndRecord(string ip, string? detector, DateTime timestampUtc)
+    public bool IsDuplicateAndRecord(string ip, string? detector, DateTime timestampUtc) =>
+        IsDuplicateAndRecord(ip, detector, timestampUtc, out _);
+
+    /// <inheritdoc cref="IsDuplicateAndRecord(string, string?, DateTime)"/>
+    /// <param name="ip">The client address.</param>
+    /// <param name="detector">The detector that saw the event.</param>
+    /// <param name="timestampUtc">When the event happened.</param>
+    /// <param name="partnerCounted">True when the other half was counted, not removed by an exclusion rule.</param>
+    public bool IsDuplicateAndRecord(string ip, string? detector, DateTime timestampUtc, out bool partnerCounted)
     {
+        partnerCounted = false;
         var recent = GetAndTrim(ip, timestampUtc);
         var partner = FindUnpairedPartner(recent, detector, timestampUtc);
         if (partner is not null)
         {
             partner.Paired = true;
+            partnerCounted = !partner.Excluded;
             return true;
         }
 

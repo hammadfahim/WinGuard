@@ -733,13 +733,22 @@ public sealed partial class BanEngine
 
         // RDP de-dup: merge only cross-detector 4625+140 pairs describing the SAME attempt
         // (PLAN §4.2). Same-detector events within the window are distinct attempts.
-        if (failed.Source == ProtocolSource.Rdp && rdpDedup.IsDuplicateAndRecord(ip, failed.Detector, failed.TimestampUtc))
+        var alreadyCounted = false;
+        if (failed.Source == ProtocolSource.Rdp && rdpDedup.IsDuplicateAndRecord(ip, failed.Detector, failed.TimestampUtc, out var partnerCounted))
         {
             _logger.LogDebug("Skipping duplicate RDP failure for {Ip} (detector {Detector}).", ip, failed.Detector);
-            return;
+            if (!partnerCounted || !NamesCountedAttempt(failed, settings.Rules))
+            {
+                return;
+            }
+
+            alreadyCounted = true;
         }
 
-        RecordDetection(failed.Source);
+        if (!alreadyCounted)
+        {
+            RecordDetection(failed.Source);
+        }
 
         var current = _unsavedBans.GetValueOrDefault(ip) ?? await SafeGetBanAsync(ip, ct).ConfigureAwait(false);
         var now = NowUtc();
@@ -819,11 +828,14 @@ public sealed partial class BanEngine
         }
 
         var since = now - window;
-        var count = await CountFailureAsync(failed, since, ct).ConfigureAwait(false);
+        var count = alreadyCounted
+            ? await NameCountedAttemptAsync(failed, ct).ConfigureAwait(false)
+            : await CountFailureAsync(failed, since, ct).ConfigureAwait(false);
 
-        // 7. Threshold crossed -> escalate and ban.
+        // 7. Threshold crossed or a detection rule fired -> escalate and ban.
         var threshold = Math.Max(1, settings.ThresholdFor(failed.Source));
-        if (count < threshold)
+        var rule = await EvaluateRulesAsync(failed, count, threshold, settings.Rules, now, ct).ConfigureAwait(false);
+        if (count < threshold && rule is null)
         {
             return;
         }
@@ -844,6 +856,7 @@ public sealed partial class BanEngine
             ExpiresUtc = expiresUtc,
             OffenseCount = nextOffense,
             IsPermanent = false,
+            Note = rule,
         };
 
         // Enforce first: a database problem must never leave an attacker unblocked.
@@ -870,17 +883,19 @@ public sealed partial class BanEngine
             Source = failed.Source,
             OffenseCount = nextOffense,
             Duration = duration,
+            Note = rule,
         }, ct).ConfigureAwait(false);
 
         var reportSuffix = ReportSuffix();
-        _logger.LogWarning("Blocked {Ip} for {Duration} (offense #{Offense}).{Suffix}", ip, duration, nextOffense, reportSuffix);
+        var ruleText = rule is null ? string.Empty : $" ({rule})";
+        _logger.LogWarning("Blocked {Ip} for {Duration}{Rule} (offense #{Offense}).{Suffix}", ip, duration, ruleText, nextOffense, reportSuffix);
         await TryAddEventAsync(new LogEvent
         {
             TimestampUtc = now,
             Level = LogEventLevel.Warning,
             Source = failed.Source,
             IpAddress = ip,
-            Message = $"BLOCKED {ip} for {FormatDuration(duration)} (offense #{nextOffense}){reportSuffix}",
+            Message = $"BLOCKED {ip} for {FormatDuration(duration)}{ruleText} (offense #{nextOffense}){reportSuffix}",
         }, ct).ConfigureAwait(false);
     }
 
