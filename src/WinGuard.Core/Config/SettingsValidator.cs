@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using WinGuard.Core.Detection;
+using WinGuard.Core.Monitoring;
 
 namespace WinGuard.Core.Config;
 
@@ -73,6 +74,24 @@ public static class SettingsValidator
             catch (ArgumentException ex)
             {
                 errors.Add($"Custom source '{label}': invalid regex ({ex.Message}).");
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.PrometheusTextfilePath)
+            && PrometheusTextfileWriter.PathProblem(settings.PrometheusTextfilePath) is { } textfileProblem)
+        {
+            errors.Add($"Prometheus textfile: {textfileProblem}");
+        }
+
+        if (settings.Notifications?.Syslog is { Enabled: true } syslog)
+        {
+            if (string.IsNullOrWhiteSpace(syslog.Host))
+            {
+                errors.Add("Syslog: a host is required.");
+            }
+            else if (syslog.Host.Any(c => char.IsWhiteSpace(c) || char.IsControl(c)))
+            {
+                errors.Add("Syslog: the host must be a host name or an address.");
             }
         }
 

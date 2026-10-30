@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using WinGuard.Core.Abstractions;
 using WinGuard.Core.Config;
 using WinGuard.Core.Engine;
+using WinGuard.Core.Firewall;
 using WinGuard.Core.Ipc;
 using WinGuard.Core.Model;
 
@@ -21,6 +22,7 @@ public sealed partial class IpcRequestHandler
     private readonly BanEngine _engine;
     private readonly SettingsHolder _settings;
     private readonly IFirewall _firewall;
+    private readonly IFirewallPolicyReader _firewallPolicy;
     private readonly DetectorRuntimeState _state;
     private readonly ILogger<IpcRequestHandler> _logger;
     private readonly TimeProvider _timeProvider;
@@ -34,6 +36,7 @@ public sealed partial class IpcRequestHandler
     /// <param name="state">Shared detector running flags.</param>
     /// <param name="timeProvider">Clock used for the reported service start time and statistics windows.</param>
     /// <param name="logger">Diagnostic logger.</param>
+    /// <param name="firewallPolicy">Reads the firewall policy for the prerequisites; the real one when null.</param>
     public IpcRequestHandler(
         IStore store,
         BanEngine engine,
@@ -41,8 +44,10 @@ public sealed partial class IpcRequestHandler
         IFirewall firewall,
         DetectorRuntimeState state,
         TimeProvider timeProvider,
-        ILogger<IpcRequestHandler> logger)
+        ILogger<IpcRequestHandler> logger,
+        IFirewallPolicyReader? firewallPolicy = null)
     {
+        _firewallPolicy = firewallPolicy ?? new ComFirewallPolicyReader();
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _engine = engine ?? throw new ArgumentNullException(nameof(engine));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -132,6 +137,7 @@ public sealed partial class IpcRequestHandler
             });
         }
 
+        var disarmedUntil = _engine.DisarmedUntilUtc;
         return new ServiceStatusDto
         {
             ServiceRunning = true,
@@ -141,6 +147,8 @@ public sealed partial class IpcRequestHandler
             ActiveBans = bans.Count,
             Engines = engines,
             ReportOnly = settings.ReportOnly,
+            Disarmed = disarmedUntil is not null,
+            DisarmedUntilUtc = disarmedUntil,
         };
     }
 

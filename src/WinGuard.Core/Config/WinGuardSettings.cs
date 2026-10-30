@@ -59,6 +59,12 @@ public sealed class WinGuardSettings
     /// <summary>Out-of-band notifications (webhook / Telegram / e-mail / Windows Event Log).</summary>
     public NotificationSettings Notifications { get; set; } = new();
 
+    /// <summary>
+    /// A <c>.prom</c> file on a local drive that housekeeping keeps up to date, for the textfile
+    /// collector of windows_exporter. Empty (the default) writes nothing; WinGuard opens no port.
+    /// </summary>
+    public string PrometheusTextfilePath { get; set; } = string.Empty;
+
     /// <summary>Empty = block all ports (1 firewall condition per IP; cheapest). Non-empty = block only these ports.</summary>
     public string[] BlockedPorts { get; set; } = [];
 
@@ -120,6 +126,9 @@ public sealed class WinGuardSettings
         Notifications.Smtp ??= new();
         Rules ??= new();
         Rules.Normalize();
+        Notifications.Syslog ??= new();
+        Notifications.Syslog.Normalize();
+        PrometheusTextfilePath = PrometheusTextfilePath?.Trim() ?? string.Empty;
 
         foreach (var source in CustomSources)
         {
@@ -322,6 +331,9 @@ public sealed class NotificationSettings
     /// <summary>Also write WinGuard events to the Windows Application event log (source "WinGuard")
     /// so SIEM/Windows-Event-Forwarding setups can consume them without polling WinGuard's pipe.</summary>
     public bool WriteToWindowsEventLog { get; set; } = true;
+
+    /// <summary>Syslog output; has its own switch and is not rate limited, like the Windows Event Log.</summary>
+    public SyslogSettings Syslog { get; set; } = new();
 }
 
 /// <summary>Minimal SMTP relay configuration for notifications.</summary>
@@ -336,7 +348,7 @@ public sealed class SmtpSettings
     /// <summary>Username; empty = anonymous relay (typical for an internal smarthost).</summary>
     public string Username { get; set; } = string.Empty;
 
-    /// <summary>Password; stored in the settings blob like the rest of the configuration.</summary>
+    /// <summary>Password; encrypted in the store like the webhook URL and Telegram token (see <see cref="SettingsSecrets"/>).</summary>
     public string Password { get; set; } = string.Empty;
 
     /// <value>Display/sender address, e.g. winguard@example.com.</value>

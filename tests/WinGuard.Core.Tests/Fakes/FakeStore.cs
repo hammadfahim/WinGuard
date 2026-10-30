@@ -43,6 +43,9 @@ public sealed class FakeStore : IStore
     /// <summary>When true, removing a ban throws.</summary>
     public bool FailBanRemoval { get; set; }
 
+    /// <summary>When true, saving a setting throws.</summary>
+    public bool FailSettingWrites { get; set; }
+
     /// <summary>Snapshot of stored failed logins (oldest first).</summary>
     public List<FailedLogin> FailedLogins
     {
@@ -547,6 +550,11 @@ public sealed class FakeStore : IStore
 
     public Task SetSettingAsync(string key, string value, CancellationToken ct = default)
     {
+        if (FailSettingWrites)
+        {
+            throw new IOException("Simulated settings write failure.");
+        }
+
         lock (_gate)
         {
             _settings[key] = value;

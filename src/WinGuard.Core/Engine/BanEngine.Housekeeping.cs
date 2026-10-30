@@ -146,6 +146,9 @@ public sealed partial class BanEngine
         var settings = _settingsAccessor();
         var now = NowUtc();
 
+        // First, so a store that fails further down cannot hold up the end of a disarm.
+        await CheckDisarmCoreAsync(ct).ConfigureAwait(false);
+
         _fallbackCounts.Trim(now - settings.ExpireTime);
         await RetryUnsavedBansAsync(now, ct).ConfigureAwait(false);
 
@@ -275,10 +278,19 @@ public sealed partial class BanEngine
             _lastReconcileUtc = now;
             await ReconcileFirewallCoreAsync(ct).ConfigureAwait(false);
         }
+
+        PublishMetrics(settings, activeForPrune, now);
     }
 
     private async Task ReconcileFirewallCoreAsync(CancellationToken ct)
     {
+        // Ahead of report-only: rules left from before that mode can be what locked someone out.
+        if (IsDisarmed)
+        {
+            KeepFirewallClear();
+            return;
+        }
+
         // Monitoring mode never enforces: leave the firewall alone entirely (bans recorded in
         // the store become enforced the moment report-only is switched off, right here).
         if (_settingsAccessor().ReportOnly)

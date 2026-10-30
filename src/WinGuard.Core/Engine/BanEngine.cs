@@ -147,11 +147,14 @@ public sealed partial class BanEngine
             // it has to know the blacklisted ranges or they would be unenforced until housekeeping.
             await ReloadListsCoreAsync(ct).ConfigureAwait(false);
 
+            // Before any firewall work: a disarm survives a restart until its window ends.
+            await CheckDisarmCoreAsync(ct).ConfigureAwait(false);
+
             if (settings.ClearBansOnStartup)
             {
                 // The bans go, the blacklisted ranges stay. Sync instead of ClearAll, which would
                 // leave the ranges unenforced for a moment. Report-only leaves the firewall alone.
-                if (!settings.ReportOnly)
+                if (!FirewallFrozen)
                 {
                     try
                     {
@@ -179,6 +182,10 @@ public sealed partial class BanEngine
                 _rdpDedup.Clear();
                 await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
                 await TryAddEventAsync(null, null, $"Cleared bans on startup (ClearBansOnStartup).{ReportSuffix()}", ct).ConfigureAwait(false);
+            }
+            else if (IsDisarmed)
+            {
+                _logger.LogWarning("BanEngine started disarmed: bans are recorded but the firewall stays empty until {Until:u}.", DisarmedUntilUtc);
             }
             else if (settings.ReportOnly)
             {
@@ -1171,7 +1178,7 @@ public sealed partial class BanEngine
     /// </summary>
     private void TryBlock(string ipOrRange)
     {
-        if (_settingsAccessor().ReportOnly)
+        if (FirewallFrozen)
         {
             return;
         }
@@ -1185,7 +1192,7 @@ public sealed partial class BanEngine
     /// </summary>
     private void TryUnblock(string ipOrRange)
     {
-        if (_settingsAccessor().ReportOnly)
+        if (FirewallFrozen)
         {
             return;
         }
@@ -1193,7 +1200,8 @@ public sealed partial class BanEngine
         TryFirewall(() => _firewall.Unblock(ipOrRange), "unblock", ipOrRange);
     }
 
-    private string ReportSuffix() => _settingsAccessor().ReportOnly ? ReportOnlyNote : string.Empty;
+    private string ReportSuffix() =>
+        IsDisarmed ? DisarmedNote : _settingsAccessor().ReportOnly ? ReportOnlyNote : string.Empty;
 
     /// <summary>What the firewall should hold: these bans, the ones the store has not taken yet, and the blacklisted ranges.</summary>
     private List<string> FirewallTargets(IEnumerable<BanEntry> activeBans) =>
@@ -1313,7 +1321,7 @@ public sealed partial class BanEngine
 
             try
             {
-                await Task.Delay(interval, _timeProvider, ct).ConfigureAwait(false);
+                await WaitForNextPassAsync(interval, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {

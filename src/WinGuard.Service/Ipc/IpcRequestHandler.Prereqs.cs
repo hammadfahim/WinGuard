@@ -13,6 +13,7 @@ using WinGuard.Core.Abstractions;
 using WinGuard.Core.Config;
 using WinGuard.Core.Detection;
 using WinGuard.Core.Engine;
+using WinGuard.Core.Firewall;
 using WinGuard.Core.Ipc;
 using WinGuard.Core.Model;
 
@@ -79,6 +80,14 @@ public sealed partial class IpcRequestHandler
         else if (!dto.RdpCoreTsChannelEnabled)
         {
             warnings.Add("RdpCoreTS/Operational channel is disabled; the RDP TLS/NLA fallback detector will not see event 140.");
+        }
+
+        dto.FirewallPolicy = FirewallPolicyEvaluator.ReadSafely(_firewallPolicy);
+        warnings.AddRange(dto.FirewallPolicy.Warnings);
+
+        if (_settings.UndecryptableSecrets is { Count: > 0 } secrets)
+        {
+            warnings.Add($"The stored {string.Join(", ", secrets)} could not be decrypted here, so those notifications stay off. Enter the value again, or run under the account that stored it.");
         }
 
         dto.Warnings = warnings;

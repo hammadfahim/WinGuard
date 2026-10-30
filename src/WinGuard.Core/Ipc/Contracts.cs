@@ -18,7 +18,7 @@ public static class PipeConstants
     /// <see cref="ServiceStatusDto.ProtocolVersion"/> so a GUI from another release can say so
     /// instead of misbehaving. v3: statistics + ban history + report-only. v4: BlockNow answers
     /// with the ban it recorded. v5: settings carry the detection rules, which a client that does
-    /// not know them would reset on save.
+    /// not know them would reset on save; disarm status, firewall policy prerequisites.
     /// </summary>
     public const int ProtocolVersion = 5;
 }
@@ -90,6 +90,12 @@ public sealed class ServiceStatusDto
 
     /// <summary>True when the engine runs in monitoring mode: bans are recorded but not enforced.</summary>
     public bool ReportOnly { get; set; }
+
+    /// <summary>True during a break-glass window: no firewall rules are held and nothing is enforced.</summary>
+    public bool Disarmed { get; set; }
+
+    /// <summary>When the break-glass window ends and enforcement resumes by itself; null when <see cref="Disarmed"/> is false.</summary>
+    public DateTime? DisarmedUntilUtc { get; set; }
 }
 
 public sealed class EngineStatusDto
@@ -162,7 +168,45 @@ public sealed class PrereqsDto
     /// <summary>RdpCoreTS/Operational channel exists and is enabled.</summary>
     public bool RdpCoreTsChannelEnabled { get; set; }
 
+    /// <summary>Whether Windows acts on WinGuard's rules at all; its warnings are in <see cref="Warnings"/> too.</summary>
+    public FirewallPolicyDto? FirewallPolicy { get; set; }
+
     public List<string> Warnings { get; set; } = [];
+}
+
+/// <summary>The firewall policy as it affects WinGuard's rules. Read-only: WinGuard never changes policy.</summary>
+public sealed class FirewallPolicyDto
+{
+    /// <summary>False when the policy could not be read; the other fields then say nothing.</summary>
+    public bool Known { get; set; }
+
+    public List<FirewallProfileDto> ActiveProfiles { get; set; } = [];
+
+    /// <summary>Raw <c>NET_FW_MODIFY_STATE</c>: 0 OK, 1 Group Policy override, 2 inbound blocked.</summary>
+    public int LocalPolicyModifyState { get; set; }
+
+    /// <summary>False when Group Policy keeps local rules from taking effect, or the state is not understood.</summary>
+    public bool LocalPolicyHonoured { get; set; }
+
+    /// <summary>All incoming connections are blocked anyway: harmless, but WinGuard's rules add nothing.</summary>
+    public bool InboundBlocked { get; set; }
+
+    /// <summary>True only when a WinGuard rule really blocks: firewall on in every active profile, local rules honoured.</summary>
+    public bool RulesTakeEffect { get; set; }
+
+    /// <summary>In plain language; empty when all is well.</summary>
+    public List<string> Warnings { get; set; } = [];
+}
+
+/// <summary>One firewall profile currently in use.</summary>
+public sealed class FirewallProfileDto
+{
+    /// <summary>Domain, Private or Public.</summary>
+    public string Name { get; set; } = string.Empty;
+
+    public bool Enabled { get; set; }
+
+    public bool BlockAllInbound { get; set; }
 }
 
 // ---- method params ----

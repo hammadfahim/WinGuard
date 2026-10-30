@@ -44,10 +44,51 @@ Public disclosure is coordinated with you after a fix is released.
   the setup and by `--install`. A folder a standard user created first loses that user as owner, so
   they cannot grant themselves access again, and setup stops if the folder cannot be secured or
   turns out to be a link. A portable `--console` run does not touch the folder's ACL.
+- **Break-glass** (`--disarm [--minutes N]`, `--rearm`) needs no service: it is a drop file,
+  `disarm.json` in the data folder, plus an immediate clear of the firewall rules by the command
+  itself. Both verbs refuse a prompt that is not elevated. While a window is open the service holds
+  no firewall rules and writes none; detection and recording go on, and bans recorded meanwhile
+  are enforced when it ends. A window lasts at most **24 hours** and ends by itself, so a forgotten
+  disarm cannot leave the server open; a disarm can be renewed, which is reported again.
+- The drop file is trusted only as far as it can be checked, and everything fails towards
+  protection. It must be owned by SYSTEM or the Administrators group, nobody else may be able to
+  write to it, it must not be a link, and it must describe a window of at most 24 hours from
+  now: this is checked on the file itself because a portable run leaves the folder's ACL alone,
+  and a standard user may be able to create files there. A file that is expired, corrupt,
+  over-long or untrusted disarms nothing and is reported once; a file that goes bad during a
+  window ends it at once.
+- The prerequisite checks and `--doctor` report whether Windows acts on WinGuard's rules at all
+  (firewall on in every active profile, local rules honoured by Group Policy). They only read the
+  policy: WinGuard never changes firewall policy, profiles or Group Policy settings.
+- **Notification secrets** (SMTP password, Telegram token, webhook URL) are encrypted in the
+  settings database with **DPAPI in user scope** and a WinGuard-specific entropy value, and marked
+  `dpapi:`. Machine scope would let any local process decrypt them; under LocalSystem, user scope
+  limits that to SYSTEM. This protects a copied database, a backup or an administrator's casual
+  read of the file. It does not protect against code running as SYSTEM, or an administrator who
+  can run code as SYSTEM, and the entropy is not a secret. Values stay plaintext in the service's
+  memory and over the admin-only pipe, because the channels and the console need them.
+- Old plaintext values keep working. The service encrypts them at its next start; a `--console`
+  run leaves them alone, because whatever it encrypts only that administrator can read. A value
+  that cannot be encrypted is refused, never stored in the clear.
+- A secret that cannot be decrypted (the database moved to another machine, or `--console` reading
+  what the service stored) acts as empty and is reported once, and the channel stays off. Its
+  ciphertext stays in the database through every later save, so a console run cannot destroy it;
+  only entering a new value replaces it. Moving WinGuard to another machine means entering the
+  secrets again.
 - WinGuard makes **no outbound connections** of its own; the only network traffic it can produce
-  is to the notification destinations (webhook / Telegram / SMTP) an administrator explicitly
-  configures. Webhook URLs and Telegram tokens are secrets and never reach the log; a plain
-  `http://` webhook still works but logs a warning.
+  is to the notification destinations (webhook / Telegram / SMTP / syslog) an administrator
+  explicitly configures. Webhook URLs and Telegram tokens are secrets and never reach the log; a
+  plain `http://` webhook still works but logs a warning.
+- **Syslog** is plain UDP or TCP without TLS, so events, including attacker addresses, travel
+  unencrypted, and over UDP nothing confirms that a message arrived; use a trusted network or a
+  local collector. Control characters in event text are escaped, so a crafted user name cannot
+  forge a second message.
+- **Metrics** open no port: WinGuard only writes the `.prom` file named in the settings, for
+  windows_exporter to read. The path must be a full path on a local drive, because the service
+  runs as SYSTEM and a network path would authenticate the machine to whatever host it names. The
+  folder should be writable by administrators only; the file holds counts, flags and a timestamp,
+  no addresses. Writes go through a randomly named temporary file created fresh, so a file planted
+  in the folder cannot be written through.
 
 ## Scope notes
 
@@ -69,6 +110,9 @@ which are stable across releases. An id is never reassigned; new event types get
 | 1004 | Warning | An administrator unblocked an address. |
 | 1005 | Warning | A range ban was lifted because it came to overlap the whitelist. |
 | 1006 | Warning | Notifications were dropped by the rate limit or a full queue; the message gives the count. |
+| 1020 | Warning | Break-glass: enforcement was disarmed and all WinGuard firewall rules removed, or an open window was changed. |
+| 1021 | Warning | Break-glass: a disarm ended and enforcement resumed. |
+| 1022 | Warning | Break-glass: a disarm file was ignored (expired, corrupt or untrusted); the message gives the reason. |
 | 1900 | Warning | Any other warning. |
 | 1901 | Error | Any error. |
 | 1902 | Information | Any other informational event. |

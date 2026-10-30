@@ -8,6 +8,7 @@ using WinGuard.Core.Config;
 using WinGuard.Core.Detection;
 using WinGuard.Core.Engine;
 using WinGuard.Core.Firewall;
+using WinGuard.Core.Monitoring;
 using WinGuard.Core.Notifications;
 using WinGuard.Core.Store;
 using WinGuard.Service.Ipc;
@@ -23,6 +24,8 @@ namespace WinGuard.Service;
 ///   <item><c>--uninstall</c> — stop and delete the service.</item>
 ///   <item><c>--console</c> — run the host in the current console.</item>
 ///   <item><c>--clear-firewall</c> — delete every <c>WinGuard_Block_*</c> rule and exit 0.</item>
+///   <item><c>--disarm</c> / <c>--rearm</c> — break-glass: stop enforcing for a bounded time, and end
+///   that early; both work without the service.</item>
 ///   <item><c>--status</c> / <c>--list-bans</c> / <c>--ban</c> / <c>--unban</c> / <c>--doctor</c> —
 ///   manage the running service over its pipe (elevated console required).</item>
 ///   <item>no arguments — run as the Windows service.</item>
@@ -45,6 +48,10 @@ internal static class Program
                         return UninstallService();
                     case "--clear-firewall":
                         return ClearFirewall();
+                    case "--disarm":
+                        return BreakGlassCommands.Disarm(args);
+                    case "--rearm":
+                        return BreakGlassCommands.Rearm();
                     case "--console":
                         return await RunHostAsync(args, console: true).ConfigureAwait(false);
                     case "--status":
@@ -186,7 +193,11 @@ internal static class Program
                 () => sp.GetRequiredService<SettingsHolder>().Current,
                 sp.GetRequiredService<ILogger<BanEngine>>(),
                 sp.GetRequiredService<TimeProvider>(),
-                sp.GetRequiredService<IEventPublisher>()));
+                sp.GetRequiredService<IEventPublisher>())
+            {
+                BreakGlass = new DisarmFile(Defaults.DisarmFilePath),
+                Metrics = new PrometheusTextfileWriter(sp.GetRequiredService<ILogger<PrometheusTextfileWriter>>()),
+            });
 
         builder.Services.AddSingleton<IDetector>(sp =>
             new RdpSecurityLogDetector(
@@ -447,6 +458,11 @@ internal static class Program
           winguard-svc --install    Register and start the Windows service.
           winguard-svc --uninstall  Stop and delete the Windows service.
           winguard-svc --clear-firewall  Delete all WinGuard_Block_* firewall rules.
+
+        Break-glass (work without the service; need an elevated console):
+          winguard-svc --disarm [--minutes N]  Remove all rules and stop enforcing for N minutes
+                                               (default 60, at most 1440). Ends by itself.
+          winguard-svc --rearm                 End a disarm early.
 
         Management (talk to the running service; needs an elevated console):
           winguard-svc --status    Show service status and per-engine counters.
