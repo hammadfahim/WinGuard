@@ -160,12 +160,12 @@ internal static class CliCommands
         }
     }
 
-    /// <summary>Manually lifts a ban: <c>--unban &lt;ip&gt;</c>.</summary>
+    /// <summary>Manually lifts a ban: <c>--unban &lt;ip|prefix&gt;</c>.</summary>
     public static async Task<int> UnbanAsync(string[] args)
     {
-        if (args.Length < 2 || !IsValidIp(args[1]))
+        if (args.Length < 2 || !Core.Engine.IpMatcher.TryNormalizeBanTarget(args[1], out _))
         {
-            Console.Error.WriteLine("Usage: winguard-svc --unban <ip>");
+            Console.Error.WriteLine("Usage: winguard-svc --unban <ip|prefix>");
             return 2;
         }
 

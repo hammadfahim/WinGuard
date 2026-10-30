@@ -122,7 +122,9 @@ public abstract class EventLogDetectorBase : IDetector
     /// Reads events from <see cref="BacklogWindow"/> ago up to now and pushes them through the
     /// normal <see cref="Parse"/> path, so failures logged while the service was stopped still
     /// count towards a ban. Honors the live enabled setting per record and stops early once
-    /// <see cref="MaxReplayRecords"/> records were seen.
+    /// <see cref="MaxReplayRecords"/> records were seen. The window can reach back into the
+    /// previous run: the engine drops what that run already processed (see
+    /// <see cref="FailedLogin.IsReplayed"/>).
     /// </summary>
     private async Task ReplayBacklogAsync(TimeSpan backlog, CancellationToken ct)
     {
@@ -165,9 +167,13 @@ public abstract class EventLogDetectorBase : IDetector
                     }
 
                     var failed = Parse(record);
-                    if (failed is not null && _sink is { } sink && sink.Writer.TryWrite(failed))
+                    if (failed is not null)
                     {
-                        replayed++;
+                        failed.IsReplayed = true;
+                        if (_sink is { } sink && sink.Writer.TryWrite(failed))
+                        {
+                            replayed++;
+                        }
                     }
                 }
                 catch (Exception ex)

@@ -106,6 +106,14 @@ public sealed class WinGuardSettings
         BanTiers ??= [];
         Notifications.Smtp ??= new();
 
+        foreach (var source in CustomSources)
+        {
+            if (source?.Regex is not null)
+            {
+                source.Regex = CustomSourceRecipes.UpgradeRegex(source.Regex);
+            }
+        }
+
         // Backlog replay: negative values make no sense; clamp to a sane upper bound (24 h).
         EventBacklogReplayMinutes = Math.Clamp(EventBacklogReplayMinutes < 0 ? 0 : EventBacklogReplayMinutes, 0, 1440);
 

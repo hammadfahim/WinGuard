@@ -32,6 +32,12 @@ public sealed class FailedLogin
     /// </summary>
     public bool IsExcluded { get; set; }
 
+    /// <summary>
+    /// True when this failure comes from the start-up backlog replay rather than a live event. The
+    /// engine counts it only if it happened after the previous run stopped processing events.
+    /// </summary>
+    public bool IsReplayed { get; set; }
+
     /// <summary>The matched raw log/event text, for diagnostics. Not persisted.</summary>
     public string RawLog { get; set; } = string.Empty;
 }

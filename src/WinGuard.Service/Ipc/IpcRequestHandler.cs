@@ -196,8 +196,9 @@ public sealed partial class IpcRequestHandler
 
     private async Task<IpcResponse> UnblockAsync(IpcRequest request, CancellationToken ct)
     {
+        // A ban can be a range: IPv6 aggregate bans are stored under their prefix.
         var parameters = Params<UnblockParams>(request);
-        if (!IpMatcher.TryNormalize(parameters.Ip, out var ip))
+        if (!IpMatcher.TryNormalizeBanTarget(parameters.Ip, out var ip))
         {
             return IpcResponse.Fail(request.Id, "Invalid IP address.");
         }
@@ -217,8 +218,11 @@ public sealed partial class IpcRequestHandler
 
     private async Task<IpcResponse> BlockNowAsync(IpcRequest request, CancellationToken ct)
     {
+        // A range is accepted only when it is already banned (promoting an IPv6 aggregate ban to
+        // permanent); blocking a new subnet is what the blacklist is for.
         var parameters = Params<BlockNowParams>(request);
-        if (!IpMatcher.TryNormalize(parameters.Ip, out var ip))
+        if (!IpMatcher.TryNormalizeBanTarget(parameters.Ip, out var ip)
+            || (ip.Contains('/') && await _store.GetBanAsync(ip, ct).ConfigureAwait(false) is null))
         {
             return IpcResponse.Fail(request.Id, "Invalid IP address.");
         }

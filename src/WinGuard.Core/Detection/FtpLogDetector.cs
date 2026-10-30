@@ -45,10 +45,6 @@ public sealed class FtpLogDetector : IDetector
         @"^\s*\(\d+\)\s+(?<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    private static readonly Regex ParenthesizedRegex = new(
-        @"\((?<value>[^()]*)\)",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
     private readonly Func<WinGuardSettings> _settingsAccessor;
     private readonly ILogger<FtpLogDetector> _logger;
     private readonly TimeProvider _timeProvider;
@@ -164,11 +160,13 @@ public sealed class FtpLogDetector : IDetector
     }
 
     /// <summary>
-    /// Parses one FileZilla Server log line. The session IP is the last <c>(address)</c> token
-    /// before <c>'&gt;'</c>; the user is an optional token immediately before that address, which
-    /// is either <c>(name)</c> (e.g. <c>(not logged in)</c>, which maps to a null user) or a bare
-    /// name after login (e.g. <c>admin (ip)&gt;</c>). Only lines containing
-    /// <c>"530 Login or password incorrect!"</c> match.
+    /// Parses one FileZilla Server log line. The session IP is the first <c>(address)&gt;</c> marker
+    /// and the 530 response must follow it directly: FileZilla also logs client commands verbatim,
+    /// so anything later on the line may be typed by the client, and a line of any other shape is
+    /// dropped instead of being attributed to an address the client chose. The user is an optional
+    /// token immediately before that address, which is either <c>(name)</c> (e.g.
+    /// <c>(not logged in)</c>, which maps to a null user) or a bare name after login (e.g.
+    /// <c>admin (ip)&gt;</c>). Only lines containing <c>"530 Login or password incorrect!"</c> match.
     /// </summary>
     /// <param name="line">A single FileZilla log line.</param>
     /// <param name="failed">The parsed failure when the method returns <see langword="true"/>.</param>
@@ -193,6 +191,11 @@ public sealed class FtpLogDetector : IDetector
         var match = FileZillaLoginRegex.Match(trimmed);
         if (match.Success && match.Index < responseIndex)
         {
+            if (!string.IsNullOrWhiteSpace(trimmed[(match.Index + match.Length)..responseIndex]))
+            {
+                return false;
+            }
+
             rawIp = match.Groups["ip"].Value;
             var parenUser = match.Groups["parenUser"].Success ? match.Groups["parenUser"].Value : null;
             var bareUser = match.Groups["bareUser"].Success ? match.Groups["bareUser"].Value : null;
@@ -200,7 +203,7 @@ public sealed class FtpLogDetector : IDetector
         }
         else
         {
-            rawIp = LastParenthesizedIp(trimmed) ?? FirstIpToken(trimmed[..responseIndex]);
+            rawIp = FirstIpToken(trimmed[..responseIndex]);
         }
 
         if (rawIp is null || !IpMatcher.TryNormalize(rawIp, out var ip))
@@ -434,23 +437,6 @@ public sealed class FtpLogDetector : IDetector
 
         var fields = header.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         return fields.Length == 0 ? DefaultW3cFields : fields;
-    }
-
-    private static string? LastParenthesizedIp(string line)
-    {
-        var arrow = line.IndexOf('>');
-        var region = arrow >= 0 ? line[..arrow] : line;
-        string? found = null;
-        foreach (Match match in ParenthesizedRegex.Matches(region))
-        {
-            var candidate = match.Groups["value"].Value;
-            if (IpMatcher.TryNormalize(candidate, out _))
-            {
-                found = candidate;
-            }
-        }
-
-        return found;
     }
 
     /// <summary>

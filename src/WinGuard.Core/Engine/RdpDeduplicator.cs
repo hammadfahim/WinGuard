@@ -12,6 +12,18 @@ internal sealed class RdpDeduplicator
     public static readonly TimeSpan Window = TimeSpan.FromSeconds(2);
 
     private readonly Dictionary<string, List<Entry>> _recent = new(StringComparer.Ordinal);
+    private readonly bool _trimByEventTime;
+
+    /// <summary>Creates the de-duplicator.</summary>
+    /// <param name="trimByEventTime">
+    /// Whether an event drops the entries too far from its own timestamp. That only works for live
+    /// events, which arrive in time order. Backlog replay reads the two channels independently, so
+    /// a replayed 4625 and its 140 can be thousands of events apart and must both stay findable.
+    /// </param>
+    public RdpDeduplicator(bool trimByEventTime = true)
+    {
+        _trimByEventTime = trimByEventTime;
+    }
 
     /// <summary>
     /// True when the event is the second half of an attempt already seen through the other detector
@@ -75,7 +87,11 @@ internal sealed class RdpDeduplicator
         }
 
         // Entries older than 2x the window can never pair again.
-        recent.RemoveAll(e => Math.Abs((e.TimestampUtc - timestampUtc).TotalSeconds) > Window.TotalSeconds * 2);
+        if (_trimByEventTime)
+        {
+            recent.RemoveAll(e => Math.Abs((e.TimestampUtc - timestampUtc).TotalSeconds) > Window.TotalSeconds * 2);
+        }
+
         return recent;
     }
 

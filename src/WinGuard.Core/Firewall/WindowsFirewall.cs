@@ -445,39 +445,9 @@ public sealed class WindowsFirewall : IFirewall
         return IpMatcher.TryNormalize(text, out normalized);
     }
 
-    /// <summary>
-    /// Normalizes a block/unblock target: a single host IP (canonical bare form) or a canonical
-    /// CIDR range that passes the minimum-prefix guard (<see cref="IpMatcher.IsBannableRange"/>).
-    /// A /32 or /128 "range" is folded to the bare host so the same address always has one identity.
-    /// Everything else — firewall tokens, hostnames, over-broad prefixes — is rejected.
-    /// </summary>
-    private static bool TryNormalizeTarget(string? value, out string target)
-    {
-        if (IpMatcher.TryNormalize(value, out var host))
-        {
-            target = host;
-            return true;
-        }
-
-        if (IpMatcher.TryNormalizeRange(value, out var range) && IpMatcher.IsBannableRange(range))
-        {
-            // Single-host CIDR forms collapse to the bare host identity.
-            var slash = range.IndexOf('/');
-            if (int.TryParse(range[(slash + 1)..], out var prefix)
-                && (prefix == 32 || prefix == 128)
-                && IpMatcher.TryNormalize(range[..slash], out var single))
-            {
-                target = single;
-                return true;
-            }
-
-            target = range;
-            return true;
-        }
-
-        target = string.Empty;
-        return false;
-    }
+    /// <summary>Normalizes a block/unblock target; see <see cref="IpMatcher.TryNormalizeBanTarget"/>.</summary>
+    private static bool TryNormalizeTarget(string? value, out string target) =>
+        IpMatcher.TryNormalizeBanTarget(value, out target);
 
     /// <summary>Converts an IPv4 dotted netmask to its prefix length, e.g. 255.255.255.0 → 24.</summary>
     private static bool TryNetmaskToPrefix(string suffix, out int prefix)

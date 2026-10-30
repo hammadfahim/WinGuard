@@ -150,7 +150,10 @@ permanent ban. `MaxBanDuration` (default 365 days) caps non-permanent tiers.
   so you can validate thresholds on production before enforcing them. Bans recorded in
   report-only become enforced the moment the flag is switched off.
 - **Backlog replay** re-reads the last N minutes (default 30) of the event logs at startup, so
-  failures logged during a service restart or patch reboot still count.
+  failures logged during a service restart or patch reboot still count. Only what happened after
+  the previous run stopped is counted, so a restart never re-counts failures or undoes a manual
+  unban. The very first start replays nothing; after a crash, up to one `HousekeepingInterval` of
+  failures can be counted twice.
 - **Ban history and daily statistics** are append-only: every ban, expiry and manual unban is
   kept in `ban_history`, and per-day counters survive restarts and event pruning — visible in
   the GUI's Statistics view.
@@ -180,8 +183,8 @@ GUI saves them. The GUI exposes all of the below under **Settings** and **Lists*
 | `ClearBansOnStartup` | `false` | If true, flush firewall rules at service start instead of reconciling. |
 | `ProcessInternalIPs` | `false` | Ignore RFC1918/loopback/link-local addresses by default. |
 | `ReportOnly` | `false` | Monitoring mode: record would-be bans, never touch the firewall. Bans recorded while on become enforced when switched off. |
-| `EventBacklogReplayMinutes` | `30` | Event-log history re-read at startup (covers downtime); 0 = off. |
-| `Ipv6AggregatePrefixLength` | `0` (off) | Ban whole IPv6 /N prefixes (e.g. `64`) instead of single addresses. |
+| `EventBacklogReplayMinutes` | `30` | How far back the startup replay looks for failures logged during downtime; 0 = off. |
+| `Ipv6AggregatePrefixLength` | `0` (off) | Ban whole IPv6 /N prefixes (e.g. `64`) instead of single addresses. A prefix holding a whitelisted address stays on per-address bans. |
 | `MaxAddressesPerRule` | `1000` | Firewall addresses batched per rule. |
 | `BlockedPorts` | *empty* | Empty = block all ports (cheapest). Non-empty = block only those ports. |
 | `Notifications` | *off* | Webhook URL, Telegram bot/chat, SMTP relay, rate limit; plus `WriteToWindowsEventLog` (default on) for SIEM/WEF. |
@@ -197,8 +200,10 @@ Conditions inside one rule are **AND**ed; separate rules are **OR**ed. Field nam
 case-insensitive. An event is dropped when any rule matches.
 
 **Lists** accept single IPs and CIDR ranges (`10.0.0.0/8`, `2001:db8::/32`). The whitelist
-always wins over the blacklist and over any pending ban. The server's own addresses and
-loopback are auto-whitelisted at startup to prevent self-lockout.
+always wins over the blacklist and over any pending ban, including inside a range: Windows
+block rules beat allow rules, so a blacklisted range is split into smaller rules around the
+whitelisted addresses, and an IPv6 aggregate ban that comes to overlap the whitelist is lifted.
+The server's own addresses and loopback are auto-whitelisted at startup to prevent self-lockout.
 
 ### Limitations
 
@@ -211,8 +216,9 @@ loopback are auto-whitelisted at startup to prevent self-lockout.
 - **FileZilla Server 1.x support is unverified.** The parser accepts the legacy 0.9.x log
   layout and any line with a `530 Login…` response whose prefix contains the session
   address, but it has only been tested against 0.9.x sample logs.
-- **A blacklisted range is enforced as one firewall range rule** covering the whole subnet;
-  addresses inside it are additionally banned permanently at their first failed login.
+- **A blacklisted range is enforced as one firewall range rule** covering the whole subnet, or as
+  several when it contains whitelisted addresses; addresses inside it are additionally banned
+  permanently at their first failed login.
 - **Backlog replay covers the event-log engines only** and is capped (default: last 30 minutes,
   5000 records per channel). Failures older than that, logged while the service was down, are
   not counted; file-based tailers skip to end-of-file on first sight by design.
@@ -248,7 +254,7 @@ loopback are auto-whitelisted at startup to prevent self-lockout.
 | `--status` | Print service status and per-engine counters (needs an elevated console). |
 | `--list-bans` | Print the active bans as a table. |
 | `--ban <ip> [--permanent] [--duration d.hh:mm:ss] [--note text]` | Manually block an address via the running service. |
-| `--unban <ip>` | Manually lift a ban. |
+| `--unban <ip\|prefix>` | Manually lift a ban, including an IPv6 aggregate ban such as `2001:db8:1:2::/64`. |
 | `--doctor` | Health check: service reachability, prerequisites, data/log folders, firewall COM API; non-zero exit when protection-critical checks fail. |
 
 ## Project layout

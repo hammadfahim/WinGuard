@@ -25,6 +25,9 @@ public sealed class FakeStore : IStore
     /// <summary>Number of times <see cref="InitializeAsync"/> was called.</summary>
     public int InitializeCallCount { get; private set; }
 
+    /// <summary>When true, ban and failed-login writes throw, as a locked or full database would.</summary>
+    public bool FailWrites { get; set; }
+
     /// <summary>Snapshot of stored failed logins (oldest first).</summary>
     public List<FailedLogin> FailedLogins
     {
@@ -55,6 +58,7 @@ public sealed class FakeStore : IStore
 
     public Task AddFailedLoginAsync(FailedLogin failed, CancellationToken ct = default)
     {
+        ThrowIfFailingWrites();
         lock (_gate)
         {
             _failedLogins.Add(Clone(failed));
@@ -162,12 +166,21 @@ public sealed class FakeStore : IStore
 
     public Task UpsertBanAsync(BanEntry ban, CancellationToken ct = default)
     {
+        ThrowIfFailingWrites();
         lock (_gate)
         {
             _bans[ban.IpAddress] = Clone(ban);
         }
 
         return Task.CompletedTask;
+    }
+
+    private void ThrowIfFailingWrites()
+    {
+        if (FailWrites)
+        {
+            throw new IOException("Simulated database failure.");
+        }
     }
 
     public Task RemoveBanAsync(string ip, CancellationToken ct = default)

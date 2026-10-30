@@ -364,7 +364,7 @@ internal static class Program
           winguard-svc --status    Show service status and per-engine counters.
           winguard-svc --list-bans List active bans.
           winguard-svc --ban <ip> [--permanent] [--duration d.hh:mm:ss] [--note text]
-          winguard-svc --unban <ip>
+          winguard-svc --unban <ip|prefix>
           winguard-svc --doctor    Health check: prerequisites, paths, firewall API.
           winguard-svc --help      Show this help.
         """);

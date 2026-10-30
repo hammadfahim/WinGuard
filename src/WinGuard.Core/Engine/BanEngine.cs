@@ -41,6 +41,25 @@ public sealed partial class BanEngine
     // Recent RDP failures per IP for detector-aware 4625/140 de-dup (accessed under _gate).
     private readonly RdpDeduplicator _rdpDedup = new();
 
+    // Replayed events get their own de-dup: see RdpDeduplicator's constructor. It is only needed
+    // while the replay runs, so housekeeping empties it once start-up is long over.
+    private static readonly TimeSpan ReplayDedupLifetime = TimeSpan.FromMinutes(10);
+    private readonly RdpDeduplicator _replayDedup = new(trimByEventTime: false);
+
+    // Everything logged up to this moment was handled by the previous run, so backlog replay must
+    // not count it again. Persisted under this key by housekeeping and on stop. A crash can repeat
+    // at most the events of one housekeeping interval. Until StartAsync sets it, nothing replays.
+    private const string LastAliveSettingKey = "engine_last_alive_utc";
+    private DateTime _replayCutoffUtc = DateTime.MaxValue;
+    private DateTime _startedUtc;
+
+    // Bans the store refused to save: enforced in the firewall anyway, kept here so reconcile does
+    // not lift them as orphans, and saved by housekeeping once the store recovers (under _gate).
+    private readonly Dictionary<string, BanEntry> _unsavedBans = new(StringComparer.Ordinal);
+
+    // Counts failures while the store refuses them (accessed under _gate).
+    private readonly FallbackFailureCounter _fallbackCounts = new();
+
     // Per-IP throttle for "SKIPPED" events so an attack on a banned IP cannot flood the events table.
     private static readonly TimeSpan SkipEventInterval = TimeSpan.FromMinutes(5);
     private readonly Dictionary<string, DateTime> _lastSkipEventUtc = new(StringComparer.Ordinal);
@@ -116,6 +135,7 @@ public sealed partial class BanEngine
 
             // Merge offense counts persisted in the settings blob (survives restarts).
             await LoadPersistedOffenseCountsAsync(ct).ConfigureAwait(false);
+            await LoadReplayCutoffAsync(ct).ConfigureAwait(false);
 
             if (settings.ClearBansOnStartup)
             {
@@ -311,15 +331,19 @@ public sealed partial class BanEngine
         }
     }
 
-    /// <summary>Manually blocks an IP (IPC <c>BlockNow</c>). Throws for invalid or whitelisted IPs.</summary>
+    /// <summary>
+    /// Manually blocks an IP or a range such as an IPv6 aggregate ban being promoted (IPC
+    /// <c>BlockNow</c>). Throws for invalid or whitelisted targets.
+    /// </summary>
     public async Task BanNowAsync(string ip, TimeSpan? duration, bool permanent, string? note, CancellationToken ct = default)
     {
-        if (!IpMatcher.TryNormalize(ip, out var normalized))
+        if (!IpMatcher.TryNormalizeBanTarget(ip, out var normalized))
         {
             throw new ArgumentException($"'{ip}' is not a valid IP address.", nameof(ip));
         }
 
-        if (!IpMatcher.IsBannable(normalized))
+        var isRange = normalized.Contains('/');
+        if (!isRange && !IpMatcher.IsBannable(normalized))
         {
             throw new ArgumentException($"'{normalized}' is not a host address and cannot be blocked.", nameof(ip));
         }
@@ -328,7 +352,7 @@ public sealed partial class BanEngine
         try
         {
             await EnsureListsLoadedCoreAsync(ct).ConfigureAwait(false);
-            if (_matcher.IsWhitelisted(normalized))
+            if (isRange ? _matcher.OverlapsWhitelist(normalized) : _matcher.IsWhitelisted(normalized))
             {
                 throw new InvalidOperationException($"'{normalized}' is whitelisted and will not be blocked.");
             }
@@ -416,10 +440,10 @@ public sealed partial class BanEngine
         }
     }
 
-    /// <summary>Manually unblocks an IP (IPC <c>Unblock</c>). Idempotent; invalid IPs throw.</summary>
+    /// <summary>Manually unblocks an IP or a range ban (IPC <c>Unblock</c>). Idempotent; invalid values throw.</summary>
     public async Task UnbanAsync(string ip, CancellationToken ct = default)
     {
-        if (!IpMatcher.TryNormalize(ip, out var normalized))
+        if (!IpMatcher.TryNormalizeBanTarget(ip, out var normalized))
         {
             throw new ArgumentException($"'{ip}' is not a valid IP address.", nameof(ip));
         }
@@ -427,44 +451,7 @@ public sealed partial class BanEngine
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            try
-            {
-                await _store.RemoveBanAsync(normalized, ct).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Manual unblock: failed to remove ban {Ip} from the store.", normalized);
-            }
-
-            TryFirewall(() => _firewall.Unblock(normalized), "unblock", normalized);
-
-            // Clean slate (review E-M4/S-M7): a manual unban resets escalation and drops
-            // the IP's counter rows, so a re-offense starts at tier 1.
-            _offenses.Remove(normalized);
-            await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
-            try
-            {
-                await _store.ClearFailedLoginsAsync(normalized, ct).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Manual unblock: failed to clear failed logins for {Ip}.", normalized);
-            }
-
-            await AddBanHistoryCoreAsync(new BanHistoryEntry
-            {
-                TimestampUtc = NowUtc(),
-                Action = BanHistoryAction.Unbanned,
-                IpAddress = normalized,
-            }, ct).ConfigureAwait(false);
-
-            await TryAddEventAsync(new LogEvent
-            {
-                TimestampUtc = NowUtc(),
-                Level = LogEventLevel.Warning,
-                IpAddress = normalized,
-                Message = $"MANUAL UNBLOCK {normalized}",
-            }, ct).ConfigureAwait(false);
+            await UnbanCoreAsync(normalized, $"MANUAL UNBLOCK {normalized}", ct).ConfigureAwait(false);
         }
         finally
         {
@@ -541,10 +528,59 @@ public sealed partial class BanEngine
             _logger.LogWarning(ex, "Could not flush daily statistics on stop.");
         }
 
+        await SaveLastAliveAsync(CancellationToken.None).ConfigureAwait(false);
+
         cts.Dispose();
     }
 
     // ---- core algorithm ----
+
+    /// <summary>
+    /// Removes a ban with a clean slate (review E-M4/S-M7): escalation is reset and the IP's counter
+    /// rows are dropped, so a re-offense starts at tier 1. Call under the gate.
+    /// </summary>
+    private async Task UnbanCoreAsync(string normalized, string eventMessage, CancellationToken ct)
+    {
+        _unsavedBans.Remove(normalized);
+        _fallbackCounts.Remove(normalized);
+
+        try
+        {
+            await _store.RemoveBanAsync(normalized, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unblock: failed to remove ban {Ip} from the store.", normalized);
+        }
+
+        TryFirewall(() => _firewall.Unblock(normalized), "unblock", normalized);
+
+        _offenses.Remove(normalized);
+        await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await _store.ClearFailedLoginsAsync(normalized, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unblock: failed to clear failed logins for {Ip}.", normalized);
+        }
+
+        await AddBanHistoryCoreAsync(new BanHistoryEntry
+        {
+            TimestampUtc = NowUtc(),
+            Action = BanHistoryAction.Unbanned,
+            IpAddress = normalized,
+        }, ct).ConfigureAwait(false);
+
+        await TryAddEventAsync(new LogEvent
+        {
+            TimestampUtc = NowUtc(),
+            Level = LogEventLevel.Warning,
+            IpAddress = normalized,
+            Message = eventMessage,
+        }, ct).ConfigureAwait(false);
+    }
 
     private async Task ProcessCoreAsync(FailedLogin failed, CancellationToken ct)
     {
@@ -563,6 +599,14 @@ public sealed partial class BanEngine
 
         failed.IpAddress = ip;
         failed.TimestampUtc = NormalizeUtc(failed.TimestampUtc);
+
+        // Replay exists for what happened while the service was down. Anything older was handled
+        // by the previous run, and counting it again would re-ban an IP an administrator unbanned.
+        if (failed.IsReplayed && failed.TimestampUtc <= _replayCutoffUtc)
+        {
+            _logger.LogDebug("Skipping replayed failure from {Ip}: the previous run already processed it.", ip);
+            return;
+        }
 
         var settings = _settingsAccessor();
         await EnsureListsLoadedCoreAsync(ct).ConfigureAwait(false);
@@ -604,16 +648,22 @@ public sealed partial class BanEngine
             && ip.Contains(':')
             && IpMatcher.TryAggregateIpv6(ip, settings.Ipv6AggregatePrefixLength, out var aggregatedPrefix))
         {
-            if (_matcher.IsWhitelisted(aggregatedPrefix))
+            // A block rule beats every allow rule, so banning a prefix that holds a whitelisted
+            // address (this server's own, for one) would block that address too. Such a prefix
+            // stays on per-address bans.
+            if (_matcher.OverlapsWhitelist(aggregatedPrefix))
             {
-                _logger.LogDebug("Skipping aggregated prefix {Prefix}: it is whitelisted.", aggregatedPrefix);
-                return;
+                _logger.LogDebug("Not aggregating {Ip}: prefix {Prefix} overlaps the whitelist.", ip, aggregatedPrefix);
             }
-
-            _logger.LogDebug("Aggregating IPv6 address {Ip} to prefix {Prefix}.", ip, aggregatedPrefix);
-            ip = aggregatedPrefix;
-            failed.IpAddress = ip;
+            else
+            {
+                _logger.LogDebug("Aggregating IPv6 address {Ip} to prefix {Prefix}.", ip, aggregatedPrefix);
+                ip = aggregatedPrefix;
+                failed.IpAddress = ip;
+            }
         }
+
+        var rdpDedup = failed.IsReplayed ? _replayDedup : _rdpDedup;
 
         // An exclusion rule matched (RDP 4625). It is never counted, but it is remembered so the
         // RdpCoreTS 140 event describing the same attempt is dropped too; when that 140 arrived
@@ -621,7 +671,7 @@ public sealed partial class BanEngine
         if (failed.IsExcluded)
         {
             if (failed.Source == ProtocolSource.Rdp
-                && _rdpDedup.RecordExcluded(ip, failed.Detector, failed.TimestampUtc))
+                && rdpDedup.RecordExcluded(ip, failed.Detector, failed.TimestampUtc))
             {
                 try
                 {
@@ -639,7 +689,7 @@ public sealed partial class BanEngine
 
         // RDP de-dup: merge only cross-detector 4625+140 pairs describing the SAME attempt
         // (PLAN §4.2). Same-detector events within the window are distinct attempts.
-        if (failed.Source == ProtocolSource.Rdp && _rdpDedup.IsDuplicateAndRecord(ip, failed.Detector, failed.TimestampUtc))
+        if (failed.Source == ProtocolSource.Rdp && rdpDedup.IsDuplicateAndRecord(ip, failed.Detector, failed.TimestampUtc))
         {
             _logger.LogDebug("Skipping duplicate RDP failure for {Ip} (detector {Detector}).", ip, failed.Detector);
             return;
@@ -647,7 +697,7 @@ public sealed partial class BanEngine
 
         RecordDetection(failed.Source);
 
-        var current = await SafeGetBanAsync(ip, ct).ConfigureAwait(false);
+        var current = _unsavedBans.GetValueOrDefault(ip) ?? await SafeGetBanAsync(ip, ct).ConfigureAwait(false);
         var now = NowUtc();
 
         // 3. Blacklist -> ensure a permanent ban.
@@ -671,10 +721,10 @@ public sealed partial class BanEngine
                 Note = "blacklist",
             };
 
-            await _store.UpsertBanAsync(permanentBan, ct).ConfigureAwait(false);
+            TryBlock(ip);
+            await SaveBanAsync(permanentBan, ct).ConfigureAwait(false);
             _offenses.Set(ip, offense, now);
             await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
-            TryBlock(ip);
             RecordBanStat(failed.Source);
             await AddBanHistoryCoreAsync(new BanHistoryEntry
             {
@@ -725,7 +775,7 @@ public sealed partial class BanEngine
         }
 
         var since = now - window;
-        var count = await _store.AddFailedLoginAndCountAsync(failed, since, ct).ConfigureAwait(false);
+        var count = await CountFailureAsync(failed, since, ct).ConfigureAwait(false);
 
         // 7. Threshold crossed -> escalate and ban.
         var threshold = Math.Max(1, settings.ThresholdFor(failed.Source));
@@ -752,11 +802,21 @@ public sealed partial class BanEngine
             IsPermanent = false,
         };
 
-        await _store.UpsertBanAsync(ban, ct).ConfigureAwait(false);
+        // Enforce first: a database problem must never leave an attacker unblocked.
+        TryBlock(ip);
+        await SaveBanAsync(ban, ct).ConfigureAwait(false);
         _offenses.Set(ip, nextOffense, now);
         await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
-        TryBlock(ip);
-        await _store.ClearFailedLoginsAsync(ip, ct).ConfigureAwait(false);
+        _fallbackCounts.Remove(ip);
+        try
+        {
+            await _store.ClearFailedLoginsAsync(ip, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Could not clear the failed logins of banned IP {Ip}.", ip);
+        }
+
         RecordBanStat(failed.Source);
         await AddBanHistoryCoreAsync(new BanHistoryEntry
         {
@@ -778,6 +838,51 @@ public sealed partial class BanEngine
             IpAddress = ip,
             Message = $"BLOCKED {ip} for {FormatDuration(duration)} (offense #{nextOffense}){reportSuffix}",
         }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Records one failure and returns the rolling count. A failure the store refuses is kept in
+    /// memory and counts together with the stored ones, so an outage in the middle of an attack
+    /// neither resets the count nor, once it is over, loses what was seen meanwhile.
+    /// </summary>
+    private async Task<int> CountFailureAsync(FailedLogin failed, DateTime since, CancellationToken ct)
+    {
+        var ip = failed.IpAddress;
+        try
+        {
+            var stored = await _store.AddFailedLoginAndCountAsync(failed, since, ct).ConfigureAwait(false);
+            return stored + _fallbackCounts.Count(ip, failed.Source, since);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Could not record a failed login from {Ip}; counting it in memory.", ip);
+            _fallbackCounts.Record(ip, failed.Source, failed.TimestampUtc);
+        }
+
+        var inMemory = _fallbackCounts.Count(ip, failed.Source, since);
+        try
+        {
+            return inMemory + await _store.CountFailedLoginsAsync(ip, since, failed.Source, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogDebug(ex, "Could not read the stored failures of {Ip} either.", ip);
+            return inMemory;
+        }
+    }
+
+    /// <summary>Saves a ban already enforced in the firewall, keeping it in memory when the store refuses it.</summary>
+    private async Task SaveBanAsync(BanEntry ban, CancellationToken ct)
+    {
+        try
+        {
+            await _store.UpsertBanAsync(ban, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _unsavedBans[ban.IpAddress] = ban;
+            _logger.LogError(ex, "Could not save the ban of {Ip}; it stays enforced and will be saved when the store recovers.", ban.IpAddress);
+        }
     }
 
     // ---- detection statistics ----
@@ -929,12 +1034,14 @@ public sealed partial class BanEngine
         _listsLoaded = true;
 
         // Remember the blacklisted CIDR entries in canonical form: housekeeping enforces them as
-        // whole-subnet firewall range rules instead of banning each address on first contact.
+        // whole-subnet firewall range rules instead of banning each address on first contact. A
+        // block rule beats every allow rule, so a range is cut around the addresses the whitelist
+        // (which holds this server's own addresses too) must keep reachable.
         _blacklistedRanges = blacklist
             .Where(entry => !IpMatcher.TryNormalize(entry, out _))
             .Select(entry => IpMatcher.TryNormalizeRange(entry, out var canonical) ? canonical : null)
             .Where(canonical => canonical is not null && IpMatcher.IsBannableRange(canonical))
-            .Select(canonical => canonical!)
+            .SelectMany(canonical => _matcher.SubtractWhitelist(canonical!))
             .Distinct(StringComparer.Ordinal)
             .ToList();
     }

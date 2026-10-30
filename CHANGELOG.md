@@ -3,6 +3,28 @@
 All notable changes to WinGuard are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project versions by tag.
 
+## [Unreleased]
+
+### Fixed
+
+- **The whitelist now wins over range blocks.** Windows block rules beat allow rules, so a
+  blacklisted range is split around whitelisted addresses (including the server's own) instead of
+  blocking them, and an IPv6 prefix holding a whitelisted address stays on per-address bans. An
+  aggregate ban that comes to overlap the whitelist is lifted by housekeeping.
+- **Backlog replay no longer re-counts.** Failures the previous run already processed are skipped
+  and replayed 4625/140 pairs merge, so a restart cannot ban a user for failures counted before it
+  or undo a manual unban. The engine saves its position during housekeeping and on stop. The first
+  start after this upgrade replays nothing, because no position has been saved yet.
+- **IPv6 aggregate bans can be lifted early**: Unblock, Unblock & Whitelist and Promote work on
+  them, as does `--unban <prefix>`, and whitelisting a covering range lifts them.
+- **Attacker-chosen user names can no longer pick the banned address.** The Windows OpenSSH recipe
+  takes the address from the end of the line; sources saved from the old recipe are upgraded when
+  loaded. A FileZilla line counts only when the 530 response directly follows the first session
+  marker, so a client command echoing "530 Login" is ignored.
+- **A database failure no longer stops blocking.** The firewall block now comes first. While the
+  store refuses writes, failures are counted in memory and unsaved bans stay enforced until
+  housekeeping can save them.
+
 ## [0.2.0] — 2026-10-07
 
 ### Added

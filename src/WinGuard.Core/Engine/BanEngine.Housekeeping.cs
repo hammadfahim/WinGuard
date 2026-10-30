@@ -66,10 +66,99 @@ public sealed partial class BanEngine
         }
     }
 
+    /// <summary>Restores the replay cutoff. Without a saved one nothing is replayed: the rows it would cover may already be counted.</summary>
+    private async Task LoadReplayCutoffAsync(CancellationToken ct)
+    {
+        _startedUtc = NowUtc();
+        _replayCutoffUtc = _startedUtc;
+        try
+        {
+            var all = await _store.GetAllSettingsAsync(ct).ConfigureAwait(false);
+            if (all.TryGetValue(LastAliveSettingKey, out var text)
+                && DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var lastAlive)
+                && lastAlive < _startedUtc)
+            {
+                _replayCutoffUtc = lastAlive;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not read when the service last ran; skipping the backlog replay.");
+        }
+    }
+
+    /// <summary>Records that every event logged up to now has been handled, for the next start's replay.</summary>
+    private async Task SaveLastAliveAsync(CancellationToken ct)
+    {
+        try
+        {
+            await _store.SetSettingAsync(
+                LastAliveSettingKey,
+                NowUtc().ToString("o", CultureInfo.InvariantCulture),
+                ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Could not save the replay position; the next backlog replay may repeat events.");
+        }
+    }
+
+    /// <summary>Saves bans the store refused earlier and lifts the ones that have run out meanwhile.</summary>
+    private async Task RetryUnsavedBansAsync(DateTime now, CancellationToken ct)
+    {
+        var storeDown = false;
+        foreach (var ban in _unsavedBans.Values.ToList())
+        {
+            if (!ban.IsPermanent && ban.ExpiresUtc <= now)
+            {
+                _unsavedBans.Remove(ban.IpAddress);
+                TryFirewall(() => _firewall.Unblock(ban.IpAddress), "unblock", ban.IpAddress);
+                _offenses.Touch(ban.IpAddress, now);
+                continue;
+            }
+
+            if (storeDown)
+            {
+                continue;
+            }
+
+            try
+            {
+                await _store.UpsertBanAsync(ban, ct).ConfigureAwait(false);
+                _unsavedBans.Remove(ban.IpAddress);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                storeDown = true;
+                _logger.LogWarning(ex, "Still cannot save {Count} ban(s); they stay enforced.", _unsavedBans.Count);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Lifts range bans that hold a whitelisted address, however they got that way: a whitelist entry
+    /// added later, a server address that changed, or a ban from a version without this check.
+    /// </summary>
+    private async Task LiftWhitelistedRangeBansAsync(IReadOnlyList<BanEntry> activeBans, CancellationToken ct)
+    {
+        foreach (var ban in activeBans)
+        {
+            if (ban.IpAddress.Contains('/') && _matcher.OverlapsWhitelist(ban.IpAddress))
+            {
+                _logger.LogWarning("Lifting range ban {Range}: it overlaps the whitelist.", ban.IpAddress);
+                await UnbanCoreAsync(ban.IpAddress, $"UNBLOCKED {ban.IpAddress} (overlaps the whitelist)", ct).ConfigureAwait(false);
+            }
+        }
+    }
+
     private async Task HousekeepCoreAsync(bool forceReconcile, CancellationToken ct)
     {
         var settings = _settingsAccessor();
         var now = NowUtc();
+
+        _fallbackCounts.Trim(now - settings.ExpireTime);
+        await RetryUnsavedBansAsync(now, ct).ConfigureAwait(false);
+
         var dueBans = await _store.GetDueBansAsync(now, ct).ConfigureAwait(false);
 
         // Expire due bans (the engine's clock is authoritative; the store must not pre-filter).
@@ -149,12 +238,17 @@ public sealed partial class BanEngine
 
         // Trim the in-memory RDP de-dup window.
         _rdpDedup.Trim(now);
+        if (now - _startedUtc > ReplayDedupLifetime)
+        {
+            _replayDedup.Clear();
+        }
 
         // Prune stale offense counts (review E-M2): no active ban and no offense within
         // ExpireTime x 4; rewrite the persisted blob when anything was removed.
+        IReadOnlyList<BanEntry>? activeForPrune = null;
         try
         {
-            var activeForPrune = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
+            activeForPrune = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
             var activeIps = new HashSet<string>(activeForPrune.Select(b => b.IpAddress), StringComparer.Ordinal);
             var offenseCutoff = now - TimeSpan.FromTicks(settings.ExpireTime.Ticks * 4);
             var removed = _offenses.PruneStale(activeIps, offenseCutoff);
@@ -170,8 +264,14 @@ public sealed partial class BanEngine
 
         await ReloadListsCoreAsync(ct).ConfigureAwait(false);
 
+        if (activeForPrune is not null)
+        {
+            await LiftWhitelistedRangeBansAsync(activeForPrune, ct).ConfigureAwait(false);
+        }
+
         // Persist the buffered per-day statistics deltas.
         await FlushDailyStatsAsync(ct).ConfigureAwait(false);
+        await SaveLastAliveAsync(ct).ConfigureAwait(false);
 
         // Expiry above already unblocked what is due; the full firewall comparison is only a
         // self-heal against outside changes, so the timer loop runs it at most once a minute.
@@ -191,11 +291,14 @@ public sealed partial class BanEngine
             return;
         }
 
-        IReadOnlyList<BanEntry> activeBans;
+        List<BanEntry> activeBans;
         IReadOnlyList<string> blocked;
         try
         {
-            activeBans = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
+            // Bans the store has not taken yet are enforced too: they are not orphans.
+            activeBans = (await _store.GetActiveBansAsync(ct).ConfigureAwait(false))
+                .Concat(_unsavedBans.Values)
+                .ToList();
             blocked = _firewall.ListBlocked();
         }
         catch (Exception ex)

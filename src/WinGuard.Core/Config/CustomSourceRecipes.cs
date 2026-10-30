@@ -31,9 +31,16 @@ public static class CustomSourceRecipes
     {
         Name = "Windows OpenSSH (sshd)",
         PathGlob = @"C:\ProgramData\ssh\logs\sshd.log",
-        Regex = @"Failed password for (invalid user )?(?<username>\S+) from (?<ipaddress>[0-9a-fA-F:.]+) port \d+",
+        // sshd logs the user name verbatim and a client can put spaces in it, so a name like
+        // "x from 198.51.100.9 port 1" fakes the address part. Only the end of the line is
+        // written by sshd alone, so the address is taken from there.
+        Regex = @"Failed password for (invalid user )?(?<username>.*) from (?<ipaddress>[0-9a-fA-F:.]+) port \d+(?: ssh2)?\s*$",
         Description = "Failed password logins to the built-in Windows OpenSSH server (sshd).",
     };
+
+    // The OpenSSH recipe before it was anchored; settings saved from it hold a copy of this text.
+    private const string UnanchoredOpenSshRegex =
+        @"Failed password for (invalid user )?(?<username>\S+) from (?<ipaddress>[0-9a-fA-F:.]+) port \d+";
 
     /// <summary>hMailServer: SMTP/IMAP/POP failed authentication.</summary>
     public static readonly CustomSourceRecipe HMailServer = new()
@@ -70,4 +77,11 @@ public static class CustomSourceRecipes
         IisHttpAuth,
         Vnc,
     ];
+
+    /// <summary>
+    /// Replaces a regex copied from a recipe version with a known flaw by the current one. Recipes
+    /// are copied into the settings, so fixing the recipe alone would not reach existing installs.
+    /// </summary>
+    public static string UpgradeRegex(string regex) =>
+        regex == UnanchoredOpenSshRegex ? WindowsOpenSsh.Regex : regex;
 }

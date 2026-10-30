@@ -167,6 +167,41 @@ public sealed class IpMatcher
     }
 
     /// <summary>
+    /// Normalizes a ban target: a single host IP (bare form) or a canonical CIDR range that passes
+    /// <see cref="IsBannableRange"/>. A /32 or /128 "range" folds to the bare host so the same
+    /// address always has one identity. Firewall tokens, hostnames and over-broad prefixes are rejected.
+    /// </summary>
+    /// <param name="value">The raw host or CIDR value.</param>
+    /// <param name="target">The normalized target when the method returns <see langword="true"/>.</param>
+    public static bool TryNormalizeBanTarget(string? value, out string target)
+    {
+        if (TryNormalize(value, out var host))
+        {
+            target = host;
+            return true;
+        }
+
+        if (TryNormalizeRange(value, out var range) && IsBannableRange(range))
+        {
+            // Single-host CIDR forms collapse to the bare host identity.
+            var slash = range.IndexOf('/');
+            if (int.TryParse(range[(slash + 1)..], NumberStyles.None, CultureInfo.InvariantCulture, out var prefix)
+                && (prefix == 32 || prefix == 128)
+                && TryNormalize(range[..slash], out var single))
+            {
+                target = single;
+                return true;
+            }
+
+            target = range;
+            return true;
+        }
+
+        target = string.Empty;
+        return false;
+    }
+
+    /// <summary>
     /// Aggregates an IPv6 host address to its /N network prefix in canonical form
     /// (<c>2001:db8:1:2:3:4:5:6</c> with prefix 64 → <c>2001:db8:1:2::/64</c>). IPv4 inputs return
     /// <see langword="false"/> (IPv4 aggregation is not supported; attackers do not rotate /24s the
@@ -385,6 +420,55 @@ public sealed class IpMatcher
 
     /// <summary>True when <paramref name="normalizedIp"/> falls inside any blacklist entry.</summary>
     public bool IsBlacklisted(string normalizedIp) => Matches(_blacklist, normalizedIp);
+
+    /// <summary>
+    /// True when any address of <paramref name="normalizedRange"/> is whitelisted. A firewall block
+    /// rule beats every allow rule, so a range for which this is true would block a whitelisted address.
+    /// </summary>
+    /// <param name="normalizedRange">A CIDR range (or bare IP).</param>
+    public bool OverlapsWhitelist(string normalizedRange) =>
+        TryParseCidr(normalizedRange, out var range) && _whitelist.Any(entry => Overlap(entry, range));
+
+    /// <summary>
+    /// Splits <paramref name="normalizedRange"/> into the smallest set of ban targets that covers
+    /// the range except its whitelisted addresses: the range itself when nothing in it is
+    /// whitelisted, nothing when all of it is. Every target has a longer prefix than the range, so
+    /// it still satisfies <see cref="IsBannableRange"/>, and single addresses come back bare.
+    /// </summary>
+    /// <param name="normalizedRange">A canonical CIDR range.</param>
+    public IReadOnlyList<string> SubtractWhitelist(string normalizedRange)
+    {
+        var targets = new List<string>();
+        if (TryParseCidr(normalizedRange, out var range))
+        {
+            Subtract(range, _whitelist.Where(entry => Overlap(entry, range)).ToList(), targets);
+        }
+
+        return targets;
+    }
+
+    private static void Subtract(IPNetwork network, List<IPNetwork> holes, List<string> targets)
+    {
+        if (holes.Any(hole => hole.PrefixLength <= network.PrefixLength && hole.Contains(network.BaseAddress)))
+        {
+            return;
+        }
+
+        if (!holes.Any(hole => network.Contains(hole.BaseAddress)))
+        {
+            targets.Add(TryNormalizeBanTarget(network.ToString(), out var target) ? target : network.ToString().ToLowerInvariant());
+            return;
+        }
+
+        // Halve the network and keep going on the side(s) that still hold a whitelisted address.
+        var prefix = network.PrefixLength + 1;
+        var upper = network.BaseAddress.GetAddressBytes();
+        upper[network.PrefixLength / 8] |= (byte)(0x80 >> (network.PrefixLength % 8));
+        Subtract(new IPNetwork(network.BaseAddress, prefix), holes, targets);
+        Subtract(new IPNetwork(new IPAddress(upper), prefix), holes, targets);
+    }
+
+    private static bool Overlap(IPNetwork a, IPNetwork b) => a.Contains(b.BaseAddress) || b.Contains(a.BaseAddress);
 
     private static bool Matches(List<IPNetwork> networks, string ip)
     {
