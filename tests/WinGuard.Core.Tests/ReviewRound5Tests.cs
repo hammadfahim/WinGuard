@@ -463,6 +463,75 @@ public sealed class ReviewRound5Tests
         Assert.Equal("64:ff9b::808:808", Assert.Single(h.Firewall.BlockCalls));
     }
 
+    // ---------- report-only ----------
+
+    [Fact]
+    public async Task Every_ban_message_says_when_nothing_was_enforced()
+    {
+        await using var h = await EngineHarness.StartAsync(
+            T0,
+            s => s.ReportOnly = true,
+            seed: store => store.AddToListAsync(ListKind.Blacklist, "203.0.113.70"));
+
+        await h.ProcessAsync(h.Fail("203.0.113.70", NonRdp));
+        await h.Engine.BanNowAsync("203.0.113.71", null, permanent: true, null);
+        await h.Engine.BanNowAsync("203.0.113.72", TimeSpan.FromHours(1), permanent: false, null);
+        await SendThresholdAsync(h);
+
+        var messages = h.Store.Events
+            .Select(e => e.Message)
+            .Where(m => m.StartsWith("BLOCKED", StringComparison.Ordinal) || m.StartsWith("MANUAL BLOCK", StringComparison.Ordinal))
+            .ToList();
+        Assert.Equal(4, messages.Count);
+        Assert.All(messages, message => Assert.EndsWith("(report-only: firewall unchanged)", message));
+        AssertFirewallUntouched(h);
+    }
+
+    [Fact]
+    public async Task Ban_messages_mention_report_only_only_in_report_only_mode()
+    {
+        await using var h = await EngineHarness.StartAsync(
+            T0,
+            seed: store => store.AddToListAsync(ListKind.Blacklist, "203.0.113.70"));
+
+        await h.ProcessAsync(h.Fail("203.0.113.70", NonRdp));
+        await h.Engine.BanNowAsync("203.0.113.71", null, permanent: true, null);
+        await h.Engine.UnbanAsync("203.0.113.71");
+
+        Assert.DoesNotContain(h.Store.Events, e => e.Message.Contains("report-only", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task In_report_only_mode_expiry_and_unban_leave_the_firewall_alone_and_say_so()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, s => s.ReportOnly = true);
+        await SendThresholdAsync(h);
+        await h.Engine.BanNowAsync("203.0.113.71", null, permanent: true, null);
+
+        await ExpireAsync(h, TimeSpan.FromHours(25));
+        await h.Engine.UnbanAsync("203.0.113.71");
+
+        AssertFirewallUntouched(h);
+        Assert.Contains(h.Store.Events, e => e.Message == $"UNBANNED {Attacker} (report-only: firewall unchanged)");
+        Assert.Contains(h.Store.Events, e => e.Message == "MANUAL UNBLOCK 203.0.113.71 (report-only: firewall unchanged)");
+    }
+
+    [Fact]
+    public async Task A_rule_from_before_report_only_outlives_its_ban_until_the_mode_is_switched_off()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        await SendThresholdAsync(h);
+        Assert.Contains(Attacker, h.Firewall.Blocked);
+
+        h.Settings.ReportOnly = true;
+        await ExpireAsync(h, TimeSpan.FromHours(25));
+        Assert.Contains(Attacker, h.Firewall.Blocked);
+
+        h.Settings.ReportOnly = false;
+        await h.Engine.HousekeepOnceAsync();
+        Assert.DoesNotContain(Attacker, h.Firewall.Blocked);
+    }
+
     // ---------- offense tracker ----------
 
     [Fact]

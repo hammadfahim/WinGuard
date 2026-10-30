@@ -102,7 +102,7 @@ public sealed partial class BanEngine
             if (!ban.IsPermanent && ban.ExpiresUtc <= now)
             {
                 _unsavedBans.Remove(ban.IpAddress);
-                TryFirewall(() => _firewall.Unblock(ban.IpAddress), "unblock", ban.IpAddress);
+                TryUnblock(ban.IpAddress);
                 _offenses.Touch(ban.IpAddress, now);
                 continue;
             }
@@ -159,7 +159,7 @@ public sealed partial class BanEngine
                 continue;
             }
 
-            TryFirewall(() => _firewall.Unblock(ban.IpAddress), "unblock", ban.IpAddress);
+            TryUnblock(ban.IpAddress);
 
             try
             {
@@ -194,7 +194,7 @@ public sealed partial class BanEngine
                 Level = LogEventLevel.Info,
                 Source = ban.Source,
                 IpAddress = ban.IpAddress,
-                Message = $"UNBANNED {ban.IpAddress}",
+                Message = $"UNBANNED {ban.IpAddress}{ReportSuffix()}",
             }, ct).ConfigureAwait(false);
         }
 

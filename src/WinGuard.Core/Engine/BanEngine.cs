@@ -176,14 +176,13 @@ public sealed partial class BanEngine
                 _offenses.Clear();
                 _rdpDedup.Clear();
                 await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
-                await TryAddEventAsync(null, null, "Cleared bans on startup (ClearBansOnStartup).", ct).ConfigureAwait(false);
+                await TryAddEventAsync(null, null, $"Cleared bans on startup (ClearBansOnStartup).{ReportSuffix()}", ct).ConfigureAwait(false);
             }
             else if (settings.ReportOnly)
             {
-                // Monitoring mode: never enforce, but keep the database the source of truth. Any
-                // rules left over from before the flag was set are lifted by expiry/unban, and
-                // everything recorded becomes enforced the moment report-only is switched off
-                // (the reconcile pass re-blocks every active ban).
+                // Monitoring mode: never touch the firewall, but keep the database the source of
+                // truth. Rules left over from before the flag was set stay until it is switched off;
+                // that same reconcile pass lifts them and re-blocks every active ban.
                 _logger.LogInformation("BanEngine started in report-only mode: failures are counted and recorded, but the firewall is not modified.");
                 await TryAddEventAsync(null, null, "Started in report-only mode: bans are recorded but NOT enforced in the firewall.", ct).ConfigureAwait(false);
             }
@@ -441,8 +440,8 @@ public sealed partial class BanEngine
             }, ct).ConfigureAwait(false);
 
             var message = isPermanent
-                ? $"MANUAL BLOCK {normalized} (permanent)"
-                : $"MANUAL BLOCK {normalized} for {FormatDuration(effectiveDuration!.Value)} (offense #{offense})";
+                ? $"MANUAL BLOCK {normalized} (permanent){ReportSuffix()}"
+                : $"MANUAL BLOCK {normalized} for {FormatDuration(effectiveDuration!.Value)} (offense #{offense}){ReportSuffix()}";
             await TryAddEventAsync(new LogEvent
             {
                 TimestampUtc = now,
@@ -583,7 +582,7 @@ public sealed partial class BanEngine
             _logger.LogError(ex, "Unblock: failed to remove ban {Ip} from the store.", normalized);
         }
 
-        TryFirewall(() => _firewall.Unblock(normalized), "unblock", normalized);
+        TryUnblock(normalized);
 
         _offenses.Remove(normalized);
         await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
@@ -608,7 +607,7 @@ public sealed partial class BanEngine
             TimestampUtc = NowUtc(),
             Level = LogEventLevel.Warning,
             IpAddress = normalized,
-            Message = eventMessage,
+            Message = eventMessage + ReportSuffix(),
         }, ct).ConfigureAwait(false);
     }
 
@@ -772,7 +771,7 @@ public sealed partial class BanEngine
                 Level = LogEventLevel.Warning,
                 Source = failed.Source,
                 IpAddress = ip,
-                Message = $"BLOCKED {ip} for permanent (offense #{offense})",
+                Message = $"BLOCKED {ip} for permanent (offense #{offense}){ReportSuffix()}",
             }, ct).ConfigureAwait(false);
             return;
         }
@@ -858,7 +857,7 @@ public sealed partial class BanEngine
             Duration = duration,
         }, ct).ConfigureAwait(false);
 
-        var reportSuffix = settings.ReportOnly ? " (report-only: firewall unchanged)" : string.Empty;
+        var reportSuffix = ReportSuffix();
         _logger.LogWarning("Blocked {Ip} for {Duration} (offense #{Offense}).{Suffix}", ip, duration, nextOffense, reportSuffix);
         await TryAddEventAsync(new LogEvent
         {
