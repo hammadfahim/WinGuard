@@ -26,6 +26,37 @@ public sealed class ReviewRound5Tests
     private const string Attacker = "203.0.113.50";
     private const string Range = "198.51.100.0/24";
 
+    // ---------- internal addresses ----------
+
+    [Theory]
+    [InlineData("100.64.1.1")]
+    [InlineData("198.18.0.1")]
+    [InlineData("64:ff9b::a00:1")]
+    public async Task Carrier_nat_benchmarking_and_translated_private_peers_are_never_banned(string ip)
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+
+        for (var i = 0; i < 5; i++)
+        {
+            await h.ProcessAsync(h.Fail(ip, NonRdp));
+        }
+
+        Assert.Empty(h.Firewall.BlockCalls);
+    }
+
+    [Fact]
+    public async Task An_attacker_behind_nat64_is_banned()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+
+        for (var i = 0; i < 5; i++)
+        {
+            await h.ProcessAsync(h.Fail("64:ff9b::808:808", NonRdp));
+        }
+
+        Assert.Equal("64:ff9b::808:808", Assert.Single(h.Firewall.BlockCalls));
+    }
+
     // ---------- settings bounds ----------
 
     [Fact]

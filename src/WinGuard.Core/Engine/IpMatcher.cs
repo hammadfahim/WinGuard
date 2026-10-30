@@ -19,6 +19,8 @@ namespace WinGuard.Core.Engine;
 /// </summary>
 public sealed class IpMatcher
 {
+    private static readonly IPNetwork Nat64Prefix = IPNetwork.Parse("64:ff9b::/96");
+
     private readonly List<IPNetwork> _whitelist = [];
     private readonly List<IPNetwork> _blacklist = [];
 
@@ -226,9 +228,16 @@ public sealed class IpMatcher
     }
 
     /// <summary>
-    /// Returns <see langword="true"/> for non-routable / private addresses: loopback
-    /// (127.0.0.0/8, ::1), RFC1918 (10/8, 172.16/12, 192.168/16), link-local
-    /// (169.254/16, fe80::/10), IPv6 unique-local (fc00::/7) and site-local (fec0::/10).
+    /// Returns <see langword="true"/> for addresses the public internet cannot be the source of:
+    /// loopback (127.0.0.0/8, ::1), RFC1918 (10/8, 172.16/12, 192.168/16), link-local (169.254/16,
+    /// fe80::/10), carrier-grade NAT (100.64/10, RFC 6598: ISP subscribers, Tailscale peers),
+    /// benchmarking (198.18/15, RFC 2544: never routed publicly, so seen only from test labs and
+    /// vendors' internal fabrics), IPv6 unique-local (fc00::/7) and site-local (fec0::/10).
+    /// <para>
+    /// NAT64 (64:ff9b::/96, RFC 6052) is deliberately not internal as a whole: such an address is a
+    /// real IPv4 client seen through a translator, possibly an attacker on the internet. The IPv4
+    /// address embedded in its last 32 bits decides.
+    /// </para>
     /// </summary>
     /// <param name="normalizedIp">An IP literal (normalized or not).</param>
     public static bool IsInternal(string normalizedIp)
@@ -249,7 +258,9 @@ public sealed class IpMatcher
             return bytes[0] == 10
                 || (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31)
                 || (bytes[0] == 192 && bytes[1] == 168)
-                || (bytes[0] == 169 && bytes[1] == 254);
+                || (bytes[0] == 169 && bytes[1] == 254)
+                || (bytes[0] == 100 && bytes[1] >= 64 && bytes[1] <= 127)
+                || (bytes[0] == 198 && bytes[1] is 18 or 19);
         }
 
         if (address.AddressFamily == AddressFamily.InterNetworkV6)
@@ -262,6 +273,11 @@ public sealed class IpMatcher
             if (address.IsIPv4MappedToIPv6)
             {
                 return IsInternal(address.MapToIPv4().ToString());
+            }
+
+            if (Nat64Prefix.Contains(address))
+            {
+                return IsInternal(new IPAddress(address.GetAddressBytes()[12..]).ToString());
             }
         }
 

@@ -62,6 +62,20 @@ public sealed class IpMatcherTests
     [InlineData("fe80::1", true)]
     [InlineData("8.8.8.8", false)]
     [InlineData("203.0.113.1", false)]
+    [InlineData("100.63.255.255", false)]
+    [InlineData("100.64.0.0", true)]
+    [InlineData("100.100.100.100", true)] // a Tailscale peer
+    [InlineData("100.127.255.255", true)]
+    [InlineData("100.128.0.0", false)]
+    [InlineData("198.17.255.255", false)]
+    [InlineData("198.18.0.1", true)]
+    [InlineData("198.19.255.255", true)]
+    [InlineData("198.20.0.0", false)]
+    [InlineData("::ffff:100.64.0.1", true)]
+    [InlineData("64:ff9b::808:808", false)]    // NAT64 of 8.8.8.8: a real client behind a translator
+    [InlineData("64:ff9b::a00:1", true)]       // NAT64 of 10.0.0.1
+    [InlineData("64:ff9b::6440:1", true)]      // NAT64 of 100.64.0.1
+    [InlineData("64:ff9b:0:1::808:808", false)] // outside the /96
     public void IsInternal_cases(string ip, bool expected)
     {
         Assert.Equal(expected, IpMatcher.IsInternal(ip));
