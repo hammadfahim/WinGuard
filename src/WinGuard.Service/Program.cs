@@ -146,7 +146,7 @@ internal static class Program
         }
     }
 
-    private static void ConfigureServices(HostApplicationBuilder builder)
+    internal static void ConfigureServices(HostApplicationBuilder builder)
     {
         var databasePath = builder.Configuration["DatabasePath"];
         if (string.IsNullOrWhiteSpace(databasePath))
@@ -219,8 +219,11 @@ internal static class Program
                 sp.GetRequiredService<TimeProvider>()));
 
         builder.Services.AddSingleton<IpcRequestHandler>();
-        builder.Services.AddHostedService<GuardWorker>();
+
+        // Hosted services stop in reverse order: delivery comes first so it outlives the engine,
+        // and whatever the engine still reports while it shuts down gets delivered.
         builder.Services.AddHostedService<NotificationHostedService>();
+        builder.Services.AddHostedService<GuardWorker>();
         builder.Services.AddHostedService<PipeServer>();
     }
 
@@ -232,6 +235,14 @@ internal static class Program
         if (string.IsNullOrWhiteSpace(executable))
         {
             Console.Error.WriteLine("Could not determine the service executable path.");
+            return 1;
+        }
+
+        // A portable install gets the same data-folder protection as the setup, before anything
+        // runs as LocalSystem on top of a folder a standard user may have prepared.
+        if (SecureDataFolder(Defaults.DataFolder) is { } problem)
+        {
+            Console.Error.WriteLine($"Failed to secure the data folder: {problem}");
             return 1;
         }
 
@@ -287,8 +298,22 @@ internal static class Program
             Console.Error.WriteLine($"Warning: could not stop the service (it may not be running): {stop.Output}");
         }
 
-        // Give the SCM a moment to finish stopping before deletion.
-        Thread.Sleep(1500);
+        // Deleting a service that is still stopping only marks it for deletion.
+        var stopped = false;
+        for (var attempt = 0; attempt < ServiceStopWaitSeconds && !stopped; attempt++)
+        {
+            var query = RunProcess(ScExe, "query", Defaults.ServiceName);
+            stopped = IsServiceStopped(query.ExitCode, query.Output);
+            if (!stopped)
+            {
+                Thread.Sleep(1000);
+            }
+        }
+
+        if (!stopped)
+        {
+            Console.Error.WriteLine($"Warning: the service did not stop within {ServiceStopWaitSeconds} seconds; it will be deleted once it has.");
+        }
 
         var delete = RunProcess(ScExe, "delete", Defaults.ServiceName);
         if (delete.ExitCode != 0)
@@ -315,10 +340,65 @@ internal static class Program
         return 0;
     }
 
+    private const int ServiceStopWaitSeconds = 30;
+
     /// <summary>Full path, so a file named sc.exe next to this executable can never be run instead.</summary>
     private static string ScExe => Path.Combine(Environment.SystemDirectory, "sc.exe");
 
-    private static (int ExitCode, string Output) RunProcess(string fileName, params string[] arguments)
+    private static string IcaclsExe => Path.Combine(Environment.SystemDirectory, "icacls.exe");
+
+    /// <summary>Reads <c>sc query</c>: a service that no longer exists has stopped too.</summary>
+    internal static bool IsServiceStopped(int exitCode, string output) =>
+        exitCode != 0 || output.Contains("STOPPED", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The icacls calls that leave a folder to SYSTEM + Administrators alone, whoever created it
+    /// (same steps as the installer). Ownership goes first, because an owner can always grant
+    /// itself access again; only then can the ACLs be replaced, and explicit entries have to be
+    /// reset because <c>/grant:r</c> leaves those of other accounts in place. The second ownership
+    /// pass also catches what was created meanwhile. The accounts are given as SIDs because their
+    /// names are localized. No <c>/C</c>: with it icacls exits 0 even when it failed.
+    /// </summary>
+    internal static IReadOnlyList<string[]> DataFolderHardeningSteps(string folder) =>
+    [
+        [folder, "/setowner", "*S-1-5-32-544"],
+        [folder, "/reset"],
+        [folder, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"],
+        [folder, "/setowner", "*S-1-5-32-544", "/T", "/L"],
+        [Path.Combine(folder, "*"), "/reset", "/T", "/L"],
+    ];
+
+    /// <summary>Applies <see cref="DataFolderHardeningSteps"/>; returns why it could not, or null.</summary>
+    internal static string? SecureDataFolder(string folder)
+    {
+        try
+        {
+            var info = new DirectoryInfo(folder);
+            if (info.Exists && info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                // Hardening would change the link's target, and the service would write through it.
+                return $"{folder} is a link, not a folder. Remove it and try again.";
+            }
+
+            Directory.CreateDirectory(folder);
+            foreach (var step in DataFolderHardeningSteps(folder))
+            {
+                var result = RunProcess(IcaclsExe, step);
+                if (result.ExitCode != 0)
+                {
+                    return result.Output;
+                }
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            return ex.Message;
+        }
+    }
+
+    internal static (int ExitCode, string Output) RunProcess(string fileName, params string[] arguments)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -337,10 +417,13 @@ internal static class Program
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException($"Could not start '{fileName}'.");
 
-        // Read both streams before waiting to avoid pipe-buffer deadlocks.
-        var stdout = process.StandardOutput.ReadToEnd();
-        var stderr = process.StandardError.ReadToEnd();
+        // Read both streams at once: reading one to its end first deadlocks as soon as the other
+        // fills its pipe buffer.
+        var stdoutRead = process.StandardOutput.ReadToEndAsync();
+        var stderrRead = process.StandardError.ReadToEndAsync();
         process.WaitForExit();
+        var stdout = stdoutRead.GetAwaiter().GetResult();
+        var stderr = stderrRead.GetAwaiter().GetResult();
 
         var output = string.IsNullOrWhiteSpace(stderr) ? stdout : $"{stdout}{Environment.NewLine}{stderr}";
         return (process.ExitCode, output.Trim());
