@@ -121,6 +121,7 @@ public sealed class WinGuardSettings
             if (source?.Regex is not null)
             {
                 source.Regex = CustomSourceRecipes.UpgradeRegex(source.Regex);
+                source.PathGlob = CustomSourceRecipes.UpgradePathGlob(source.PathGlob ?? string.Empty, source.Regex);
             }
         }
 
