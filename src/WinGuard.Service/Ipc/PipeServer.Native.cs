@@ -34,6 +34,7 @@ public sealed partial class PipeServer
     private const int PipeWait = 0x00000000;
     private const int PipeRejectRemoteClients = 0x00000008;
     private const int ErrorAccessDenied = 5;
+    private const int ErrorPipeBusy = 231;
 
     /// <summary>
     /// SYSTEM + Administrators only. Nothing is granted to other accounts: on a named pipe,
@@ -41,30 +42,33 @@ public sealed partial class PipeServer
     /// any local user stand up a fake WinGuard endpoint for the (elevated) GUI to connect to.
     /// Identity is verified again per connection in <see cref="Authorize"/>.
     /// </summary>
-    private const string PipeSddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+    internal const string PipeSddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
 
     private NamedPipeServerStream CreateSecuredPipe()
     {
+        var pipe = CreateSecuredPipe(PipeConstants.PipeName, PipeSddl, firstInstance: !_firstPipeInstanceCreated);
+        _firstPipeInstanceCreated = true;
+        return pipe;
+    }
+
+    /// <summary>
+    /// Creates one instance of the pipe under the given security descriptor, or throws. There is no
+    /// fallback: a pipe with the default DACL would let any local user talk to the service, so with
+    /// no descriptor there is no pipe.
+    /// </summary>
+    /// <param name="pipeName">Pipe name without the <c>\\.\pipe\</c> prefix.</param>
+    /// <param name="sddl">The descriptor, in SDDL.</param>
+    /// <param name="firstInstance">Fail instead of silently adding an instance to a squatted name.</param>
+    internal static NamedPipeServerStream CreateSecuredPipe(string pipeName, string sddl, bool firstInstance)
+    {
         var openMode = PipeAccessDuplex | FileFlagOverlapped;
-        if (!_firstPipeInstanceCreated)
+        if (firstInstance)
         {
-            // Fail instead of silently adding an instance to a squatted pipe name.
             openMode |= PipeFirstPipeInstance;
         }
 
         var pipeMode = PipeTypeByte | PipeReadmodeByte | PipeWait | PipeRejectRemoteClients;
-
-        if (!TryCreateSecurityDescriptor(PipeSddl, out var securityDescriptor))
-        {
-            _logger.LogWarning(
-                "Could not build the pipe security descriptor; falling back to the OS default DACL.");
-            return new NamedPipeServerStream(
-                PipeConstants.PipeName,
-                PipeDirection.InOut,
-                NamedPipeServerStream.MaxAllowedServerInstances,
-                PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous);
-        }
+        var securityDescriptor = CreateSecurityDescriptor(sddl);
 
         try
         {
@@ -76,7 +80,7 @@ public sealed partial class PipeServer
             };
 
             var handle = NativeMethods.CreateNamedPipe(
-                @"\\.\pipe\" + PipeConstants.PipeName,
+                @"\\.\pipe\" + pipeName,
                 openMode,
                 pipeMode,
                 PipeUnlimitedInstances,
@@ -88,44 +92,33 @@ public sealed partial class PipeServer
             if (handle.IsInvalid)
             {
                 var error = Marshal.GetLastWin32Error();
-                if (!_firstPipeInstanceCreated && error == ErrorAccessDenied)
-                {
-                    _logger.LogError(
-                        "The pipe name \\\\.\\pipe\\{Pipe} is already in use by another process " +
-                        "(possible name squatting); WinGuard IPC cannot start.",
-                        PipeConstants.PipeName);
-                }
-
-                throw new IOException($"CreateNamedPipe failed with Win32 error {error}.");
+                handle.Dispose();
+                throw new IOException(firstInstance && error is ErrorAccessDenied or ErrorPipeBusy
+                    ? $@"The pipe name \\.\pipe\{pipeName} is already in use by another process (possible name squatting); WinGuard IPC cannot start."
+                    : $"CreateNamedPipe failed with Win32 error {error}.");
             }
 
-            _firstPipeInstanceCreated = true;
             return new NamedPipeServerStream(PipeDirection.InOut, isAsync: true, isConnected: false, handle);
         }
         finally
         {
-            if (securityDescriptor != IntPtr.Zero)
-            {
-                // The pipe object keeps its own copy of the descriptor.
-                NativeMethods.LocalFree(securityDescriptor);
-            }
+            // The pipe object keeps its own copy of the descriptor.
+            NativeMethods.LocalFree(securityDescriptor);
         }
     }
 
-    private static bool TryCreateSecurityDescriptor(string sddl, out IntPtr securityDescriptor)
+    private static IntPtr CreateSecurityDescriptor(string sddl)
     {
-        securityDescriptor = IntPtr.Zero;
-        try
+        if (NativeMethods.ConvertStringSecurityDescriptorToSecurityDescriptor(
+                sddl, SecurityDescriptorRevision, out var securityDescriptor, IntPtr.Zero)
+            && securityDescriptor != IntPtr.Zero)
         {
-            return NativeMethods.ConvertStringSecurityDescriptorToSecurityDescriptor(
-                       sddl, SecurityDescriptorRevision, out securityDescriptor, IntPtr.Zero)
-                   && securityDescriptor != IntPtr.Zero;
+            return securityDescriptor;
         }
-        catch (Exception)
-        {
-            securityDescriptor = IntPtr.Zero;
-            return false;
-        }
+
+        throw new InvalidOperationException(
+            $"Could not build the pipe's security descriptor (Win32 error {Marshal.GetLastWin32Error()}), " +
+            "so the pipe was not opened: WinGuard IPC cannot start without it. Consoles cannot connect until this is resolved.");
     }
 
     [StructLayout(LayoutKind.Sequential)]

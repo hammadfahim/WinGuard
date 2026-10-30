@@ -77,35 +77,64 @@ public sealed partial class PipeServer : BackgroundService
         // Load everything the caller check uses now, under the service's own identity.
         PipeClientIdentity.Prewarm();
 
-        _logger.LogInformation("Pipe server listening on \\\\.\\pipe\\{Pipe}.", PipeConstants.PipeName);
+        NamedPipeServerStream? listening = null;
+        var announced = false;
+        var failures = 0;
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            NamedPipeServerStream? pipe = null;
             try
             {
-                pipe = _pipeFactory is null ? CreateSecuredPipe() : _pipeFactory();
+                listening ??= CreateInstance();
+                if (!announced)
+                {
+                    announced = true;
+                    _logger.LogInformation("Pipe server listening on \\\\.\\pipe\\{Pipe}.", PipeConstants.PipeName);
+                }
 
-                await pipe.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
+                await listening.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
+                failures = 0;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
-                pipe?.Dispose();
                 break;
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Named-pipe accept loop failed; retrying shortly.");
-                pipe?.Dispose();
-                await SafeDelayAsync(stoppingToken).ConfigureAwait(false);
+                listening?.Dispose();
+                listening = null;
+
+                // With no instance left the name is free again, so the next one must claim it anew.
+                if (_clients.IsEmpty)
+                {
+                    _firstPipeInstanceCreated = false;
+                }
+
+                failures++;
+                await SafeDelayAsync(AcceptRetryDelay(failures), stoppingToken).ConfigureAwait(false);
                 continue;
+            }
+
+            var accepted = listening!;
+            listening = null;
+
+            // The next instance exists before this client can hang up: were the last instance to
+            // close, the name would be free for anyone to take, and only the very first instance
+            // is created in the mode that refuses a squatted name.
+            try
+            {
+                listening = CreateInstance();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Could not create the next named-pipe instance; retrying.");
             }
 
             // Everything about this client — identifying it included — runs on its own task. The
             // accept loop goes straight back to listening, so no single client (and nothing the
             // identity check might wait on) can keep others from connecting.
             var clientId = Interlocked.Increment(ref _nextClientId);
-            var accepted = pipe;
             var task = Task.Run(() => HandleClientAsync(accepted, stoppingToken), CancellationToken.None);
             _clients[clientId] = task;
             _ = task.ContinueWith(
@@ -118,9 +147,12 @@ public sealed partial class PipeServer : BackgroundService
                 TaskScheduler.Default);
         }
 
+        listening?.Dispose();
         await WaitForClientsAsync().ConfigureAwait(false);
         _logger.LogInformation("Pipe server stopped.");
     }
+
+    private NamedPipeServerStream CreateInstance() => _pipeFactory is null ? CreateSecuredPipe() : _pipeFactory();
 
     // ---- client handling ----
 
@@ -277,11 +309,18 @@ public sealed partial class PipeServer : BackgroundService
         }
     }
 
-    private static async Task SafeDelayAsync(CancellationToken ct)
+    /// <summary>
+    /// How long to wait after the given number of failures in a row: a failure that does not go away
+    /// (a squatted name, a pipe that cannot be secured) must not write an error every second.
+    /// </summary>
+    internal static TimeSpan AcceptRetryDelay(int failures) =>
+        TimeSpan.FromSeconds(Math.Min(60, Math.Pow(2, Math.Clamp(failures - 1, 0, 6))));
+
+    private static async Task SafeDelayAsync(TimeSpan delay, CancellationToken ct)
     {
         try
         {
-            await Task.Delay(TimeSpan.FromSeconds(1), ct).ConfigureAwait(false);
+            await Task.Delay(delay, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -297,7 +336,7 @@ public sealed partial class PipeServer : BackgroundService
     {
         try
         {
-            var response = IpcResponse.Fail(0, "Access denied: the WinGuard GUI must run with administrator privileges.");
+            var response = IpcResponse.Fail(0, "Access denied: a WinGuard console must run with administrator privileges.");
             var json = JsonSerializer.Serialize(response, IpcJson.Options) + "\n";
             var bytes = Encoding.UTF8.GetBytes(json);
             pipe.Write(bytes, 0, bytes.Length);

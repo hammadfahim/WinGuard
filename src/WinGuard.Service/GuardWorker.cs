@@ -10,7 +10,7 @@ using WinGuard.Core.Model;
 namespace WinGuard.Service;
 
 /// <summary>
-/// Wires the detection engines to the ban engine (PLAN.md §4/§5). Creates the unbounded
+/// Wires the detection engines to the ban engine (PLAN.md §4/§5). Creates the bounded
 /// <see cref="FailedLogin"/> channel, starts every enabled detector (a detector that fails to
 /// subscribe must not take the service down), then pumps the channel through
 /// <see cref="BanEngine.RunAsync"/> until shutdown.
