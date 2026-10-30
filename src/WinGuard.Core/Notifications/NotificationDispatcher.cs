@@ -41,6 +41,15 @@ public static class WinGuardEventIds
     /// <summary>Notifications were dropped by the rate limit or a full queue.</summary>
     public const int NotificationsSuppressed = 1006;
 
+    /// <summary>Break-glass: enforcement was disarmed and the firewall rules removed.</summary>
+    public const int Disarmed = 1020;
+
+    /// <summary>Break-glass: a disarm ended and enforcement resumed.</summary>
+    public const int Rearmed = 1021;
+
+    /// <summary>Break-glass: a disarm file was expired, corrupt or untrusted and was ignored.</summary>
+    public const int DisarmRefused = 1022;
+
     /// <summary>Any other warning.</summary>
     public const int OtherWarning = 1900;
 
@@ -51,6 +60,9 @@ public static class WinGuardEventIds
     public const int OtherInformation = 1902;
 
     internal const string SuppressedPrefix = "SUPPRESSED ";
+    internal const string DisarmedPrefix = "DISARMED ";
+    internal const string RearmedPrefix = "REARMED ";
+    internal const string DisarmRefusedPrefix = "DISARM REFUSED ";
 
     // The engine logs an expired ban at Info level; it is the one Info event worth reporting.
     private const string ExpiredPrefix = "UNBANNED ";
@@ -94,6 +106,21 @@ public static class WinGuardEventIds
         if (message.StartsWith(SuppressedPrefix, StringComparison.Ordinal))
         {
             return NotificationsSuppressed;
+        }
+
+        if (message.StartsWith(DisarmedPrefix, StringComparison.Ordinal))
+        {
+            return Disarmed;
+        }
+
+        if (message.StartsWith(RearmedPrefix, StringComparison.Ordinal))
+        {
+            return Rearmed;
+        }
+
+        if (message.StartsWith(DisarmRefusedPrefix, StringComparison.Ordinal))
+        {
+            return DisarmRefused;
         }
 
         return logEvent.Level == LogEventLevel.Warning ? OtherWarning : OtherInformation;

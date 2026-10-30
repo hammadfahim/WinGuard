@@ -17,9 +17,9 @@ public static class PipeConstants
     /// Bumped whenever a request, response or DTO changes shape. The service reports it in
     /// <see cref="ServiceStatusDto.ProtocolVersion"/> so a GUI from another release can say so
     /// instead of misbehaving. v3: statistics + ban history + report-only. v4: BlockNow answers
-    /// with the ban it recorded.
+    /// with the ban it recorded. v5: disarm status, firewall policy prerequisites.
     /// </summary>
-    public const int ProtocolVersion = 4;
+    public const int ProtocolVersion = 5;
 }
 
 /// <summary>Method names used in <see cref="IpcRequest.Method"/>.</summary>
@@ -89,6 +89,12 @@ public sealed class ServiceStatusDto
 
     /// <summary>True when the engine runs in monitoring mode: bans are recorded but not enforced.</summary>
     public bool ReportOnly { get; set; }
+
+    /// <summary>True during a break-glass window: no firewall rules are held and nothing is enforced.</summary>
+    public bool Disarmed { get; set; }
+
+    /// <summary>When the break-glass window ends and enforcement resumes by itself; null when <see cref="Disarmed"/> is false.</summary>
+    public DateTime? DisarmedUntilUtc { get; set; }
 }
 
 public sealed class EngineStatusDto

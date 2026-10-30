@@ -44,6 +44,19 @@ Public disclosure is coordinated with you after a fix is released.
   the setup and by `--install`. A folder a standard user created first loses that user as owner, so
   they cannot grant themselves access again, and setup stops if the folder cannot be secured or
   turns out to be a link. A portable `--console` run does not touch the folder's ACL.
+- **Break-glass** (`--disarm [--minutes N]`, `--rearm`) needs no service: it is a drop file,
+  `disarm.json` in the data folder, plus an immediate clear of the firewall rules by the command
+  itself. Both verbs refuse a prompt that is not elevated. While a window is open the service holds
+  no firewall rules and writes none; detection and recording go on, and bans recorded meanwhile
+  are enforced when it ends. A window lasts at most **24 hours** and ends by itself, so a forgotten
+  disarm cannot leave the server open; a disarm can be renewed, which is reported again.
+- The drop file is trusted only as far as it can be checked, and everything fails towards
+  protection. It must be owned by SYSTEM or the Administrators group, nobody else may be able to
+  write to it, it must not be a link, and it must describe a window of at most 24 hours from
+  now: this is checked on the file itself because a portable run leaves the folder's ACL alone,
+  and a standard user may be able to create files there. A file that is expired, corrupt,
+  over-long or untrusted disarms nothing and is reported once; a file that goes bad during a
+  window ends it at once.
 - WinGuard makes **no outbound connections** of its own; the only network traffic it can produce
   is to the notification destinations (webhook / Telegram / SMTP) an administrator explicitly
   configures. Webhook URLs and Telegram tokens are secrets and never reach the log; a plain
@@ -69,6 +82,9 @@ which are stable across releases. An id is never reassigned; new event types get
 | 1004 | Warning | An administrator unblocked an address. |
 | 1005 | Warning | A range ban was lifted because it came to overlap the whitelist. |
 | 1006 | Warning | Notifications were dropped by the rate limit or a full queue; the message gives the count. |
+| 1020 | Warning | Break-glass: enforcement was disarmed and all WinGuard firewall rules removed, or an open window was changed. |
+| 1021 | Warning | Break-glass: a disarm ended and enforcement resumed. |
+| 1022 | Warning | Break-glass: a disarm file was ignored (expired, corrupt or untrusted); the message gives the reason. |
 | 1900 | Warning | Any other warning. |
 | 1901 | Error | Any error. |
 | 1902 | Information | Any other informational event. |

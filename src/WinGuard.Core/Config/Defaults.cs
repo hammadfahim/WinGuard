@@ -40,4 +40,7 @@ public static class Defaults
     public static string DatabasePath => Path.Combine(DataFolder, "winguard.db");
 
     public static string LogFolder => Path.Combine(DataFolder, "Logs");
+
+    /// <summary>The break-glass drop file; see <see cref="Engine.DisarmFile"/>.</summary>
+    public static string DisarmFilePath => Path.Combine(DataFolder, Engine.DisarmFile.FileName);
 }

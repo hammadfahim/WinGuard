@@ -132,6 +132,7 @@ public sealed partial class IpcRequestHandler
             });
         }
 
+        var disarmedUntil = _engine.DisarmedUntilUtc;
         return new ServiceStatusDto
         {
             ServiceRunning = true,
@@ -141,6 +142,8 @@ public sealed partial class IpcRequestHandler
             ActiveBans = bans.Count,
             Engines = engines,
             ReportOnly = settings.ReportOnly,
+            Disarmed = disarmedUntil is not null,
+            DisarmedUntilUtc = disarmedUntil,
         };
     }
 

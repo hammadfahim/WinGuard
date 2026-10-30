@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using WinGuard.Core.Abstractions;
 using WinGuard.Core.Config;
+using WinGuard.Core.Engine;
 using WinGuard.Core.Ipc;
 using WinGuard.Core.Model;
 using WinGuard.Core.Firewall;
@@ -34,11 +35,24 @@ internal static class CliCommands
         if (status is null)
         {
             Console.Error.WriteLine(DescribeUnavailable(client.LastProblem, client.LastRequestError));
+
+            // A disarm is most likely to be looked up when the service is the problem.
+            var local = new DisarmFile(Defaults.DisarmFilePath).Read(DateTime.UtcNow);
+            if (BreakGlassCommands.DescribeForStatus(local.Status == DisarmStatus.Active ? local.UntilUtc : null) is { } disarmed)
+            {
+                Console.WriteLine(disarmed);
+            }
+
             return 1;
         }
 
         Console.WriteLine($"WinGuard {status.Version} (protocol {status.ProtocolVersion}), up since {status.StartedUtc:u} UTC");
         Console.WriteLine($"Active bans: {status.ActiveBans}" + (status.ReportOnly ? "  [REPORT-ONLY MODE]" : string.Empty));
+        if (BreakGlassCommands.DescribeForStatus(status.Disarmed ? status.DisarmedUntilUtc : null) is { } line)
+        {
+            Console.WriteLine(line);
+        }
+
         foreach (var engine in status.Engines)
         {
             Console.WriteLine(
@@ -263,6 +277,8 @@ internal static class CliCommands
         }
 
         // 3. Local environment checks (no service needed).
+        var (armed, armedDetail) = BreakGlassCommands.DescribeForDoctor(new DisarmFile(Defaults.DisarmFilePath).Read(DateTime.UtcNow), status);
+        Report("Enforcement", armed, warnOnly: true, armedDetail);
         Report("Data folder", CheckWritable(Defaults.DataFolder), detail: Defaults.DataFolder);
         Report("Log folder", CheckWritable(Defaults.LogFolder), detail: Defaults.LogFolder);
         Report("Database file", File.Exists(Defaults.DatabasePath), warnOnly: true, File.Exists(Defaults.DatabasePath) ? "present" : "not created yet");
