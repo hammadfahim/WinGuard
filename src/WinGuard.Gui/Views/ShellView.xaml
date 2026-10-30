@@ -1,0 +1,293 @@
+<UserControl x:Class="WinGuard.Gui.Views.ShellView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ui="clr-namespace:WinGuard.Gui.Controls"
+             xmlns:vm="clr-namespace:WinGuard.Gui.ViewModels"
+             xmlns:views="clr-namespace:WinGuard.Gui.Views"
+             x:Name="Root"
+             Background="{DynamicResource CanvasBrush}"
+             Foreground="{DynamicResource TextPrimaryBrush}"
+             FontFamily="{StaticResource FontUi}"
+             FontSize="{StaticResource FontSizeBody}"
+             TextOptions.TextFormattingMode="Display"
+             UseLayoutRounding="True"
+             SnapsToDevicePixels="True">
+
+    <UserControl.Resources>
+        <DataTemplate DataType="{x:Type vm:DashboardViewModel}">
+            <views:DashboardView />
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:BlockedIpsViewModel}">
+            <views:BlockedIpsView />
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:EventLogViewModel}">
+            <views:EventLogView />
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:StatisticsViewModel}">
+            <views:StatisticsView />
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:ListsViewModel}">
+            <views:ListsView />
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:SettingsViewModel}">
+            <views:SettingsView />
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="3" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- The status spine. -->
+        <Border Style="{StaticResource ToneFill}" ui:Ui.Tone="{Binding Dashboard.Protection.Tone}" />
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Rail -->
+            <Border x:Name="Rail" Width="208" Background="{DynamicResource RailBrush}"
+                    BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,0,1,0">
+                <DockPanel>
+                    <Grid DockPanel.Dock="Top" Height="56" Margin="16,8,12,8">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <Grid Width="26" Height="28">
+                                <Path Style="{StaticResource ToneShield}" ui:Ui.Tone="{Binding Dashboard.Protection.Tone}" StrokeThickness="1.6" />
+                            </Grid>
+                            <TextBlock x:Name="Wordmark" Text="WinGuard" Style="{StaticResource TextHeading}" FontSize="16"
+                                       Margin="10,0,0,0" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Grid>
+
+                    <StackPanel DockPanel.Dock="Bottom" Margin="10,8,10,12">
+                        <StackPanel x:Name="RailFacts" Margin="8,0,8,8">
+                            <TextBlock Text="{Binding MachineName}" Style="{StaticResource TextCaption}"
+                                       FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
+                                       ToolTip="The server this console manages" />
+                            <TextBlock Text="{Binding ConsoleVersionText}" FontSize="{StaticResource FontSizeMicro}"
+                                       Foreground="{DynamicResource TextTertiaryBrush}" />
+                        </StackPanel>
+                        <Button x:Name="ThemeButton" Style="{StaticResource GhostButton}" HorizontalContentAlignment="Left"
+                                ui:Ui.Icon="{StaticResource GlyphTheme}" Command="{Binding CycleThemeCommand}"
+                                ToolTip="Switch between following Windows, light and dark"
+                                AutomationProperties.Name="{Binding ThemeButtonText, StringFormat='Theme: {0}. Switch theme'}">
+                            <TextBlock x:Name="ThemeLabel" Text="{Binding ThemeButtonText, StringFormat='Theme: {0}'}"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" />
+                        </Button>
+                    </StackPanel>
+
+                    <Grid x:Name="NavArea" Margin="10,4,10,0">
+                        <!-- One element slides between rows: this is the animated selected state. -->
+                        <Border x:Name="NavIndicator" Height="38" VerticalAlignment="Top" IsHitTestVisible="False"
+                                Background="{DynamicResource SurfaceSelectedBrush}" CornerRadius="{StaticResource RadiusMd}">
+                            <Border.RenderTransform>
+                                <TranslateTransform x:Name="NavIndicatorShift" />
+                            </Border.RenderTransform>
+                            <Border Width="3" Height="18" HorizontalAlignment="Left" CornerRadius="1.5"
+                                    Background="{DynamicResource AccentBrush}" />
+                        </Border>
+                        <ListBox x:Name="NavList" ItemsSource="{Binding NavigationItems}"
+                                 SelectedItem="{Binding SelectedNavigation, Mode=TwoWay}"
+                                 ItemContainerStyle="{StaticResource NavItem}"
+                                 ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                                 VirtualizingPanel.IsVirtualizing="False"
+                                 AutomationProperties.Name="Main navigation"
+                                 SelectionChanged="OnNavSelectionChanged">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="40" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Style="{StaticResource Icon}" Text="{Binding Glyph}" FontSize="15" HorizontalAlignment="Center" />
+                                        <Ellipse Style="{StaticResource ToneDot}" ui:Ui.Tone="Warn" Width="7" Height="7" Margin="16,-14,0,0"
+                                                 HorizontalAlignment="Center"
+                                                 Visibility="{Binding HasAttention, Converter={StaticResource BoolToVis}}" />
+                                        <TextBlock x:Name="Label" Grid.Column="1" Text="{Binding Title}" VerticalAlignment="Center"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   Visibility="{Binding IsCompact, ElementName=Root, Converter={StaticResource InverseBoolToVis}}" />
+                                        <Border Grid.Column="2" Background="{DynamicResource NeutralSoftBrush}" CornerRadius="{StaticResource RadiusPill}"
+                                                Padding="7,1" Margin="4,0,8,0" VerticalAlignment="Center"
+                                                Visibility="{Binding Badge, Converter={StaticResource NotEmptyToVis}}">
+                                            <TextBlock Text="{Binding Badge}" FontSize="{StaticResource FontSizeMicro}" FontWeight="Normal"
+                                                       Foreground="{DynamicResource TextSecondaryBrush}" />
+                                        </Border>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </Grid>
+                </DockPanel>
+            </Border>
+
+            <!-- Content -->
+            <Grid Grid.Column="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <!-- Global state banner -->
+                <Border Style="{StaticResource Banner}" ui:Ui.Tone="{Binding Protection.Tone}"
+                        DataContext="{Binding Dashboard}" AutomationProperties.LiveSetting="Polite"
+                        AutomationProperties.Name="{Binding Protection.Title, StringFormat='Protection state: {0}'}"
+                        AutomationProperties.HelpText="{Binding Protection.Detail}">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Style="{StaticResource ToneIcon}" ui:Ui.Tone="{Binding Protection.Tone}"
+                                   Text="{Binding Protection.Glyph}" Margin="0,0,10,0" />
+                        <TextBlock Grid.Column="1" Style="{StaticResource TextStrong}" Text="{Binding Protection.Title}"
+                                   VerticalAlignment="Center" Margin="0,0,12,0" />
+                        <TextBlock Grid.Column="2" Style="{StaticResource TextMuted}" Text="{Binding Protection.Detail}"
+                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding Protection.Detail}" />
+                        <StackPanel Grid.Column="3" Orientation="Horizontal" Margin="12,0,0,0">
+                            <Button Content="Review" Margin="8,0,0,0" Command="{Binding ReviewStateCommand}"
+                                    Height="{StaticResource ControlHeightSmall}" ToolTip="Open the setting behind this state"
+                                    Visibility="{Binding Protection.CanReview, Converter={StaticResource BoolToVis}}" />
+                            <Button Content="Start service" Style="{StaticResource PrimaryButton}" Margin="8,0,0,0"
+                                    Height="{StaticResource ControlHeightSmall}" Command="{Binding StartServiceCommand}"
+                                    ui:Ui.Icon="{StaticResource GlyphPlay}"
+                                    Visibility="{Binding Protection.CanStartService, Converter={StaticResource BoolToVis}}" />
+                            <Button Content="Retry" Margin="8,0,0,0" Height="{StaticResource ControlHeightSmall}"
+                                    ui:Ui.Icon="{StaticResource GlyphRefresh}"
+                                    Command="{Binding DataContext.RetryConnectionCommand, ElementName=Root}"
+                                    ToolTip="Try again now"
+                                    Visibility="{Binding Protection.CanRetry, Converter={StaticResource BoolToVis}}" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <ui:PageHost x:Name="Pages" Grid.Row="1" Page="{Binding CurrentViewModel}" />
+            </Grid>
+        </Grid>
+
+        <!-- Toasts -->
+        <ItemsControl x:Name="ToastHost" Grid.Row="1" ItemsSource="{Binding Toasts.Items}" HorizontalAlignment="Right"
+                      VerticalAlignment="Bottom" Margin="0,0,20,20" Width="340" Focusable="False"
+                      AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="Notifications">
+            <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                    <Border Background="{DynamicResource SurfaceRaisedBrush}" BorderBrush="{DynamicResource LineStrongBrush}"
+                            BorderThickness="1" CornerRadius="{StaticResource RadiusLg}" Padding="12,10,6,10" Margin="0,8,0,0"
+                            Effect="{DynamicResource ElevationOverlay}">
+                        <Border.RenderTransform>
+                            <TranslateTransform />
+                        </Border.RenderTransform>
+                        <Border.Triggers>
+                            <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
+                                                         From="12" To="0" Duration="{StaticResource MotionMedium}" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </EventTrigger>
+                        </Border.Triggers>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Style="{StaticResource ToneIcon}" ui:Ui.Tone="{Binding Tone}" Text="{Binding Glyph}"
+                                       VerticalAlignment="Top" Margin="0,2,10,0" />
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                <TextBlock Style="{StaticResource TextStrong}" Text="{Binding Title}" TextWrapping="Wrap" />
+                                <TextBlock Style="{StaticResource TextCaption}" Text="{Binding Message}" TextWrapping="Wrap" Margin="0,2,0,0"
+                                           Visibility="{Binding Message, Converter={StaticResource NotEmptyToVis}}" />
+                            </StackPanel>
+                            <Button Grid.Column="2" Style="{StaticResource IconButtonSmall}" VerticalAlignment="Top" Margin="4,-2,0,0"
+                                    FontSize="10" ui:Ui.Icon="{StaticResource GlyphClose}"
+                                    Command="{Binding DataContext.Toasts.DismissCommand, ElementName=Root}"
+                                    CommandParameter="{Binding}" ToolTip="Dismiss" AutomationProperties.Name="Dismiss notification" />
+                        </Grid>
+                    </Border>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <!-- Dialog -->
+        <Grid x:Name="DialogLayer" Grid.RowSpan="2" Background="{DynamicResource ScrimBrush}"
+              Visibility="{Binding DataContext.Dialogs.Current, ElementName=Root, Converter={StaticResource NotEmptyToVis}}"
+              DataContext="{Binding Dialogs.Current}">
+            <Border x:Name="DialogCard" Width="460" MaxHeight="620" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Background="{DynamicResource SurfaceRaisedBrush}" BorderBrush="{DynamicResource LineStrongBrush}"
+                    BorderThickness="1" CornerRadius="{StaticResource RadiusLg}" Padding="22,20"
+                    Effect="{DynamicResource ElevationOverlay}"
+                    KeyboardNavigation.TabNavigation="Cycle" KeyboardNavigation.DirectionalNavigation="Contained"
+                    AutomationProperties.Name="{Binding Title}">
+                <Border.InputBindings>
+                    <KeyBinding Key="Escape" Command="{Binding CancelCommand}" />
+                </Border.InputBindings>
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
+                        <Button x:Name="DialogCancel" Content="{Binding CancelText}" Command="{Binding CancelCommand}" IsCancel="True" />
+                        <Button Content="{Binding AlternateText}" Command="{Binding AlternateCommand}" Margin="8,0,0,0"
+                                Visibility="{Binding AlternateText, Converter={StaticResource NotEmptyToVis}}" />
+                        <Button x:Name="DialogDanger" Style="{StaticResource DangerButton}" Content="{Binding ConfirmText}"
+                                Command="{Binding ConfirmCommand}" Margin="8,0,0,0"
+                                Visibility="{Binding IsDestructive, Converter={StaticResource BoolToVis}}" />
+                        <Button x:Name="DialogConfirm" Style="{StaticResource PrimaryButton}" Content="{Binding ConfirmText}"
+                                Command="{Binding ConfirmCommand}" Margin="8,0,0,0"
+                                Visibility="{Binding IsDestructive, Converter={StaticResource InverseBoolToVis}}" />
+                    </StackPanel>
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="{StaticResource GapBottom8}">
+                            <TextBlock Style="{StaticResource ToneIcon}" ui:Ui.Tone="{Binding Tone}" FontSize="17"
+                                       Text="{StaticResource GlyphWarning}" Margin="0,0,10,0" />
+                            <TextBlock Style="{StaticResource TextHeading}" FontSize="16" Text="{Binding Title}" TextWrapping="Wrap"
+                                       MaxWidth="380" />
+                        </StackPanel>
+                        <TextBlock Style="{StaticResource TextMuted}" Text="{Binding Message}" TextWrapping="Wrap" />
+
+                        <Border Background="{DynamicResource SurfaceSunkenBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1"
+                                CornerRadius="{StaticResource RadiusMd}" Padding="10,8" Margin="0,12,0,0"
+                                Visibility="{Binding Items, Converter={StaticResource NotEmptyToVis}}">
+                            <StackPanel>
+                                <ItemsControl ItemsSource="{Binding Items}" Focusable="False">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Style="{StaticResource TextMono}" Text="{Binding}" Margin="0,1"
+                                                       TextTrimming="CharacterEllipsis" />
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <TextBlock Style="{StaticResource TextCaption}" Text="{Binding MoreText}" Margin="0,3,0,0"
+                                           Visibility="{Binding MoreText, Converter={StaticResource NotEmptyToVis}}" />
+                            </StackPanel>
+                        </Border>
+
+                        <ItemsControl ItemsSource="{Binding Notes}" Margin="0,10,0,0" Focusable="False"
+                                      Visibility="{Binding Notes, Converter={StaticResource NotEmptyToVis}}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Margin="0,2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="16" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Style="{StaticResource Icon}" Text="{StaticResource GlyphInfo}" FontSize="11" VerticalAlignment="Top"
+                                                   Margin="0,3,0,0" Foreground="{DynamicResource TextTertiaryBrush}" />
+                                        <TextBlock Grid.Column="1" Style="{StaticResource TextCaption}" Text="{Binding}" TextWrapping="Wrap" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </DockPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

@@ -43,6 +43,7 @@ public partial class App : System.Windows.Application
         }
 
         RegisterExceptionHandlers();
+        Controls.Motion.ApplyTokens(Resources);
         _themeChoice = ThemePreference.Load();
         ApplyTheme(ThemePreference.ResolveDark(_themeChoice));
         SystemParameters.StaticPropertyChanged += OnSystemParameterChanged;
@@ -71,12 +72,18 @@ public partial class App : System.Windows.Application
 
         _trayIcon = _services.GetRequiredService<TrayIconService>();
         _trayIcon.ShowRequested += (_, _) => ShowMainWindow();
-        _trayIcon.ExitRequested += (_, _) => ExitApplication();
+        _trayIcon.ExitRequested += (_, _) => _ = ExitApplicationAsync();
 
         // Poll only while the window is actually on screen.
         _mainWindow.IsVisibleChanged += (_, _) => UpdatePolling();
         _mainWindow.StateChanged += (_, _) => UpdatePolling();
-        _pipeClient.StateChanged += connected => Dispatcher.BeginInvoke(() => _trayIcon?.SetConnected(connected));
+        _mainViewModel.Dashboard.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(DashboardViewModel.Protection))
+            {
+                UpdateTray();
+            }
+        };
 
         MainWindow = _mainWindow;
         _mainWindow.Show();
@@ -85,11 +92,16 @@ public partial class App : System.Windows.Application
         _pipeClient.Start();
 
         // If the service is down nothing ever "changes": settle the tray text after a moment.
-        var settle = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+        var settle = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
         settle.Tick += (_, _) =>
         {
             settle.Stop();
-            _trayIcon?.SetConnected(_pipeClient?.IsConnected == true);
+            UpdateTray();
+            if (_pipeClient?.IsConnected != true && _mainViewModel is not null)
+            {
+                _mainViewModel.Dashboard.ConnectionSettled = true;
+                _mainViewModel.MarkDisconnected("The WinGuard service is not connected. It will be picked up as soon as it runs.");
+            }
         };
         settle.Start();
     }
@@ -161,31 +173,38 @@ public partial class App : System.Windows.Application
         }
     }
 
-    /// <summary>Swaps the active theme resource dictionary (Dark.xaml / Light.xaml).</summary>
+    /// <summary>Swaps the active theme resource dictionary.</summary>
     /// <param name="dark">True for the dark theme, false for the light theme.</param>
     public void ApplyTheme(bool dark)
     {
         _currentDark = dark;
 
         // Windows high-contrast mode always wins so the user's accessibility palette is honored.
-        var themeFile = SystemParameters.HighContrast ? "Themes/HighContrast.xaml" : dark ? "Themes/Dark.xaml" : "Themes/Light.xaml";
-        var uri = new Uri(themeFile, UriKind.Relative);
+        ApplyThemeFile(SystemParameters.HighContrast ? "HighContrast" : dark ? "Dark" : "Light");
+        _mainWindow?.SetDarkTitleBar(dark && !SystemParameters.HighContrast);
+    }
+
+    /// <summary>Loads one of the theme dictionaries by name (Dark, Light or HighContrast).</summary>
+    /// <param name="name">The theme's file name, without extension.</param>
+    public void ApplyThemeFile(string name)
+    {
+        // An absolute pack URI, so this also resolves when another assembly hosts these resources.
+        var uri = new Uri($"pack://application:,,,/winguard-gui;component/Themes/{name}.xaml", UriKind.Absolute);
         var theme = new ResourceDictionary { Source = uri };
 
         var merged = Resources.MergedDictionaries;
         for (var i = merged.Count - 1; i >= 0; i--)
         {
             var source = merged[i].Source?.OriginalString ?? string.Empty;
-            if (source.Contains("Themes/Dark.xaml", StringComparison.OrdinalIgnoreCase) ||
-                source.Contains("Themes/Light.xaml", StringComparison.OrdinalIgnoreCase) ||
-                source.Contains("Themes/HighContrast.xaml", StringComparison.OrdinalIgnoreCase))
+            if (source.EndsWith("/Dark.xaml", StringComparison.OrdinalIgnoreCase) ||
+                source.EndsWith("/Light.xaml", StringComparison.OrdinalIgnoreCase) ||
+                source.EndsWith("/HighContrast.xaml", StringComparison.OrdinalIgnoreCase))
             {
                 merged.RemoveAt(i);
             }
         }
 
         merged.Insert(0, theme);
-        _mainWindow?.SetDarkTitleBar(dark && !SystemParameters.HighContrast);
     }
 
     /// <summary>Follows a Windows light/dark switch while the user's choice is "System".</summary>
@@ -209,6 +228,14 @@ public partial class App : System.Windows.Application
         if (e.PropertyName == nameof(SystemParameters.HighContrast))
         {
             Dispatcher.BeginInvoke(() => ApplyTheme(_currentDark));
+        }
+    }
+
+    private void UpdateTray()
+    {
+        if (_mainViewModel is { } main)
+        {
+            _trayIcon?.SetStatus(main.Dashboard.IsConnected, main.Dashboard.Protection.Title);
         }
     }
 
@@ -238,8 +265,18 @@ public partial class App : System.Windows.Application
         _mainWindow.Activate();
     }
 
-    private void ExitApplication()
+    private async Task ExitApplicationAsync()
     {
+        // Unsaved settings get a say first, which needs the window on screen.
+        if (_mainViewModel?.Settings.IsDirty == true)
+        {
+            ShowMainWindow();
+            if (!await _mainViewModel.ConfirmExitAsync())
+            {
+                return;
+            }
+        }
+
         if (_mainWindow is not null)
         {
             _mainWindow.AllowClose = true;

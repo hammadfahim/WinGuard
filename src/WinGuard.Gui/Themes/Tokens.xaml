@@ -1,0 +1,97 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=System.Runtime">
+
+    <!-- Theme-independent design tokens: type scale, spacing, radii, sizing and motion.
+         Colours live in Dark/Light/HighContrast.xaml, which share one set of keys. -->
+
+    <!-- Type. Segoe UI is on every supported Windows; Consolas keeps addresses and times aligned;
+         Segoe MDL2 Assets is the icon font (Segoe Fluent Icons is missing on Server 2016/2019). -->
+    <FontFamily x:Key="FontUi">Segoe UI</FontFamily>
+    <FontFamily x:Key="FontUiLight">Segoe UI Semilight</FontFamily>
+    <FontFamily x:Key="FontMono">Consolas, Courier New</FontFamily>
+    <FontFamily x:Key="FontIcon">Segoe MDL2 Assets</FontFamily>
+
+    <sys:Double x:Key="FontSizeDisplay">30</sys:Double>
+    <sys:Double x:Key="FontSizeMetric">28</sys:Double>
+    <sys:Double x:Key="FontSizeTitle">22</sys:Double>
+    <sys:Double x:Key="FontSizeHeading">15</sys:Double>
+    <sys:Double x:Key="FontSizeBody">13</sys:Double>
+    <sys:Double x:Key="FontSizeCaption">12</sys:Double>
+    <sys:Double x:Key="FontSizeMicro">11</sys:Double>
+
+    <!-- Spacing: a 4 px grid. -->
+    <Thickness x:Key="PagePadding">28,20,28,20</Thickness>
+    <Thickness x:Key="CardPadding">18,16,18,16</Thickness>
+    <Thickness x:Key="CardPaddingTight">12,10,12,10</Thickness>
+    <Thickness x:Key="GapBottom4">0,0,0,4</Thickness>
+    <Thickness x:Key="GapBottom8">0,0,0,8</Thickness>
+    <Thickness x:Key="GapBottom12">0,0,0,12</Thickness>
+    <Thickness x:Key="GapBottom16">0,0,0,16</Thickness>
+    <Thickness x:Key="GapBottom24">0,0,0,24</Thickness>
+    <Thickness x:Key="GapRight8">0,0,8,0</Thickness>
+    <Thickness x:Key="GapRight12">0,0,12,0</Thickness>
+    <Thickness x:Key="GapLeft8">8,0,0,0</Thickness>
+    <Thickness x:Key="GapLeft12">12,0,0,0</Thickness>
+
+    <!-- Radii. -->
+    <CornerRadius x:Key="RadiusSm">3</CornerRadius>
+    <CornerRadius x:Key="RadiusMd">5</CornerRadius>
+    <CornerRadius x:Key="RadiusLg">9</CornerRadius>
+    <CornerRadius x:Key="RadiusPill">999</CornerRadius>
+
+    <!-- Control sizes. -->
+    <sys:Double x:Key="ControlHeight">32</sys:Double>
+    <sys:Double x:Key="ControlHeightSmall">26</sys:Double>
+    <sys:Double x:Key="GridRowHeight">36</sys:Double>
+    <sys:Double x:Key="FeedRowHeight">30</sys:Double>
+
+    <!-- Motion. App.xaml.cs replaces these with zero when Windows animations are switched off,
+         before the first template is loaded, so every storyboard then lands instantly. -->
+    <Duration x:Key="MotionFast">0:0:0.12</Duration>
+    <Duration x:Key="MotionMedium">0:0:0.18</Duration>
+
+    <!-- Glyphs from Segoe MDL2 Assets, named once so views never carry raw code points. -->
+    <sys:String x:Key="GlyphDashboard">&#xE80F;</sys:String>
+    <sys:String x:Key="GlyphBlocked">&#xE72E;</sys:String>
+    <sys:String x:Key="GlyphEvents">&#xE8FD;</sys:String>
+    <sys:String x:Key="GlyphStatistics">&#xE9D2;</sys:String>
+    <sys:String x:Key="GlyphLists">&#xE8D7;</sys:String>
+    <sys:String x:Key="GlyphSettings">&#xE713;</sys:String>
+    <sys:String x:Key="GlyphSearch">&#xE721;</sys:String>
+    <sys:String x:Key="GlyphRefresh">&#xE72C;</sys:String>
+    <sys:String x:Key="GlyphCopy">&#xE8C8;</sys:String>
+    <sys:String x:Key="GlyphDelete">&#xE74D;</sys:String>
+    <sys:String x:Key="GlyphAdd">&#xE710;</sys:String>
+    <sys:String x:Key="GlyphClose">&#xE711;</sys:String>
+    <sys:String x:Key="GlyphCheck">&#xE73E;</sys:String>
+    <sys:String x:Key="GlyphWarning">&#xE7BA;</sys:String>
+    <sys:String x:Key="GlyphError">&#xEA39;</sys:String>
+    <sys:String x:Key="GlyphInfo">&#xE946;</sys:String>
+    <sys:String x:Key="GlyphExport">&#xE898;</sys:String>
+    <sys:String x:Key="GlyphImport">&#xE896;</sys:String>
+    <sys:String x:Key="GlyphPause">&#xE769;</sys:String>
+    <sys:String x:Key="GlyphPlay">&#xE768;</sys:String>
+    <sys:String x:Key="GlyphUnlock">&#xE785;</sys:String>
+    <sys:String x:Key="GlyphLock">&#xE72E;</sys:String>
+    <sys:String x:Key="GlyphShield">&#xEA18;</sys:String>
+    <sys:String x:Key="GlyphAllow">&#xE8FB;</sys:String>
+    <sys:String x:Key="GlyphChevronRight">&#xE76C;</sys:String>
+    <sys:String x:Key="GlyphChevronDown">&#xE70D;</sys:String>
+    <sys:String x:Key="GlyphChevronUp">&#xE70E;</sys:String>
+    <sys:String x:Key="GlyphTheme">&#xE790;</sys:String>
+    <sys:String x:Key="GlyphServer">&#xE977;</sys:String>
+    <sys:String x:Key="GlyphBell">&#xEA8F;</sys:String>
+    <sys:String x:Key="GlyphCode">&#xE943;</sys:String>
+    <sys:String x:Key="GlyphClock">&#xE823;</sys:String>
+    <sys:String x:Key="GlyphFolder">&#xE8B7;</sys:String>
+    <sys:String x:Key="GlyphSave">&#xE74E;</sys:String>
+    <sys:String x:Key="GlyphUndo">&#xE7A7;</sys:String>
+    <sys:String x:Key="GlyphArrowDown">&#xE74B;</sys:String>
+    <sys:String x:Key="GlyphPaste">&#xE77F;</sys:String>
+
+    <!-- The brand mark: one shield outline, used in the rail and the dashboard hero. -->
+    <Geometry x:Key="ShieldGeometry">M12,1.6 L21.4,5 L21.4,11.2 C21.4,17 17.6,20.9 12,22.8 C6.4,20.9 2.6,17 2.6,11.2 L2.6,5 Z</Geometry>
+    <Geometry x:Key="ShieldInnerGeometry">M12,4.2 L19,6.75 L19,11.3 C19,15.65 16.2,18.6 12,20.2 C7.8,18.6 5,15.65 5,11.3 L5,6.75 Z</Geometry>
+
+</ResourceDictionary>
