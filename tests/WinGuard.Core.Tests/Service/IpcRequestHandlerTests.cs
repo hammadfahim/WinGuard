@@ -278,7 +278,7 @@ public sealed class IpcRequestHandlerTests
         Assert.Equal(0, statistics.TotalActiveBans); // the unban removed the active ban
         Assert.True(statistics.HistoryRows >= 2);
         var bannedDay = Assert.Single(statistics.Daily, entry => entry.Bans == 1);
-        Assert.Equal(ProtocolSource.Custom, bannedDay.Source); // manual bans are attributed to Custom
+        Assert.Equal(ProtocolSource.Manual, bannedDay.Source);
         Assert.Equal(0, bannedDay.Detections); // no detector ran; only the ban was recorded
 
         var history = await h.GetAsync<List<BanHistoryDto>>(IpcMethods.ListBanHistory, new ListBanHistoryParams { Limit = 50 });

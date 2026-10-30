@@ -410,7 +410,7 @@ public sealed partial class BanEngine
             var ban = new BanEntry
             {
                 IpAddress = normalized,
-                Source = existing?.Source ?? ProtocolSource.Custom,
+                Source = stillBanned ? existing!.Source : ProtocolSource.Manual,
                 BannedAtUtc = now,
                 ExpiresUtc = expiresUtc,
                 OffenseCount = offense,

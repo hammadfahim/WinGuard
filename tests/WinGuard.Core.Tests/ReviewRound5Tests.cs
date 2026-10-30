@@ -432,6 +432,88 @@ public sealed class ReviewRound5Tests
         });
     }
 
+    // ---------- the Manual source ----------
+
+    [Fact]
+    public void Enum_values_stored_in_existing_rows_keep_their_meaning()
+    {
+        Assert.Equal(0, (int)ProtocolSource.Rdp);
+        Assert.Equal(1, (int)ProtocolSource.MsSql);
+        Assert.Equal(2, (int)ProtocolSource.Ftp);
+        Assert.Equal(3, (int)ProtocolSource.Custom);
+        Assert.Equal(4, (int)ProtocolSource.Manual);
+    }
+
+    [Fact]
+    public async Task A_manual_ban_is_recorded_as_manual_everywhere()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+
+        await h.Engine.BanNowAsync(Attacker, TimeSpan.FromHours(2), permanent: false, null);
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Equal(ProtocolSource.Manual, (await h.Store.GetBanAsync(Attacker))!.Source);
+        Assert.Equal(ProtocolSource.Manual, Assert.Single(h.Store.BanHistory).Source);
+        Assert.Equal(ProtocolSource.Manual, h.Store.Events.Last(e => e.Message.StartsWith("MANUAL BLOCK", StringComparison.Ordinal)).Source);
+        Assert.Equal(1, Assert.Single(h.Store.DailyStats, pair => pair.Key.Source == ProtocolSource.Manual).Value.Bans);
+        Assert.Equal(0, h.Engine.GetDetectionsToday(ProtocolSource.Manual));
+    }
+
+    [Fact]
+    public async Task Promoting_a_detected_ban_keeps_the_engine_that_found_it()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        await SendThresholdAsync(h);
+
+        await h.Engine.BanNowAsync(Attacker, null, permanent: true, null);
+
+        var ban = await h.Store.GetBanAsync(Attacker);
+        Assert.True(ban!.IsPermanent);
+        Assert.Equal(NonRdp, ban.Source);
+    }
+
+    [Fact]
+    public async Task A_manual_ban_over_an_expired_row_is_manual()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        await SendThresholdAsync(h);
+        h.Time.Advance(TimeSpan.FromDays(2)); // expired, but no housekeeping has removed the row yet
+
+        await h.Engine.BanNowAsync(Attacker, TimeSpan.FromHours(1), permanent: false, null);
+
+        Assert.Equal(ProtocolSource.Manual, (await h.Store.GetBanAsync(Attacker))!.Source);
+    }
+
+    [Fact]
+    public async Task Status_shows_detection_engines_only_and_still_counts_manual_bans()
+    {
+        await using var h = await IpcHarness.StartAsync(T0, TimeSpan.Zero);
+
+        await h.SendAsync(IpcMethods.BlockNow, new BlockNowParams { Ip = Attacker, Duration = TimeSpan.FromHours(1) });
+        await h.Engine.HousekeepOnceAsync();
+
+        var status = await h.GetAsync<ServiceStatusDto>(IpcMethods.GetStatus);
+        Assert.Equal(1, status.ActiveBans);
+        Assert.DoesNotContain(status.Engines, engine => engine.Source == ProtocolSource.Manual);
+        Assert.All(status.Engines, engine => Assert.Equal(0, engine.ActiveBans));
+
+        var ban = Assert.Single(await h.GetAsync<List<BanDto>>(IpcMethods.ListBans));
+        Assert.Equal(ProtocolSource.Manual, ban.Source);
+        var statistics = await h.GetAsync<StatisticsDto>(IpcMethods.GetStatistics, new GetStatisticsParams { Days = 7 });
+        Assert.Equal(ProtocolSource.Manual, Assert.Single(statistics.Daily).Source);
+    }
+
+    [Fact]
+    public async Task The_store_keeps_the_manual_source()
+    {
+        await WithSqliteStoreAsync(async (store, _) =>
+        {
+            await store.UpsertBanAsync(ActiveBan(Attacker, ProtocolSource.Manual));
+
+            Assert.Equal(ProtocolSource.Manual, (await store.GetBanAsync(Attacker))!.Source);
+        });
+    }
+
     // ---------- internal addresses ----------
 
     [Theory]
