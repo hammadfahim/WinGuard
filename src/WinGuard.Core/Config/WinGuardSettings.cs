@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using WinGuard.Core.Model;
 
@@ -16,6 +17,12 @@ public sealed class WinGuardSettings
     public TimeSpan ExpireTime { get; set; } = Defaults.ExpireTime;
     public TimeSpan[] BanTiers { get; set; } = (TimeSpan[])Defaults.BanTiers.Clone();
     public TimeSpan MaxBanDuration { get; set; } = Defaults.MaxBanDuration;
+
+    /// <summary>
+    /// How long after its last ban ended an IP's offense count is remembered. Within this time a
+    /// returning attacker continues at the next ban tier; after it they start again at the first.
+    /// </summary>
+    public TimeSpan OffenseMemory { get; set; } = Defaults.OffenseMemory;
     public TimeSpan HousekeepingInterval { get; set; } = Defaults.HousekeepingInterval;
     public bool ClearBansOnStartup { get; set; }
     public bool ProcessInternalIPs { get; set; }
@@ -43,7 +50,10 @@ public sealed class WinGuardSettings
     public int Ipv6AggregatePrefixLength { get; set; }
 
     /// <summary>Days of event history kept before housekeeping prunes it.</summary>
-    public int EventRetentionDays { get; set; } = 30;
+    public int EventRetentionDays { get; set; } = Defaults.EventRetentionDays;
+
+    /// <summary>Days of ban history kept before housekeeping prunes it; top attackers count only what is kept.</summary>
+    public int BanHistoryRetentionDays { get; set; } = Defaults.BanHistoryRetentionDays;
     public int MaxAddressesPerRule { get; set; } = Defaults.MaxAddressesPerRule;
 
     /// <summary>Out-of-band notifications (webhook / Telegram / e-mail / Windows Event Log).</summary>
@@ -124,7 +134,8 @@ public sealed class WinGuardSettings
             Ipv6AggregatePrefixLength = Math.Clamp(Ipv6AggregatePrefixLength, 32, 64);
         }
 
-        // DateTime + TimeSpan overflows past year 9999, which would abort the ban; cap durations.
+        // DateTime +/- TimeSpan overflows at either end of the calendar, which would abort a ban or
+        // a whole housekeeping pass; cap durations.
         var maxSane = TimeSpan.FromDays(3650);
         if (MaxBanDuration <= TimeSpan.Zero)
         {
@@ -137,22 +148,29 @@ public sealed class WinGuardSettings
         }
 
         FailedLoginThreshold = Math.Max(1, FailedLoginThreshold);
-        EventRetentionDays = Math.Clamp(EventRetentionDays <= 0 ? 30 : EventRetentionDays, 1, 3650);
+        EventRetentionDays = Math.Clamp(EventRetentionDays <= 0 ? Defaults.EventRetentionDays : EventRetentionDays, 1, 3650);
+        BanHistoryRetentionDays = Math.Clamp(BanHistoryRetentionDays <= 0 ? Defaults.BanHistoryRetentionDays : BanHistoryRetentionDays, 1, 3650);
         MaxAddressesPerRule = Math.Clamp(MaxAddressesPerRule, 1, Defaults.MaxAddressesPerRule);
-        if (CountWindow <= TimeSpan.Zero)
-        {
-            CountWindow = Defaults.CountWindow;
-        }
 
-        if (ExpireTime <= TimeSpan.Zero)
-        {
-            ExpireTime = Defaults.ExpireTime;
-        }
+        CountWindow = CountWindow <= TimeSpan.Zero ? Defaults.CountWindow : Min(CountWindow, maxSane);
+        Rdp.CountWindow = NormalizeWindow(Rdp.CountWindow, maxSane);
+        MsSql.CountWindow = NormalizeWindow(MsSql.CountWindow, maxSane);
+        Ftp.CountWindow = NormalizeWindow(Ftp.CountWindow, maxSane);
 
-        if (HousekeepingInterval < TimeSpan.FromSeconds(1))
-        {
-            HousekeepingInterval = Defaults.HousekeepingInterval;
-        }
+        // Housekeeping forgets failures older than ExpireTime, so an ExpireTime shorter than a count
+        // window would silently shorten that window: attempts would vanish before they added up.
+        ExpireTime = ExpireTime <= TimeSpan.Zero ? Defaults.ExpireTime : Min(ExpireTime, maxSane);
+        ExpireTime = Max(ExpireTime, CountWindow);
+        ExpireTime = Max(ExpireTime, Rdp.CountWindow ?? TimeSpan.Zero);
+        ExpireTime = Max(ExpireTime, MsSql.CountWindow ?? TimeSpan.Zero);
+        ExpireTime = Max(ExpireTime, Ftp.CountWindow ?? TimeSpan.Zero);
+
+        OffenseMemory = OffenseMemory <= TimeSpan.Zero ? Defaults.OffenseMemory : Min(OffenseMemory, maxSane);
+
+        // Task.Delay throws for anything past about 49 days, which would end the polling loop.
+        var maxInterval = TimeSpan.FromDays(1);
+        HousekeepingInterval = HousekeepingInterval < TimeSpan.FromSeconds(1) ? Defaults.HousekeepingInterval : Min(HousekeepingInterval, maxInterval);
+        Ftp.PollInterval = Ftp.PollInterval <= TimeSpan.Zero ? Defaults.FtpPollInterval : Min(Ftp.PollInterval, maxInterval);
 
         BanTiers = BanTiers is { Length: > 0 } ? BanTiers : (TimeSpan[])Defaults.BanTiers.Clone();
 
@@ -160,12 +178,12 @@ public sealed class WinGuardSettings
         var positiveTiers = BanTiers.Where(t => t > TimeSpan.Zero).Select(t => t > maxSane ? maxSane : t).ToArray();
         BanTiers = positiveTiers.Length > 0 ? positiveTiers : (TimeSpan[])Defaults.BanTiers.Clone();
 
-        // BlockedPorts tokens reach the firewall LocalPorts property: keep only "port" or
-        // "start-end" numeric forms so garbage can't break rule creation.
+        // BlockedPorts tokens reach the firewall LocalPorts property: keep only valid "port" or
+        // "start-end" numeric forms so garbage can't break rule creation, and with it every block.
         BlockedPorts = BlockedPorts
             .Where(p => !string.IsNullOrWhiteSpace(p))
             .Select(p => p.Trim())
-            .Where(p => System.Text.RegularExpressions.Regex.IsMatch(p, @"^\d+(-\d+)?$"))
+            .Where(IsPortOrPortRange)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
@@ -173,6 +191,22 @@ public sealed class WinGuardSettings
         Notifications.RateLimitPerMinute = Math.Clamp(
             Notifications.RateLimitPerMinute <= 0 ? 20 : Notifications.RateLimitPerMinute, 1, 1000);
     }
+
+    private static TimeSpan? NormalizeWindow(TimeSpan? window, TimeSpan max) =>
+        window is { } value && value > TimeSpan.Zero ? Min(value, max) : null;
+
+    private static bool IsPortOrPortRange(string token)
+    {
+        var ports = token.Split('-');
+        return ports.Length <= 2
+            && ushort.TryParse(ports[0], NumberStyles.None, CultureInfo.InvariantCulture, out var first)
+            && ushort.TryParse(ports[^1], NumberStyles.None, CultureInfo.InvariantCulture, out var last)
+            && first <= last;
+    }
+
+    private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;
+
+    private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
 }
 
 /// <summary>Shared per-protocol knobs.</summary>

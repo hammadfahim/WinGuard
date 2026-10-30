@@ -2,8 +2,9 @@ namespace WinGuard.Core.Tests.Fakes;
 
 /// <summary>
 /// A <see cref="TimeProvider"/> whose UTC clock can be set and advanced by tests.
-/// Only <see cref="GetUtcNow"/> is overridden; timestamp/stopwatch APIs keep the base
-/// implementation (irrelevant for the pure engine logic under test).
+/// Only <see cref="GetUtcNow"/> and, when <see cref="LocalZone"/> is set, the local time zone are
+/// overridden; timestamp/stopwatch APIs keep the base implementation (irrelevant for the pure
+/// engine logic under test).
 /// </summary>
 public sealed class FakeTimeProvider : TimeProvider
 {
@@ -22,6 +23,11 @@ public sealed class FakeTimeProvider : TimeProvider
         get => _utcNow;
         set => _utcNow = value;
     }
+
+    /// <summary>The local time zone to report; null keeps the machine's.</summary>
+    public TimeZoneInfo? LocalZone { get; set; }
+
+    public override TimeZoneInfo LocalTimeZone => LocalZone ?? base.LocalTimeZone;
 
     public override DateTimeOffset GetUtcNow() => _utcNow;
 
