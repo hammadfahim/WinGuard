@@ -99,6 +99,7 @@ public interface IStore
     /// <summary>
     /// Adds deltas to the (day, source) counter row, creating it when missing. The engine buffers
     /// increments in memory and flushes them here during housekeeping, so the write rate stays low.
+    /// Days are the server's local calendar days: see <see cref="DailyStatEntry.DayUtc"/>.
     /// </summary>
     Task AddDailyStatsAsync(DateTime dayUtc, ProtocolSource source, int detectionsDelta, int bansDelta, CancellationToken ct = default);
 

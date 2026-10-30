@@ -160,7 +160,9 @@ public sealed partial class IpcRequestHandler
     private async Task<StatisticsDto> GetStatisticsAsync(GetStatisticsParams parameters, CancellationToken ct)
     {
         var days = Math.Clamp(parameters.Days <= 0 ? 30 : parameters.Days, 1, 365);
-        var since = _timeProvider.GetUtcNow().UtcDateTime.Date.AddDays(-(days - 1));
+
+        // The engine buckets the daily rows by local calendar day, so the window counts local days too.
+        var since = _timeProvider.GetLocalNow().Date.AddDays(-(days - 1));
 
         var daily = await _store.GetDailyStatsAsync(since, ct).ConfigureAwait(false);
         var topOffenders = await _store.GetTopOffendersAsync(10, ct).ConfigureAwait(false);

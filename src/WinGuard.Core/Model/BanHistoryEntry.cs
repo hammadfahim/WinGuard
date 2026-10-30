@@ -50,7 +50,10 @@ public sealed class BanHistoryEntry
 /// <summary>Per-day, per-protocol activity counters kept by the engine and flushed during housekeeping.</summary>
 public sealed class DailyStatEntry
 {
-    /// <summary>The UTC day the counters belong to (date part only).</summary>
+    /// <summary>
+    /// The day the counters belong to (date part only). Despite the name this is the server's LOCAL
+    /// calendar day, which is what the dashboard's "today" means; it is only stored as a UTC value.
+    /// </summary>
     public DateTime DayUtc { get; set; }
 
     public ProtocolSource Source { get; set; }

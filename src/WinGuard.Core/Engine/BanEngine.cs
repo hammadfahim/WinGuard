@@ -940,9 +940,11 @@ public sealed partial class BanEngine
         }
     }
 
-    private void BufferDailyStatLocked(ProtocolSource source, int detections, int bans)
+    private void BufferDailyStatLocked(ProtocolSource source, int detections, int bans) =>
+        BufferDailyStatLocked(DateOnly.FromDateTime(_timeProvider.GetLocalNow().DateTime), source, detections, bans);
+
+    private void BufferDailyStatLocked(DateOnly day, ProtocolSource source, int detections, int bans)
     {
-        var day = DateOnly.FromDateTime(_timeProvider.GetLocalNow().DateTime);
         var key = (day, source);
         var current = _dailyStats.TryGetValue(key, out var existing)
             ? existing
@@ -953,7 +955,7 @@ public sealed partial class BanEngine
     /// <summary>
     /// Drains the buffered daily-statistics deltas into the store. Called from housekeeping so the
     /// per-event hot path performs no statistics writes, and from StopAsync so a shutdown does not
-    /// lose the day's tail.
+    /// lose the day's tail. Whatever the store refuses goes back into the buffer for the next flush.
     /// </summary>
     private async Task FlushDailyStatsAsync(CancellationToken ct)
     {
@@ -971,8 +973,9 @@ public sealed partial class BanEngine
             _dailyStats.Clear();
         }
 
-        foreach (var entry in drained)
+        for (var i = 0; i < drained.Count; i++)
         {
+            var entry = drained[i];
             try
             {
                 var dayUtc = entry.Day.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
@@ -980,7 +983,16 @@ public sealed partial class BanEngine
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Could not persist daily statistics for {Day}/{Source}.", entry.Day, entry.Source);
+                _logger.LogWarning(ex, "Could not persist daily statistics for {Day}/{Source}; keeping them for the next flush.", entry.Day, entry.Source);
+                lock (_statsLock)
+                {
+                    foreach (var unsaved in drained.Skip(i))
+                    {
+                        BufferDailyStatLocked(unsaved.Day, unsaved.Source, unsaved.Detections, unsaved.Bans);
+                    }
+                }
+
+                return;
             }
         }
     }

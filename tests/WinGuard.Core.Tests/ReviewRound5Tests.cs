@@ -614,6 +614,47 @@ public sealed class ReviewRound5Tests
         Assert.DoesNotContain(Attacker, h.Firewall.Blocked);
     }
 
+    // ---------- statistics ----------
+
+    [Theory]
+    [InlineData(10, "2026-03-01T20:00:00Z", "2026-03-02")] // local day ahead of the UTC day
+    [InlineData(-10, "2026-03-02T04:00:00Z", "2026-03-01")] // local day behind the UTC day
+    public async Task The_statistics_window_counts_the_same_local_days_the_engine_buckets_by(int offsetHours, string utcNow, string localToday)
+    {
+        await using var h = await IpcHarness.StartAsync(DateTimeOffset.Parse(utcNow), TimeSpan.FromHours(offsetHours));
+        var today = DateTime.Parse(localToday);
+
+        await h.Engine.BanNowAsync(Attacker, TimeSpan.FromHours(1), permanent: false, null);
+        await h.Engine.HousekeepOnceAsync();
+        await h.Store.AddDailyStatsAsync(today.AddDays(-1), NonRdp, 7, 0);
+
+        var oneDay = await h.GetAsync<StatisticsDto>(IpcMethods.GetStatistics, new GetStatisticsParams { Days = 1 });
+        Assert.Equal(today, Assert.Single(oneDay.Daily).DayUtc.Date);
+
+        var twoDays = await h.GetAsync<StatisticsDto>(IpcMethods.GetStatistics, new GetStatisticsParams { Days = 2 });
+        Assert.Equal(2, twoDays.Daily.Count);
+    }
+
+    [Fact]
+    public async Task Daily_statistics_the_store_refuses_survive_for_the_next_flush()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        await h.ProcessAsync(h.Fail(Attacker, NonRdp));
+        await h.ProcessAsync(h.Fail(Attacker, ProtocolSource.Ftp));
+
+        h.Store.FailStatsWrites = true;
+        await h.Engine.HousekeepOnceAsync();
+        Assert.Empty(h.Store.DailyStats);
+
+        await h.ProcessAsync(h.Fail(Attacker, NonRdp)); // arrives while the deltas wait
+        h.Store.FailStatsWrites = false;
+        await h.Engine.HousekeepOnceAsync();
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Equal(2, h.Store.DailyStats.Single(pair => pair.Key.Source == NonRdp).Value.Detections);
+        Assert.Equal(1, h.Store.DailyStats.Single(pair => pair.Key.Source == ProtocolSource.Ftp).Value.Detections);
+    }
+
     // ---------- offense tracker ----------
 
     [Fact]
