@@ -195,12 +195,25 @@ public sealed class CustomSourceRecipesTests
     }
 
     [Theory]
-    [MemberData(nameof(AllRegexes))]
-    public void Every_recipe_runs_on_the_linear_time_regex_engine(string pattern)
+    [InlineData("openssh-sshd.log", "Windows OpenSSH (sshd)")]
+    [InlineData("hmailserver.log", "hMailServer")]
+    [InlineData("iis-http-w3c.log", "IIS HTTP auth (401.1)")]
+    [InlineData("realvnc-server.log", "RealVNC Server")]
+    public void Every_recipe_gives_the_same_result_on_both_regex_engines(string fixture, string recipeName)
     {
-        var regex = new Regex(pattern, RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
+        // A line that times out is checked again on the linear engine, which must then agree.
+        var pattern = CustomSourceRecipes.All.Single(r => r.Name == recipeName).Regex;
+        var regular = new Regex(pattern, RegexOptions.CultureInvariant);
+        var linear = new Regex(pattern, RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
 
-        Assert.True(regex.GroupNumberFromName("ipaddress") >= 0);
+        foreach (var line in TestData.ReadLines(fixture))
+        {
+            var expected = regular.Match(line);
+            var actual = linear.Match(line);
+            Assert.Equal(expected.Success, actual.Success);
+            Assert.Equal(expected.Groups["ipaddress"].Value, actual.Groups["ipaddress"].Value);
+            Assert.Equal(expected.Groups["username"].Value, actual.Groups["username"].Value);
+        }
     }
 
     [Theory]

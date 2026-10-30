@@ -29,7 +29,8 @@ public sealed class CustomSourceRecipe
 /// <summary>
 /// Built-in custom-source recipes. All of them use the generic regex engine, so adding one to the
 /// settings needs no code change. Adjust <c>%ProgramData%</c>-style paths to the real installation.
-/// The regexes avoid lookaround and backreferences so they run on the linear-time regex engine.
+/// The regexes avoid lookaround and backreferences, so a line that times out can still be checked
+/// on the linear-time regex engine.
 /// </summary>
 public static class CustomSourceRecipes
 {

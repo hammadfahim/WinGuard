@@ -22,11 +22,13 @@ public sealed class CustomLogDetectorPollTests : IDisposable
 
     public void Dispose() => Directory.Delete(_dir, true);
 
+    // Short enough to keep the crafted-line tests quick, long enough that a JIT or GC pause on an
+    // ordinary line does not look like a timeout.
     internal static CustomLogDetector NewDetector(ILogger<CustomLogDetector>? logger = null) =>
         new(() => new WinGuardSettings(), logger ?? NullLogger<CustomLogDetector>.Instance)
         {
-            MatchTimeout = TimeSpan.FromMilliseconds(30),
-            HurriedMatchTimeout = TimeSpan.FromMilliseconds(5),
+            MatchTimeout = TimeSpan.FromMilliseconds(250),
+            HurriedMatchTimeout = TimeSpan.FromMilliseconds(100),
         };
 
     internal static Channel<FailedLogin> NewSink() => Channel.CreateUnbounded<FailedLogin>();
@@ -122,20 +124,44 @@ public sealed class CustomLogDetectorPollTests : IDisposable
     // ---------- slow regexes ----------
 
     [Fact]
-    public void A_pattern_the_linear_engine_accepts_is_immune_to_crafted_lines()
+    public void A_line_that_times_out_is_checked_again_on_the_linear_engine()
     {
-        var path = NewFile("linear.log");
+        var path = NewFile("rescued.log");
         var logger = new RecordingLogger();
-        var settings = Settings(Source("linear", path, @"^(a+)+$|FAILED ip=(?<ipaddress>\S+)"));
+
+        // The first alternative is what blows up; the failure on the same line must still be found.
+        var settings = Settings(Source("rescued", path, @"^(a+)+$|^(a+)+!(?<ipaddress>\S+)$"));
         var detector = NewDetector(logger);
         var sink = NewSink();
         detector.PollOnce(settings, sink);
 
-        File.AppendAllText(path, string.Concat(Enumerable.Repeat(CraftedLine, 20)) + "FAILED ip=203.0.113.1\n");
+        var line = new string('a', 40) + "?203.0.113.9\n";
+        File.AppendAllText(path, string.Concat(Enumerable.Repeat(line, 8)) + new string('a', 40) + "!203.0.113.1\n");
         detector.PollOnce(settings, sink);
 
         Assert.Equal("203.0.113.1", Assert.Single(Drain(sink)).IpAddress);
-        Assert.Empty(logger.Warnings);
+        var warning = Assert.Single(logger.Warnings);
+        Assert.Contains("rescued", warning);
+        Assert.Contains("0 could not be checked", warning);
+    }
+
+    [Fact]
+    public void Ordinary_lines_keep_the_first_match_of_the_regular_engine()
+    {
+        // On this shape NonBacktracking returns the second marker, which a client could have typed.
+        var path = NewFile("first-match.log");
+        var settings = Settings(Source("first", path, @"(?:\((?<user>[^()]*)\)\s*)?(?<bare>[^\s()]+)?\s*\((?<ipaddress>[^()]+)\)>"));
+
+        // The production timeout: a pause during a short test budget would hand the line to the
+        // linear engine, which is the one case where that engine's answer applies.
+        var detector = new CustomLogDetector(() => settings, NullLogger<CustomLogDetector>.Instance);
+        var sink = NewSink();
+        detector.PollOnce(settings, sink);
+
+        File.AppendAllText(path, "(1) 2026-10-04 09:05:20 - (not logged in) (203.0.113.44)> USER x (198.51.100.9)> rest\n");
+        detector.PollOnce(settings, sink);
+
+        Assert.Equal("203.0.113.44", Assert.Single(Drain(sink)).IpAddress);
     }
 
     [Fact]
@@ -171,7 +197,14 @@ public sealed class CustomLogDetectorPollTests : IDisposable
         detector.PollOnce(settings, sink);
 
         Assert.Equal(new[] { "203.0.113.1", "203.0.113.2" }, Drain(sink).Select(f => f.IpAddress));
-        Assert.Contains(logger.Warnings, w => w.Contains("slow") && w.Contains("6 line(s)"));
+        Assert.Contains(logger.Warnings, w => w.Contains("slow") && w.Contains("6 line(s)") && w.Contains("6 could not be checked"));
+    }
+
+    [Fact]
+    public void A_crafted_line_that_times_out_with_no_linear_engine_is_skipped_on_its_own()
+    {
+        Assert.False(CustomLogDetector.TryParseLine(CraftedLine.TrimEnd(), CatastrophicRegex, out var failed));
+        Assert.Null(failed);
     }
 
     [Fact]

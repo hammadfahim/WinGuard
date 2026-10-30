@@ -29,9 +29,12 @@ these results:
   the logger only rewrites CRLF, so a bare LF in client text reaches the log: the recipe sets `CrLfRecords`.
 - **IIS HTTP**: the default W3C fields; Microsoft's
   [HTTP status code list](https://learn.microsoft.com/en-us/troubleshoot/developer/webapps/iis/health-diagnostic-performance/http-status-code)
-  for the 401.x meanings, and the
-  [IIS support blog on NTLM](https://techcommunity.microsoft.com/blog/iis-support-blog/ntlm-want-to-know-how-it-works/347849)
-  for `401 2 5` and `401 1 2148074254` being normal handshake steps.
+  for the 401.x meanings, and Splunk's
+  [Decoding IIS Logs](https://www.splunk.com/en_us/blog/tips-and-tricks/decoding-iis-logs.html) for
+  `2148074254` on the first access of an integrated login and `2148074252` for credentials that could not be
+  verified. Microsoft's
+  [IIS support blog](https://techcommunity.microsoft.com/t5/iis-support-blog/401-1-2148074248-in-iis-logs-behind-a-load-balancer-with/ba-p/2428459)
+  calls `401 2 5` and `401 1 2148074254` normal (seen in a search excerpt only; the page would not load).
 - **RealVNC**: the line published in
   [fail2ban discussion 3034](https://github.com/fail2ban/fail2ban/discussions/3034), and RealVNC's
   [logging article](https://help.realvnc.com/hc/en-us/articles/360002254238-All-About-Logging) for the log

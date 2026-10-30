@@ -17,11 +17,14 @@ namespace WinGuard.Core.Detection;
 /// line offered to each of them. The failure timestamp is the poller's current UTC time (the regex
 /// has no guaranteed timestamp capture).
 /// <para>
-/// Log lines can be attacker-controlled, so patterns run on the linear-time
-/// <see cref="RegexOptions.NonBacktracking"/> engine whenever they allow it. A pattern that needs
-/// backtracking is logged once and runs with a 2-second match timeout; a line that times out is
-/// skipped and reported, and every other line is still evaluated. An invalid pattern is logged once
-/// and its source skipped.
+/// Log lines can be attacker-controlled, so each pattern has a 2-second match timeout per line. A
+/// line that exceeds it is checked again on the linear-time
+/// <see cref="RegexOptions.NonBacktracking"/> engine, which cannot time out on a crafted line. That
+/// engine is the rescue and not the default because it can pick a later match than the
+/// documented regex semantics on the same line, and later text is more likely to be the client's.
+/// A pattern it does not support (lookaround, backreferences) is logged once, and a line that times
+/// out on such a pattern is skipped and reported; every other line is still evaluated. An invalid
+/// pattern is logged once and its source skipped.
 /// </para>
 /// </summary>
 public sealed class CustomLogDetector : IDetector
@@ -31,8 +34,8 @@ public sealed class CustomLogDetector : IDetector
 
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromSeconds(2);
 
-    // Timed-out lines keep being reported, but not more often than this.
-    private static readonly TimeSpan SkippedLinesWarningInterval = TimeSpan.FromMinutes(5);
+    // Slow lines keep being reported, but not more often than this.
+    private static readonly TimeSpan SlowLinesWarningInterval = TimeSpan.FromMinutes(5);
 
     private readonly Func<WinGuardSettings> _settingsAccessor;
     private readonly ILogger<CustomLogDetector> _logger;
@@ -44,8 +47,8 @@ public sealed class CustomLogDetector : IDetector
     private HashSet<string> _knownSources = new(StringComparer.OrdinalIgnoreCase);
     private volatile bool _loopRunning;
 
-    // After this many full timeouts in a cycle a source's remaining lines get HurriedMatchTimeout,
-    // so a burst of crafted lines stalls the poll loop briefly instead of for seconds per line.
+    // After this many full timeouts in a cycle a source stops spending seconds per line: its
+    // remaining lines go straight to the linear engine, or get HurriedMatchTimeout without one.
     private const int MaxTimeoutsPerCycle = 3;
 
     // Compiled pattern cache keyed by (source name, pattern); a null value marks a known-bad source.
@@ -69,7 +72,7 @@ public sealed class CustomLogDetector : IDetector
     /// <summary>Per-line regex budget.</summary>
     internal TimeSpan MatchTimeout { get; init; } = RegexTimeout;
 
-    /// <summary>Per-line regex budget once a source has used up <see cref="MaxTimeoutsPerCycle"/>.</summary>
+    /// <summary>Per-line regex budget once a source without a linear engine has used up <see cref="MaxTimeoutsPerCycle"/>.</summary>
     internal TimeSpan HurriedMatchTimeout { get; init; } = TimeSpan.FromMilliseconds(50);
 
     /// <inheritdoc />
@@ -114,7 +117,7 @@ public sealed class CustomLogDetector : IDetector
         Regex regex;
         try
         {
-            regex = CompileRegex(regexPattern, RegexTimeout, out _);
+            regex = new Regex(regexPattern, RegexOptions.Compiled | RegexOptions.CultureInvariant, RegexTimeout);
         }
         catch (ArgumentException)
         {
@@ -128,26 +131,29 @@ public sealed class CustomLogDetector : IDetector
         catch (RegexMatchTimeoutException)
         {
             failed = null;
-            return false;
+            var linear = CompileLinear(regexPattern, RegexTimeout);
+            try
+            {
+                return linear is not null && TryMatch(linear, line, out failed);
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                failed = null;
+                return false;
+            }
         }
     }
 
-    /// <summary>
-    /// Compiles a source pattern on the linear-time engine, or on the backtracking engine when the
-    /// pattern needs it (lookaround, backreferences, atomic groups).
-    /// </summary>
-    /// <exception cref="ArgumentException">The pattern is invalid.</exception>
-    private static Regex CompileRegex(string pattern, TimeSpan timeout, out bool linearTime)
+    /// <summary>The pattern on the linear-time engine, or null when it uses something that engine lacks.</summary>
+    private static Regex? CompileLinear(string pattern, TimeSpan timeout)
     {
         try
         {
-            linearTime = true;
             return new Regex(pattern, RegexOptions.NonBacktracking | RegexOptions.CultureInvariant, timeout);
         }
         catch (NotSupportedException)
         {
-            linearTime = false;
-            return new Regex(pattern, RegexOptions.Compiled | RegexOptions.CultureInvariant, timeout);
+            return null;
         }
     }
 
@@ -287,7 +293,7 @@ public sealed class CustomLogDetector : IDetector
 
         foreach (var active in activeSources)
         {
-            ReportSkippedLines(active);
+            ReportSlowLines(active);
         }
 
         _knownSources = seenSources;
@@ -306,25 +312,14 @@ public sealed class CustomLogDetector : IDetector
     }
 
     /// <summary>
-    /// Runs one source's regex against one line. A timeout costs only that line, counted for
-    /// <see cref="ReportSkippedLines"/>: later lines and other sources are still evaluated, so a
+    /// Runs one source's regex against one line. A timeout costs at most that line, counted for
+    /// <see cref="ReportSlowLines"/>: later lines and other sources are still evaluated, so a
     /// crafted line cannot hide what comes after it.
     /// </summary>
     private void Evaluate(string line, ActiveSource active, Channel<FailedLogin> sink)
     {
-        var regex = active.TimeoutsThisCycle < MaxTimeoutsPerCycle ? active.Matcher.Regex : active.Matcher.HurriedRegex;
-        FailedLogin? failure;
-        try
+        if (!TryMatchWithinBudget(line, active, out var failure) || failure is null)
         {
-            if (!TryMatch(regex, line, out failure) || failure is null)
-            {
-                return;
-            }
-        }
-        catch (RegexMatchTimeoutException)
-        {
-            active.TimeoutsThisCycle++;
-            active.Matcher.SkippedLines++;
             return;
         }
 
@@ -338,22 +333,55 @@ public sealed class CustomLogDetector : IDetector
         }
     }
 
+    private static bool TryMatchWithinBudget(string line, ActiveSource active, out FailedLogin? failure)
+    {
+        var matcher = active.Matcher;
+        var withinBudget = active.TimeoutsThisCycle < MaxTimeoutsPerCycle;
+        try
+        {
+            return TryMatch(withinBudget ? matcher.Regex : matcher.LinearRegex ?? matcher.HurriedRegex, line, out failure);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            active.TimeoutsThisCycle++;
+            matcher.SlowLines++;
+        }
+
+        if (withinBudget && matcher.LinearRegex is not null)
+        {
+            try
+            {
+                return TryMatch(matcher.LinearRegex, line, out failure);
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                // Linear in the length of the line, but a very long one can still run out of time.
+            }
+        }
+
+        matcher.SkippedLines++;
+        failure = null;
+        return false;
+    }
+
     /// <summary>A skipped line may have been a failed login, so it is always reported, in rate-limited totals.</summary>
-    private void ReportSkippedLines(ActiveSource active)
+    private void ReportSlowLines(ActiveSource active)
     {
         var matcher = active.Matcher;
         var now = _timeProvider.GetUtcNow();
-        if (matcher.SkippedLines == 0 || now - matcher.LastSkipWarning < SkippedLinesWarningInterval)
+        if (matcher.SlowLines == 0 || now - matcher.LastSlowLinesWarning < SlowLinesWarningInterval)
         {
             return;
         }
 
         _logger.LogWarning(
-            "Custom log source {Source}: {Count} line(s) were not checked because the regex exceeded its match timeout; a failed login on such a line is not counted. Simplify the regex.",
+            "Custom log source {Source}: {Slow} line(s) exceeded the regex match timeout, which a crafted line can cause; {Skipped} could not be checked, so a failed login on those is not counted. Simplify the regex.",
             active.DetectorName,
+            matcher.SlowLines,
             matcher.SkippedLines);
+        matcher.SlowLines = 0;
         matcher.SkippedLines = 0;
-        matcher.LastSkipWarning = now;
+        matcher.LastSlowLinesWarning = now;
     }
 
     /// <summary>
@@ -371,18 +399,20 @@ public sealed class CustomLogDetector : IDetector
 
         try
         {
-            var regex = CompileRegex(source.Regex, MatchTimeout, out var linearTime);
-            if (!linearTime)
+            var regex = new Regex(source.Regex, RegexOptions.Compiled | RegexOptions.CultureInvariant, MatchTimeout);
+            var linear = CompileLinear(source.Regex, MatchTimeout);
+            if (linear is null)
             {
                 _logger.LogWarning(
-                    "Custom log source {Source}: the regex uses lookaround, a backreference or another construct that needs backtracking, so a crafted log line can cost it up to {Timeout}s. Rewrite it without them if you can.",
+                    "Custom log source {Source}: the regex uses lookaround, a backreference or another construct that needs backtracking, so a line that runs past the {Timeout}s match timeout is skipped, and a crafted line can make that happen. Rewrite it without them if you can.",
                     DisplayName(source),
                     MatchTimeout.TotalSeconds);
             }
 
             matcher = new SourceMatcher(
                 regex,
-                linearTime ? regex : new Regex(source.Regex, RegexOptions.CultureInvariant, HurriedMatchTimeout));
+                linear,
+                linear is null ? new Regex(source.Regex, RegexOptions.CultureInvariant, HurriedMatchTimeout) : regex);
             _regexCache[key] = matcher;
             return true;
         }
@@ -414,15 +444,19 @@ public sealed class CustomLogDetector : IDetector
     }
 
     /// <summary>A source's compiled regex; lives as long as the pattern stays configured.</summary>
-    private sealed class SourceMatcher(Regex regex, Regex hurriedRegex)
+    private sealed class SourceMatcher(Regex regex, Regex? linearRegex, Regex hurriedRegex)
     {
         public Regex Regex { get; } = regex;
 
+        public Regex? LinearRegex { get; } = linearRegex;
+
         public Regex HurriedRegex { get; } = hurriedRegex;
+
+        public long SlowLines { get; set; }
 
         public long SkippedLines { get; set; }
 
-        public DateTimeOffset LastSkipWarning { get; set; } = DateTimeOffset.MinValue;
+        public DateTimeOffset LastSlowLinesWarning { get; set; } = DateTimeOffset.MinValue;
     }
 
     /// <summary>One enabled source during one poll cycle.</summary>
