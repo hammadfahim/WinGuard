@@ -13,10 +13,16 @@ namespace WinGuard.Core.Detection;
 /// (or folder + glob) and applies the source's regex. A regex match yields one
 /// <see cref="FailedLogin"/>; the regex must capture a named group <c>ipaddress</c> and may capture
 /// an optional named group <c>username</c>. Tailing uses the shared <see cref="LogFileTailer"/> so
-/// only appended lines are evaluated. The failure timestamp is the poller's current UTC time
-/// (the regex has no guaranteed timestamp capture). Each pattern is compiled once with a 2-second
-/// match timeout; an invalid pattern is logged once and its source skipped, and a match timeout is
-/// logged once per source and the line skipped.
+/// only appended lines are evaluated, and a file watched by several sources is read once with every
+/// line offered to each of them. The failure timestamp is the poller's current UTC time (the regex
+/// has no guaranteed timestamp capture).
+/// <para>
+/// Log lines can be attacker-controlled, so patterns run on the linear-time
+/// <see cref="RegexOptions.NonBacktracking"/> engine whenever they allow it. A pattern that needs
+/// backtracking is logged once and runs with a 2-second match timeout; a line that times out is
+/// skipped and reported, and every other line is still evaluated. An invalid pattern is logged once
+/// and its source skipped.
+/// </para>
 /// </summary>
 public sealed class CustomLogDetector : IDetector
 {
@@ -24,6 +30,9 @@ public sealed class CustomLogDetector : IDetector
     public const string DefaultDetectorName = "custom";
 
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromSeconds(2);
+
+    // Timed-out lines keep being reported, but not more often than this.
+    private static readonly TimeSpan SkippedLinesWarningInterval = TimeSpan.FromMinutes(5);
 
     private readonly Func<WinGuardSettings> _settingsAccessor;
     private readonly ILogger<CustomLogDetector> _logger;
@@ -35,13 +44,13 @@ public sealed class CustomLogDetector : IDetector
     private HashSet<string> _knownSources = new(StringComparer.OrdinalIgnoreCase);
     private volatile bool _loopRunning;
 
-    // A regex that keeps hitting the match timeout would stall the poll loop for seconds per line.
+    // After this many full timeouts in a cycle a source's remaining lines get HurriedMatchTimeout,
+    // so a burst of crafted lines stalls the poll loop briefly instead of for seconds per line.
     private const int MaxTimeoutsPerCycle = 3;
 
     // Compiled pattern cache keyed by (source name, pattern); a null value marks a known-bad source.
-    private readonly Dictionary<(string Source, string Pattern), Regex?> _regexCache = new();
+    private readonly Dictionary<(string Source, string Pattern), SourceMatcher?> _regexCache = new();
     private readonly HashSet<string> _invalidWarnedSources = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _timeoutWarnedSources = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Creates the detector.</summary>
     /// <param name="settingsAccessor">Returns the current live settings.</param>
@@ -56,6 +65,12 @@ public sealed class CustomLogDetector : IDetector
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
+
+    /// <summary>Per-line regex budget.</summary>
+    internal TimeSpan MatchTimeout { get; init; } = RegexTimeout;
+
+    /// <summary>Per-line regex budget once a source has used up <see cref="MaxTimeoutsPerCycle"/>.</summary>
+    internal TimeSpan HurriedMatchTimeout { get; init; } = TimeSpan.FromMilliseconds(50);
 
     /// <inheritdoc />
     public ProtocolSource Source => ProtocolSource.Custom;
@@ -99,10 +114,7 @@ public sealed class CustomLogDetector : IDetector
         Regex regex;
         try
         {
-            regex = new Regex(
-                regexPattern,
-                RegexOptions.Compiled | RegexOptions.CultureInvariant,
-                RegexTimeout);
+            regex = CompileRegex(regexPattern, RegexTimeout, out _);
         }
         catch (ArgumentException)
         {
@@ -117,6 +129,25 @@ public sealed class CustomLogDetector : IDetector
         {
             failed = null;
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Compiles a source pattern on the linear-time engine, or on the backtracking engine when the
+    /// pattern needs it (lookaround, backreferences, atomic groups).
+    /// </summary>
+    /// <exception cref="ArgumentException">The pattern is invalid.</exception>
+    private static Regex CompileRegex(string pattern, TimeSpan timeout, out bool linearTime)
+    {
+        try
+        {
+            linearTime = true;
+            return new Regex(pattern, RegexOptions.NonBacktracking | RegexOptions.CultureInvariant, timeout);
+        }
+        catch (NotSupportedException)
+        {
+            linearTime = false;
+            return new Regex(pattern, RegexOptions.Compiled | RegexOptions.CultureInvariant, timeout);
         }
     }
 
@@ -150,7 +181,7 @@ public sealed class CustomLogDetector : IDetector
             Source = ProtocolSource.Custom,
             Detector = DefaultDetectorName,
             TimestampUtc = DateTime.UtcNow,
-            RawLog = line.Trim(),
+            RawLog = DetectorUtil.LimitRawLog(line.Trim()),
         };
         return true;
     }
@@ -199,9 +230,12 @@ public sealed class CustomLogDetector : IDetector
         }
     }
 
-    private void PollOnce(WinGuardSettings settings, Channel<FailedLogin> sink)
+    internal void PollOnce(WinGuardSettings settings, Channel<FailedLogin> sink)
     {
-        var activeFiles = new List<string>();
+        // The tailer keeps one cursor per file, so a file is read once here and each line handed to
+        // every source on it; reading it per source would leave the second one nothing to see.
+        var files = new Dictionary<string, WatchedFile>(StringComparer.OrdinalIgnoreCase);
+        var activeSources = new List<ActiveSource>();
         var seenSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var source in settings.CustomSources ?? [])
         {
@@ -213,56 +247,52 @@ public sealed class CustomLogDetector : IDetector
             }
 
             // Invalid patterns are reported once and the whole source is skipped for this cycle.
-            if (!TryGetSourceRegex(source, out var regex) || regex is null)
+            if (!TryGetSourceRegex(source, out var matcher) || matcher is null)
             {
                 continue;
             }
 
-            var detectorName = DisplayName(source);
             var sourceKey = $"{source.Name}|{source.PathGlob.Trim()}";
             var sourceKnown = _knownSources.Contains(sourceKey);
             seenSources.Add(sourceKey);
-            var timeouts = 0;
 
-            foreach (var file in LogFileTailer.ResolveFiles(source.PathGlob, "*"))
+            var active = new ActiveSource(matcher, DisplayName(source));
+            activeSources.Add(active);
+            var pathGlob = CustomSourceRecipes.UpgradePathGlob(source.PathGlob, source.Regex);
+            foreach (var file in LogFileTailer.ResolveFiles(pathGlob, "*"))
             {
-                activeFiles.Add(file);
-                foreach (var line in _tailer.ReadNewLines(file, readFromStartIfNew: sourceKnown))
+                if (!files.TryGetValue(file, out var watched))
                 {
-                    if (timeouts >= MaxTimeoutsPerCycle)
-                    {
-                        // Give up on this batch of lines; the next cycle starts after them.
-                        break;
-                    }
+                    files[file] = watched = new WatchedFile();
+                }
 
-                    if (!TryParseForSource(line, source, regex, out var failure, out var timedOut))
-                    {
-                        if (timedOut)
-                        {
-                            timeouts++;
-                        }
+                // A file new to the tailer but under a known source appeared since the last poll,
+                // so all of it is recent for a source added at the same moment too.
+                watched.ReadFromStartIfNew |= sourceKnown;
+                watched.CrLfRecords |= CustomSourceRecipes.UsesCrLfRecords(source.Regex);
+                watched.Sources.Add(active);
+            }
+        }
 
-                        continue;
-                    }
-
-                    if (failure is not null)
-                    {
-                        failure.Detector = detectorName;
-                        // Custom regexes have no guaranteed timestamp capture, so the ingest
-                        // (poll) time is authoritative for this engine.
-                        failure.TimestampUtc = _timeProvider.GetUtcNow().UtcDateTime;
-                        if (!sink.Writer.TryWrite(failure))
-                        {
-                            _logger.LogWarning("Custom log detector could not write to the sink channel (closed).");
-                        }
-                    }
+        foreach (var (file, watched) in files)
+        {
+            foreach (var line in _tailer.ReadNewLines(file, watched.ReadFromStartIfNew, watched.CrLfRecords))
+            {
+                foreach (var active in watched.Sources)
+                {
+                    Evaluate(line, active, sink);
                 }
             }
         }
 
+        foreach (var active in activeSources)
+        {
+            ReportSkippedLines(active);
+        }
+
         _knownSources = seenSources;
-        _tailer.Prune(activeFiles);
-        _signal.Watch(activeFiles);
+        _tailer.Prune(files.Keys);
+        _signal.Watch(files.Keys);
 
         // Keep the compiled-pattern cache to the patterns still configured.
         var live = (settings.CustomSources ?? [])
@@ -276,25 +306,84 @@ public sealed class CustomLogDetector : IDetector
     }
 
     /// <summary>
+    /// Runs one source's regex against one line. A timeout costs only that line, counted for
+    /// <see cref="ReportSkippedLines"/>: later lines and other sources are still evaluated, so a
+    /// crafted line cannot hide what comes after it.
+    /// </summary>
+    private void Evaluate(string line, ActiveSource active, Channel<FailedLogin> sink)
+    {
+        var regex = active.TimeoutsThisCycle < MaxTimeoutsPerCycle ? active.Matcher.Regex : active.Matcher.HurriedRegex;
+        FailedLogin? failure;
+        try
+        {
+            if (!TryMatch(regex, line, out failure) || failure is null)
+            {
+                return;
+            }
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            active.TimeoutsThisCycle++;
+            active.Matcher.SkippedLines++;
+            return;
+        }
+
+        failure.Detector = active.DetectorName;
+        // Custom regexes have no guaranteed timestamp capture, so the ingest
+        // (poll) time is authoritative for this engine.
+        failure.TimestampUtc = _timeProvider.GetUtcNow().UtcDateTime;
+        if (!sink.Writer.TryWrite(failure))
+        {
+            _logger.LogWarning("Custom log detector could not write to the sink channel (closed).");
+        }
+    }
+
+    /// <summary>A skipped line may have been a failed login, so it is always reported, in rate-limited totals.</summary>
+    private void ReportSkippedLines(ActiveSource active)
+    {
+        var matcher = active.Matcher;
+        var now = _timeProvider.GetUtcNow();
+        if (matcher.SkippedLines == 0 || now - matcher.LastSkipWarning < SkippedLinesWarningInterval)
+        {
+            return;
+        }
+
+        _logger.LogWarning(
+            "Custom log source {Source}: {Count} line(s) were not checked because the regex exceeded its match timeout; a failed login on such a line is not counted. Simplify the regex.",
+            active.DetectorName,
+            matcher.SkippedLines);
+        matcher.SkippedLines = 0;
+        matcher.LastSkipWarning = now;
+    }
+
+    /// <summary>
     /// Returns the cached compiled regex for a source, compiling it on first use. An invalid
     /// pattern is remembered as null, logged once, and reported as unavailable so the source is
     /// skipped instead of silently swallowed.
     /// </summary>
-    private bool TryGetSourceRegex(CustomLogSource source, out Regex? regex)
+    private bool TryGetSourceRegex(CustomLogSource source, out SourceMatcher? matcher)
     {
         var key = (source.Name ?? string.Empty, source.Regex);
-        if (_regexCache.TryGetValue(key, out regex))
+        if (_regexCache.TryGetValue(key, out matcher))
         {
-            return regex is not null;
+            return matcher is not null;
         }
 
         try
         {
-            regex = new Regex(
-                source.Regex,
-                RegexOptions.Compiled | RegexOptions.CultureInvariant,
-                RegexTimeout);
-            _regexCache[key] = regex;
+            var regex = CompileRegex(source.Regex, MatchTimeout, out var linearTime);
+            if (!linearTime)
+            {
+                _logger.LogWarning(
+                    "Custom log source {Source}: the regex uses lookaround, a backreference or another construct that needs backtracking, so a crafted log line can cost it up to {Timeout}s. Rewrite it without them if you can.",
+                    DisplayName(source),
+                    MatchTimeout.TotalSeconds);
+            }
+
+            matcher = new SourceMatcher(
+                regex,
+                linearTime ? regex : new Regex(source.Regex, RegexOptions.CultureInvariant, HurriedMatchTimeout));
+            _regexCache[key] = matcher;
             return true;
         }
         catch (ArgumentException ex)
@@ -305,34 +394,7 @@ public sealed class CustomLogDetector : IDetector
                 _logger.LogWarning(ex, "Custom log source {Source} has an invalid regex; skipping it.", DisplayName(source));
             }
 
-            regex = null;
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Runs a cached regex against one line, converting a match timeout into a skipped line and a
-    /// rate-limited (once per source) warning instead of propagating the exception.
-    /// </summary>
-    private bool TryParseForSource(string line, CustomLogSource source, Regex regex, out FailedLogin? failure, out bool timedOut)
-    {
-        timedOut = false;
-        try
-        {
-            return TryMatch(regex, line, out failure);
-        }
-        catch (RegexMatchTimeoutException)
-        {
-            failure = null;
-            timedOut = true;
-            if (_timeoutWarnedSources.Add(DisplayName(source)))
-            {
-                _logger.LogWarning(
-                    "Custom log source {Source} regex exceeded the {Timeout}s match timeout; skipping the line.",
-                    DisplayName(source),
-                    RegexTimeout.TotalSeconds);
-            }
-
+            matcher = null;
             return false;
         }
     }
@@ -349,5 +411,37 @@ public sealed class CustomLogDetector : IDetector
 
         var trimmed = value.Trim();
         return trimmed == "-" ? null : trimmed;
+    }
+
+    /// <summary>A source's compiled regex; lives as long as the pattern stays configured.</summary>
+    private sealed class SourceMatcher(Regex regex, Regex hurriedRegex)
+    {
+        public Regex Regex { get; } = regex;
+
+        public Regex HurriedRegex { get; } = hurriedRegex;
+
+        public long SkippedLines { get; set; }
+
+        public DateTimeOffset LastSkipWarning { get; set; } = DateTimeOffset.MinValue;
+    }
+
+    /// <summary>One enabled source during one poll cycle.</summary>
+    private sealed class ActiveSource(SourceMatcher matcher, string detectorName)
+    {
+        public SourceMatcher Matcher { get; } = matcher;
+
+        public string DetectorName { get; } = detectorName;
+
+        public int TimeoutsThisCycle { get; set; }
+    }
+
+    /// <summary>One file during one poll cycle, with every source that wants its lines.</summary>
+    private sealed class WatchedFile
+    {
+        public List<ActiveSource> Sources { get; } = [];
+
+        public bool ReadFromStartIfNew { get; set; }
+
+        public bool CrLfRecords { get; set; }
     }
 }

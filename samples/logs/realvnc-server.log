@@ -1,0 +1,15 @@
+<13> 2026-10-04T09:55:01.120Z vps-01 vncserver.exe[2212]: Connections: connected: 203.0.113.91::49826 (TCP)
+<13> 2026-10-04T09:55:03.480Z vps-01 vncserver.exe[2212]: Connections: disconnected: 203.0.113.91::49826 (TCP) ([AuthFailure] The username was not recognized, or the password is incorrect)
+2026-10-04T09:55:09.300Z vps-01 vncserver-x11[340]: Connections: disconnected: 203.0.113.92::62213 (UDP) ([AuthFailure] Either the username was not recognised, or the password was incorrect)
+Connections: disconnected: 203.0.113.93::59109 ([AuthFailure] Either the username was not recognised, or the password was incorrect)
+<13> 2026-10-04T09:55:20.100Z vps-01 vncserver.exe[2212]: Connections: disconnected: [2001:db8::94]::51000 (TCP) ([AuthFailure] The username was not recognized, or the password is incorrect)
+ Connections: Blacklisted: 203.0.113.95
+ Connections: blacklisted: 203.0.113.96
+<13> 2026-10-04T09:56:01.000Z vps-01 vncserver.exe[2212]: Connections: connected: 198.51.100.100::61004 (TCP)
+<13> 2026-10-04T09:56:02.000Z vps-01 vncserver.exe[2212]: Connections: authenticated: 198.51.100.100::61004 (TCP), as alice (f permissions)
+<13> 2026-10-04T09:56:30.000Z vps-01 vncserver.exe[2212]: Connections: disconnected: 198.51.100.100::61004 (TCP) ([ViewerClosed] The remote user closed the connection.)
+<13> 2026-10-04T09:56:40.000Z vps-01 vncserver.exe[2212]: Connections: disconnected: 198.51.100.101::61005 (TCP) ([System] write: Connection reset by peer (10054))
+<14> 2026-10-04T09:56:50.000Z vps-01 vncserver.exe[2212]: Connections: disconnected: 198.51.100.102::61006 (TCP) ([AuthError] An authentication error occurred.)
+ Connections: Accepted: 198.51.100.103::5901
+ Connections: Closed: 198.51.100.103::5901
+ Connections: closed: 198.51.100.104::5902 (Clean)

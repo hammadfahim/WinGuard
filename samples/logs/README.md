@@ -14,6 +14,32 @@ these results:
 | `iis-ftp-w3c.log` | `FtpLogDetector.TryParseIisLine` | 3 failures: `203.0.113.9` (×2, user `admin`, TsUtc `09:00:05Z` then `09:00:12Z`) and `198.51.100.44` (user `bob`, TsUtc `09:01:09Z`); Detector=`iis-ftp`; `PASS`+`230` and `USER` lines → false |
 | `filezilla-server.log` | `FtpLogDetector.TryParseFileZillaLine` | 3 failures: `203.0.113.44` and `192.0.2.99` (both user `null`, pre-login `(not logged in)`) and `203.0.113.55` (user `bob`, bare-name shape); Detector=`filezilla`; only lines containing `530 Login or password incorrect!` match |
 | `custom-app.log` | `CustomLogDetector.TryParseLine` with regex `LOGIN FAILED user=(?<username>\S+) ip=(?<ipaddress>\S+)` | 3 failures: `203.0.113.99` (jsmith), `203.0.113.99` (admin), `192.0.2.15` (root) |
+| `hmailserver.log` | `CustomSourceRecipes.HMailServer` | 8 failures: `203.0.113.61` (×2, SMTP), `203.0.113.63`, `.64`, `.65` (POP3), `203.0.113.66`, `2001:db8::66`, `203.0.113.67` (IMAP); user `null`. Successes, `RECEIVED:` lines and outgoing `SMTPC` lines → false |
+| `hmailserver_awstats.log` | `CustomSourceRecipes.HMailServer` | no matches: this log records deliveries only, never logins |
+| `iis-http-w3c.log` | `CustomSourceRecipes.IisHttpAuth` | 4 failures: `203.0.113.81` (admin), `203.0.113.82` (`EXAMPLE\bob`), `2001:db8::83` (root), `203.0.113.84` (svc). The `401 2 5` challenge, the `401 1 2148074254` NTLM step, other 401.x and non-401 lines → false |
+| `realvnc-server.log` | `CustomSourceRecipes.Vnc` | 6 failures: `203.0.113.91`–`.93`, `2001:db8::94` (`[AuthFailure]`), `203.0.113.95`, `.96` (blacklisted). Other disconnects, `[AuthError]`, `authenticated` and `Closed` lines → false |
+| `openssh-sshd.log` | `CustomSourceRecipes.WindowsOpenSsh` | 3 failures: `203.0.113.97` (root), `203.0.113.98` (oracle), `203.0.113.99` (user `x from 198.51.100.9 port 1`: the address comes from the end of the line) |
+
+### Where the recipe formats come from
+
+- **hMailServer**: `Logger.cpp`, `SMTPConnection.cpp`, `POP3Connection.cpp` and the IMAP login commands in
+  the [hMailServer source](https://github.com/hmailserver/hmailserver). The columns are tab-separated:
+  `"SMTPD"`, thread, session, `"time"`, `"client ip"`, `"text"`. `AWStats.cpp` shows that
+  `hmailserver_awstats.log` holds delivery results and no authentication data. Commands are split at CRLF and
+  the logger only rewrites CRLF, so a bare LF in client text reaches the log: the recipe sets `CrLfRecords`.
+- **IIS HTTP**: the default W3C fields; Microsoft's
+  [HTTP status code list](https://learn.microsoft.com/en-us/troubleshoot/developer/webapps/iis/health-diagnostic-performance/http-status-code)
+  for the 401.x meanings, and the
+  [IIS support blog on NTLM](https://techcommunity.microsoft.com/blog/iis-support-blog/ntlm-want-to-know-how-it-works/347849)
+  for `401 2 5` and `401 1 2148074254` being normal handshake steps.
+- **RealVNC**: the line published in
+  [fail2ban discussion 3034](https://github.com/fail2ban/fail2ban/discussions/3034), and RealVNC's
+  [logging article](https://help.realvnc.com/hc/en-us/articles/360002254238-All-About-Logging) for the log
+  location. No sample of the Windows file itself was available, so the `vncserver.exe` prefix in the fixture
+  is modelled on the published Linux lines; the recipe tolerates a prefix and none.
+- **TigerVNC** (the blacklisted line): `common/rfb/VNCServerST.cxx` in the
+  [TigerVNC source](https://github.com/TigerVNC/tigervnc). It logs `Closed:` without a reason, which is why
+  the recipe no longer treats a closed connection as a failure.
 
 All parsed IPs must be normalized via `IpMatcher.TryNormalize` (strip ports/brackets,
 lowercase IPv6). All parsed FailedLogin.Source values: FTP → `Ftp`, custom → `Custom`.
@@ -48,6 +74,12 @@ same RDP attempt and is de-duplicated.
 `LogFileTailer` positions its cursor at the **end of a file the first time it sees it**
 (skip-to-end), so a service restart never replays historical failures already present in an
 FTP/custom log — this prevents a mass-ban on a fresh install over a large legacy log.
-Rotation/truncation is still detected (the file shrinks) and resets the cursor to 0 so the
-rotated file is read fully. Tests/tooling can opt into reading existing content by
-constructing `new LogFileTailer(processExistingContent: true)`.
+Rotation/truncation is still detected (the file's identity changes, or it shrinks) and resets
+the cursor to 0 so the replacement file is read fully. The old file continues from where it
+stopped if it reappears under a watched name, so it is not counted twice. Tests/tooling can opt
+into reading existing content by constructing `new LogFileTailer(processExistingContent: true)`.
+
+## Encoding
+
+The BOM at the start of a file selects UTF-8, UTF-16 or UTF-32, also when the first read skips
+to the end; a file without a BOM is read as UTF-8.
