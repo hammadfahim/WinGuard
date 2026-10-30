@@ -137,12 +137,20 @@ internal static class BreakGlassCommands
         }
     }
 
-    /// <summary>How the disarm state reads in <c>--doctor</c>. The file decides; the service only follows it.</summary>
-    internal static (bool Ok, string Detail) DescribeForDoctor(DisarmState local, ServiceStatusDto? status) => local.Status switch
+    /// <summary>
+    /// How the disarm state reads in <c>--doctor</c>. The file decides; the service only follows it.
+    /// A prompt that is not elevated sees no file in the hardened folder, disarmed or not, so "armed"
+    /// is said only when something could actually have shown otherwise.
+    /// </summary>
+    /// <param name="local">The file as this process sees it.</param>
+    /// <param name="status">The service's status, when it could be reached.</param>
+    /// <param name="folderReachable">Whether this process can get into the data folder.</param>
+    internal static (bool Ok, string Detail) DescribeForDoctor(DisarmState local, ServiceStatusDto? status, bool folderReachable) => local.Status switch
     {
         DisarmStatus.Active => (false, $"DISARMED until {local.UntilUtc:u}: nothing is enforced; --rearm ends it early"),
         DisarmStatus.Invalid or DisarmStatus.Untrusted => (false, $"armed, but a break-glass file is being ignored because {local.Problem}"),
         _ when status?.Disarmed == true => (false, $"the service still reports a disarm until {status.DisarmedUntilUtc:u}"),
+        _ when status is null && !folderReachable => (false, "unknown: this prompt can reach neither the data folder nor the service"),
         _ => (true, "armed"),
     };
 

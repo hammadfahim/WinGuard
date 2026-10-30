@@ -279,9 +279,10 @@ internal static class CliCommands
         }
 
         // 3. Local environment checks (no service needed).
-        var (armed, armedDetail) = BreakGlassCommands.DescribeForDoctor(new DisarmFile(Defaults.DisarmFilePath).Read(DateTime.UtcNow), status);
+        var dataFolderWritable = CheckWritable(Defaults.DataFolder);
+        var (armed, armedDetail) = BreakGlassCommands.DescribeForDoctor(new DisarmFile(Defaults.DisarmFilePath).Read(DateTime.UtcNow), status, dataFolderWritable);
         Report("Enforcement", armed, warnOnly: true, armedDetail);
-        Report("Data folder", CheckWritable(Defaults.DataFolder), detail: Defaults.DataFolder);
+        Report("Data folder", dataFolderWritable, detail: Defaults.DataFolder);
         Report("Log folder", CheckWritable(Defaults.LogFolder), detail: Defaults.LogFolder);
         Report("Database file", File.Exists(Defaults.DatabasePath), warnOnly: true, File.Exists(Defaults.DatabasePath) ? "present" : "not created yet");
 

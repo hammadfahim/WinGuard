@@ -941,13 +941,13 @@ public sealed class BreakGlassTests : IDisposable
     {
         var until = Now.AddMinutes(5);
 
-        Assert.Equal((true, "armed"), BreakGlassCommands.DescribeForDoctor(DisarmState.None, null));
+        Assert.Equal((true, "armed"), BreakGlassCommands.DescribeForDoctor(DisarmState.None, null, folderReachable: true));
 
-        var (activeOk, activeDetail) = BreakGlassCommands.DescribeForDoctor(new DisarmState(DisarmStatus.Active, until), null);
+        var (activeOk, activeDetail) = BreakGlassCommands.DescribeForDoctor(new DisarmState(DisarmStatus.Active, until), null, folderReachable: true);
         Assert.False(activeOk);
         Assert.Contains("DISARMED until 2026-03-01 12:05:00Z", activeDetail);
 
-        var (refusedOk, refusedDetail) = BreakGlassCommands.DescribeForDoctor(new DisarmState(DisarmStatus.Invalid, Problem: "it is not valid JSON"), null);
+        var (refusedOk, refusedDetail) = BreakGlassCommands.DescribeForDoctor(new DisarmState(DisarmStatus.Invalid, Problem: "it is not valid JSON"), null, folderReachable: true);
         Assert.False(refusedOk);
         Assert.Contains("it is not valid JSON", refusedDetail);
     }
@@ -957,7 +957,23 @@ public sealed class BreakGlassTests : IDisposable
     {
         var status = new ServiceStatusDto { Disarmed = true, DisarmedUntilUtc = Now };
 
-        Assert.False(BreakGlassCommands.DescribeForDoctor(DisarmState.None, status).Ok);
+        Assert.False(BreakGlassCommands.DescribeForDoctor(DisarmState.None, status, folderReachable: true).Ok);
+    }
+
+    [Fact]
+    public void A_prompt_that_can_see_nothing_does_not_claim_to_be_armed()
+    {
+        // The hardened folder hides the file from a console that is not elevated, disarmed or not.
+        var (ok, detail) = BreakGlassCommands.DescribeForDoctor(DisarmState.None, null, folderReachable: false);
+
+        Assert.False(ok);
+        Assert.Contains("unknown", detail);
+    }
+
+    [Fact]
+    public void The_service_can_vouch_for_armed_when_the_folder_is_out_of_reach()
+    {
+        Assert.Equal((true, "armed"), BreakGlassCommands.DescribeForDoctor(DisarmState.None, new ServiceStatusDto(), folderReachable: false));
     }
 
     [Fact]
