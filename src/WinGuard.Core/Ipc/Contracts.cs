@@ -167,7 +167,45 @@ public sealed class PrereqsDto
     /// <summary>RdpCoreTS/Operational channel exists and is enabled.</summary>
     public bool RdpCoreTsChannelEnabled { get; set; }
 
+    /// <summary>Whether Windows acts on WinGuard's rules at all; its warnings are in <see cref="Warnings"/> too.</summary>
+    public FirewallPolicyDto? FirewallPolicy { get; set; }
+
     public List<string> Warnings { get; set; } = [];
+}
+
+/// <summary>The firewall policy as it affects WinGuard's rules. Read-only: WinGuard never changes policy.</summary>
+public sealed class FirewallPolicyDto
+{
+    /// <summary>False when the policy could not be read; the other fields then say nothing.</summary>
+    public bool Known { get; set; }
+
+    public List<FirewallProfileDto> ActiveProfiles { get; set; } = [];
+
+    /// <summary>Raw <c>NET_FW_MODIFY_STATE</c>: 0 OK, 1 Group Policy override, 2 inbound blocked.</summary>
+    public int LocalPolicyModifyState { get; set; }
+
+    /// <summary>False when Group Policy keeps local rules from taking effect, or the state is not understood.</summary>
+    public bool LocalPolicyHonoured { get; set; }
+
+    /// <summary>All incoming connections are blocked anyway: harmless, but WinGuard's rules add nothing.</summary>
+    public bool InboundBlocked { get; set; }
+
+    /// <summary>True only when a WinGuard rule really blocks: firewall on in every active profile, local rules honoured.</summary>
+    public bool RulesTakeEffect { get; set; }
+
+    /// <summary>In plain language; empty when all is well.</summary>
+    public List<string> Warnings { get; set; } = [];
+}
+
+/// <summary>One firewall profile currently in use.</summary>
+public sealed class FirewallProfileDto
+{
+    /// <summary>Domain, Private or Public.</summary>
+    public string Name { get; set; } = string.Empty;
+
+    public bool Enabled { get; set; }
+
+    public bool BlockAllInbound { get; set; }
 }
 
 // ---- method params ----

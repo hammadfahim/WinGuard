@@ -13,6 +13,7 @@ using WinGuard.Core.Abstractions;
 using WinGuard.Core.Config;
 using WinGuard.Core.Detection;
 using WinGuard.Core.Engine;
+using WinGuard.Core.Firewall;
 using WinGuard.Core.Ipc;
 using WinGuard.Core.Model;
 
@@ -75,6 +76,9 @@ public sealed partial class IpcRequestHandler
         {
             warnings.Add("RdpCoreTS/Operational channel is disabled; the RDP TLS/NLA fallback detector will not see event 140.");
         }
+
+        dto.FirewallPolicy = FirewallPolicyEvaluator.ReadSafely(_firewallPolicy);
+        warnings.AddRange(dto.FirewallPolicy.Warnings);
 
         dto.Warnings = warnings;
         return dto;

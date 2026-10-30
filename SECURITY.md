@@ -57,6 +57,9 @@ Public disclosure is coordinated with you after a fix is released.
   and a standard user may be able to create files there. A file that is expired, corrupt,
   over-long or untrusted disarms nothing and is reported once; a file that goes bad during a
   window ends it at once.
+- The prerequisite checks and `--doctor` report whether Windows acts on WinGuard's rules at all
+  (firewall on in every active profile, local rules honoured by Group Policy). They only read the
+  policy: WinGuard never changes firewall policy, profiles or Group Policy settings.
 - WinGuard makes **no outbound connections** of its own; the only network traffic it can produce
   is to the notification destinations (webhook / Telegram / SMTP) an administrator explicitly
   configures. Webhook URLs and Telegram tokens are secrets and never reach the log; a plain

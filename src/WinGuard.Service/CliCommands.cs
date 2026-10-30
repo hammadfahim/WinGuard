@@ -268,7 +268,9 @@ internal static class CliCommands
                     Report("Logon failure auditing", prereqs.AuditLogonFailureEnabled, detail: "required for RDP 4625 detection");
                     Report("Windows Defender Firewall service (MpsSvc)", prereqs.FirewallServiceRunning);
                     Report("RdpCoreTS/Operational channel", prereqs.RdpCoreTsChannelEnabled, warnOnly: true, "140 fallback");
-                    foreach (var warning in prereqs.Warnings)
+
+                    // The policy gets its own report below, service or not.
+                    foreach (var warning in prereqs.Warnings.Except(prereqs.FirewallPolicy?.Warnings ?? []))
                     {
                         Console.WriteLine("       " + warning);
                     }
@@ -287,11 +289,54 @@ internal static class CliCommands
         Report("Firewall COM API", firewallOk, detail: firewallDetail);
         Report("Firewall service state (local probe)", new WindowsFirewall(NullLogger<WindowsFirewall>.Instance).IsServiceRunning());
 
+        var policy = FirewallPolicyEvaluator.ReadSafely(new ComFirewallPolicyReader());
+        foreach (var check in DescribeFirewallPolicy(policy))
+        {
+            Report(check.Label, check.Ok, check.WarnOnly, check.Detail);
+        }
+
+        foreach (var warning in policy.Warnings)
+        {
+            Console.WriteLine("       " + warning);
+        }
+
         Console.WriteLine(new string('-', 60));
         Console.WriteLine(failures == 0 && warnings == 0
             ? "All checks passed."
             : $"{failures} failure(s), {warnings} warning(s).");
         return failures == 0 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// The firewall policy as doctor checks. Rules that silently do nothing fail the check, as a
+    /// stopped firewall service does. A policy that blocks all inbound traffic only warns: no
+    /// attacker gets through that, and neither does anyone else, which is hard to overlook.
+    /// </summary>
+    internal static IReadOnlyList<(string Label, bool Ok, bool WarnOnly, string Detail)> DescribeFirewallPolicy(FirewallPolicyDto policy)
+    {
+        if (!policy.Known)
+        {
+            return [("Firewall policy", false, true, "could not be read")];
+        }
+
+        var checks = new List<(string Label, bool Ok, bool WarnOnly, string Detail)>();
+        foreach (var profile in policy.ActiveProfiles)
+        {
+            checks.Add(($"Firewall profile {profile.Name}", profile.Enabled, false, profile.Enabled ? "on" : "OFF, rules have no effect"));
+        }
+
+        if (policy.ActiveProfiles.Count == 0)
+        {
+            checks.Add(("Firewall profiles", false, true, "none active"));
+        }
+
+        checks.Add(("Local firewall rules honoured", policy.LocalPolicyHonoured, false, policy.LocalPolicyHonoured ? "yes" : "NO, rules have no effect"));
+        if (policy.InboundBlocked)
+        {
+            checks.Add(("Inbound traffic", false, true, "all incoming connections are blocked"));
+        }
+
+        return checks;
     }
 
     /// <summary>What to print when the service gave no answer, most specific reason first.</summary>
