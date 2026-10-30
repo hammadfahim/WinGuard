@@ -80,6 +80,11 @@ public sealed partial class IpcRequestHandler
         dto.FirewallPolicy = FirewallPolicyEvaluator.ReadSafely(_firewallPolicy);
         warnings.AddRange(dto.FirewallPolicy.Warnings);
 
+        if (_settings.UndecryptableSecrets is { Count: > 0 } secrets)
+        {
+            warnings.Add($"The stored {string.Join(", ", secrets)} could not be decrypted here, so those notifications stay off. Enter the value again, or run under the account that stored it.");
+        }
+
         dto.Warnings = warnings;
         return dto;
     }

@@ -330,7 +330,7 @@ public sealed class SmtpSettings
     /// <summary>Username; empty = anonymous relay (typical for an internal smarthost).</summary>
     public string Username { get; set; } = string.Empty;
 
-    /// <summary>Password; stored in the settings blob like the rest of the configuration.</summary>
+    /// <summary>Password; encrypted in the store like the webhook URL and Telegram token (see <see cref="SettingsSecrets"/>).</summary>
     public string Password { get; set; } = string.Empty;
 
     /// <value>Display/sender address, e.g. winguard@example.com.</value>

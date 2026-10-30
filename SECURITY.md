@@ -60,6 +60,21 @@ Public disclosure is coordinated with you after a fix is released.
 - The prerequisite checks and `--doctor` report whether Windows acts on WinGuard's rules at all
   (firewall on in every active profile, local rules honoured by Group Policy). They only read the
   policy: WinGuard never changes firewall policy, profiles or Group Policy settings.
+- **Notification secrets** (SMTP password, Telegram token, webhook URL) are encrypted in the
+  settings database with **DPAPI in user scope** and a WinGuard-specific entropy value, and marked
+  `dpapi:`. Machine scope would let any local process decrypt them; under LocalSystem, user scope
+  limits that to SYSTEM. This protects a copied database, a backup or an administrator's casual
+  read of the file. It does not protect against code running as SYSTEM, or an administrator who
+  can run code as SYSTEM, and the entropy is not a secret. Values stay plaintext in the service's
+  memory and over the admin-only pipe, because the channels and the console need them.
+- Old plaintext values keep working. The service encrypts them at its next start; a `--console`
+  run leaves them alone, because whatever it encrypts only that administrator can read. A value
+  that cannot be encrypted is refused, never stored in the clear.
+- A secret that cannot be decrypted (the database moved to another machine, or `--console` reading
+  what the service stored) acts as empty and is reported once, and the channel stays off. Its
+  ciphertext stays in the database through every later save, so a console run cannot destroy it;
+  only entering a new value replaces it. Moving WinGuard to another machine means entering the
+  secrets again.
 - WinGuard makes **no outbound connections** of its own; the only network traffic it can produce
   is to the notification destinations (webhook / Telegram / SMTP) an administrator explicitly
   configures. Webhook URLs and Telegram tokens are secrets and never reach the log; a plain
