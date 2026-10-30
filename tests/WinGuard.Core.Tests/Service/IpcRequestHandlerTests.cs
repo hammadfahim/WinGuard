@@ -1,5 +1,7 @@
+using System.Reflection;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
+using WinGuard.Core.Abstractions;
 using WinGuard.Core.Config;
 using WinGuard.Core.Engine;
 using WinGuard.Core.Ipc;
@@ -141,6 +143,174 @@ public sealed class IpcRequestHandlerTests
         Assert.False((await h.CallAsync(IpcMethods.WhitelistAdd, new ListValueParams { Value = value })).Ok);
         Assert.False((await h.CallAsync(IpcMethods.BlacklistAdd, new ListValueParams { Value = value })).Ok);
         Assert.Empty(await h.GetAsync<List<ListEntryDto>>(IpcMethods.ListLists));
+    }
+
+    [Theory]
+    [InlineData(ListKind.Whitelist, "0.0.0.0/0")]
+    [InlineData(ListKind.Blacklist, "0.0.0.0/0")]
+    [InlineData(ListKind.Whitelist, "2000::/16")]
+    [InlineData(ListKind.Blacklist, "not even an address")]
+    public async Task An_entry_from_an_older_version_can_be_removed_whatever_it_is(ListKind kind, string stored)
+    {
+        await using var h = await Harness.StartAsync();
+        await h.Store.AddToListAsync(kind, stored);
+
+        await h.SendAsync(IpcMethods.ListRemove, new ListRemoveParams { Kind = kind, Value = stored });
+
+        Assert.Empty(await h.GetAsync<List<ListEntryDto>>(IpcMethods.ListLists));
+    }
+
+    [Theory]
+    [InlineData("10.1.2.3/7")]    // the same network with host bits set
+    [InlineData(" 10.0.0.0/7 ")]
+    public async Task A_broad_entry_can_be_named_the_way_add_would_have_written_it(string value)
+    {
+        await using var h = await Harness.StartAsync();
+        await h.Store.AddToListAsync(ListKind.Whitelist, "10.0.0.0/7");
+
+        await h.SendAsync(IpcMethods.ListRemove, new ListRemoveParams { Kind = ListKind.Whitelist, Value = value });
+
+        Assert.Empty(await h.GetAsync<List<ListEntryDto>>(IpcMethods.ListLists));
+    }
+
+    [Fact]
+    public async Task A_host_stored_as_a_32_bit_range_can_be_named_as_the_host()
+    {
+        await using var h = await Harness.StartAsync();
+        await h.Store.AddToListAsync(ListKind.Blacklist, "203.0.113.5/32");
+
+        await h.SendAsync(IpcMethods.ListRemove, new ListRemoveParams { Kind = ListKind.Blacklist, Value = "203.0.113.5" });
+
+        Assert.Empty(await h.GetAsync<List<ListEntryDto>>(IpcMethods.ListLists));
+    }
+
+    [Theory]
+    [InlineData("not-an-ip")]
+    [InlineData("")]
+    public async Task Removing_something_that_is_neither_stored_nor_valid_is_refused(string value)
+    {
+        await using var h = await Harness.StartAsync();
+
+        var response = await h.CallAsync(IpcMethods.ListRemove, new ListRemoveParams { Kind = ListKind.Whitelist, Value = value });
+
+        Assert.False(response.Ok);
+    }
+
+    [Fact]
+    public async Task Removing_a_valid_entry_that_is_not_there_stays_a_no_op()
+    {
+        await using var h = await Harness.StartAsync();
+
+        await h.SendAsync(IpcMethods.ListRemove, new ListRemoveParams { Kind = ListKind.Whitelist, Value = "203.0.113.5" });
+    }
+
+    [Fact]
+    public async Task A_single_host_written_as_a_range_is_treated_as_that_host()
+    {
+        await using var h = await Harness.StartAsync();
+
+        await h.SendAsync(IpcMethods.BlacklistAdd, new ListValueParams { Value = "203.0.113.20/32" });
+
+        Assert.Equal("203.0.113.20", Assert.Single(await h.GetAsync<List<ListEntryDto>>(IpcMethods.ListLists)).Value);
+        Assert.Equal("203.0.113.20", Assert.Single(await h.GetAsync<List<BanDto>>(IpcMethods.ListBans)).IpAddress);
+    }
+
+    [Fact]
+    public async Task A_bulk_unban_that_fails_halfway_still_lifts_the_rest_and_names_what_is_left()
+    {
+        await using var h = await Harness.StartAsync(refuseRemovalOf: "198.51.100.11");
+        await h.SendAsync(IpcMethods.BlockNow, new BlockNowParams { Ip = "198.51.100.10" });
+        await h.SendAsync(IpcMethods.BlockNow, new BlockNowParams { Ip = "198.51.100.11" });
+        await h.SendAsync(IpcMethods.BlockNow, new BlockNowParams { Ip = "198.51.100.12" });
+
+        var response = await h.CallAsync(IpcMethods.WhitelistAdd, new ListValueParams { Value = "198.51.100.0/24" });
+
+        Assert.False(response.Ok);
+        Assert.Contains("1 of 3", response.Error);
+        Assert.Contains("198.51.100.11", response.Error);
+        Assert.Equal(new[] { "198.51.100.11" }, (await h.GetAsync<List<BanDto>>(IpcMethods.ListBans)).Select(b => b.IpAddress));
+
+        // The entry itself was saved, so nothing is half-way: repeating the request is safe.
+        Assert.Contains(await h.GetAsync<List<ListEntryDto>>(IpcMethods.ListLists), e => e.Value == "198.51.100.0/24");
+    }
+
+    [Fact]
+    public async Task Taking_a_range_off_the_blacklist_reports_a_ban_it_could_not_lift()
+    {
+        await using var h = await Harness.StartAsync(refuseRemovalOf: "203.0.113.21");
+        await h.Store.AddToListAsync(ListKind.Blacklist, "203.0.113.0/24");
+        await h.Store.UpsertBanAsync(new BanEntry { IpAddress = "203.0.113.20", IsPermanent = true, Note = "blacklist" });
+        await h.Store.UpsertBanAsync(new BanEntry { IpAddress = "203.0.113.21", IsPermanent = true, Note = "blacklist" });
+
+        var response = await h.CallAsync(IpcMethods.ListRemove, new ListRemoveParams { Kind = ListKind.Blacklist, Value = "203.0.113.0/24" });
+
+        Assert.False(response.Ok);
+        Assert.Contains("203.0.113.21", response.Error);
+        Assert.Equal(new[] { "203.0.113.21" }, (await h.GetAsync<List<BanDto>>(IpcMethods.ListBans)).Select(b => b.IpAddress));
+    }
+
+    [Fact]
+    public async Task An_unblock_the_store_refused_is_not_reported_as_done()
+    {
+        await using var h = await Harness.StartAsync(refuseRemovalOf: "203.0.113.7");
+        await h.SendAsync(IpcMethods.BlockNow, new BlockNowParams { Ip = "203.0.113.7" });
+
+        var response = await h.CallAsync(IpcMethods.Unblock, new UnblockParams { Ip = "203.0.113.7" });
+
+        Assert.False(response.Ok);
+        Assert.Contains("203.0.113.7", response.Error);
+    }
+
+    [Fact]
+    public async Task A_blacklisted_host_the_database_would_not_ban_is_reported()
+    {
+        await using var h = await Harness.StartAsync();
+        h.Store.FailWrites = true;
+
+        var response = await h.CallAsync(IpcMethods.BlacklistAdd, new ListValueParams { Value = "203.0.113.20" });
+
+        Assert.False(response.Ok);
+        Assert.Contains("Simulated database failure", response.Error);
+    }
+
+    [Fact]
+    public async Task A_whitelisted_host_on_the_blacklist_is_no_error()
+    {
+        await using var h = await Harness.StartAsync();
+        await h.SendAsync(IpcMethods.WhitelistAdd, new ListValueParams { Value = "203.0.113.20" });
+
+        await h.SendAsync(IpcMethods.BlacklistAdd, new ListValueParams { Value = "203.0.113.20" });
+
+        Assert.Empty(await h.GetAsync<List<BanDto>>(IpcMethods.ListBans));
+    }
+
+    [Fact]
+    public async Task A_block_without_a_duration_answers_with_the_configured_tier()
+    {
+        await using var h = await Harness.StartAsync();
+        var settings = await h.GetAsync<WinGuardSettings>(IpcMethods.GetSettings);
+        settings.BanTiers = [TimeSpan.FromHours(3), TimeSpan.FromDays(2)];
+        await h.SendAsync(IpcMethods.UpdateSettings, new UpdateSettingsParams { Settings = settings });
+
+        var ban = await h.GetAsync<BanDto>(IpcMethods.BlockNow, new BlockNowParams { Ip = "203.0.113.7" });
+
+        Assert.Equal("203.0.113.7", ban.IpAddress);
+        Assert.False(ban.IsPermanent);
+        Assert.Equal(TimeSpan.FromHours(3), ban.ExpiresUtc - ban.BannedAtUtc);
+        Assert.Equal(1, ban.OffenseCount);
+    }
+
+    [Fact]
+    public async Task A_block_answers_with_the_capped_duration_not_the_requested_one()
+    {
+        await using var h = await Harness.StartAsync();
+        var settings = await h.GetAsync<WinGuardSettings>(IpcMethods.GetSettings);
+        settings.MaxBanDuration = TimeSpan.FromDays(10);
+        await h.SendAsync(IpcMethods.UpdateSettings, new UpdateSettingsParams { Settings = settings });
+
+        var ban = await h.GetAsync<BanDto>(IpcMethods.BlockNow, new BlockNowParams { Ip = "203.0.113.7", Duration = TimeSpan.FromDays(100) });
+
+        Assert.Equal(TimeSpan.FromDays(10), ban.ExpiresUtc - ban.BannedAtUtc);
     }
 
     [Fact]
@@ -336,6 +506,32 @@ public sealed class IpcRequestHandlerTests
         Assert.Equal(64, stored.Ipv6AggregatePrefixLength);
     }
 
+    /// <summary>A store that refuses to remove one ban, as a locked database would.</summary>
+    public class RefusingStore : DispatchProxy
+    {
+        private IStore _inner = null!;
+        private string _ip = string.Empty;
+
+        public static IStore Wrap(IStore inner, string ip)
+        {
+            var proxy = Create<IStore, RefusingStore>();
+            var refusing = (RefusingStore)(object)proxy;
+            refusing._inner = inner;
+            refusing._ip = ip;
+            return proxy;
+        }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod!.Name == nameof(IStore.RemoveBanAsync) && _ip.Equals(args![0]))
+            {
+                return Task.FromException(new IOException("database is locked"));
+            }
+
+            return targetMethod.Invoke(_inner, args);
+        }
+    }
+
     /// <summary>The handler wired the way Program.cs wires it, with in-memory store and firewall.</summary>
     private sealed class Harness : IAsyncDisposable
     {
@@ -355,7 +551,7 @@ public sealed class IpcRequestHandlerTests
 
         public IpcRequestHandler Handler { get; private set; } = null!;
 
-        public static async Task<Harness> StartAsync()
+        public static async Task<Harness> StartAsync(string? refuseRemovalOf = null)
         {
             var h = new Harness();
             var holder = new SettingsHolder(h.Store, NullLogger<SettingsHolder>.Instance);
@@ -366,10 +562,11 @@ public sealed class IpcRequestHandlerTests
             settings.HousekeepingInterval = TimeSpan.FromHours(6);
             await holder.ApplyAsync(settings);
 
-            h.Engine = new BanEngine(h.Store, h.Firewall, () => holder.Current, NullLogger<BanEngine>.Instance, h.Time);
+            IStore store = refuseRemovalOf is null ? h.Store : RefusingStore.Wrap(h.Store, refuseRemovalOf);
+            h.Engine = new BanEngine(store, h.Firewall, () => holder.Current, NullLogger<BanEngine>.Instance, h.Time);
             await h.Engine.StartAsync(CancellationToken.None);
             h.Handler = new IpcRequestHandler(
-                h.Store,
+                store,
                 h.Engine,
                 holder,
                 h.Firewall,
