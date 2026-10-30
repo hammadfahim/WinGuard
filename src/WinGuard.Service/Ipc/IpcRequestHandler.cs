@@ -277,8 +277,8 @@ public sealed partial class IpcRequestHandler
 
         // A blacklisted single host is blocked right away (RdpGuard-style). CIDR ranges were
         // enforced as range rules by the pass above. A whitelisted IP or a non-host address is
-        // refused by the engine (whitelist always wins) — expected, not an error. Anything else,
-        // such as a database failure, means the host is not blocked and the caller must hear that.
+        // refused by the engine (whitelist always wins) — expected, not an error. A database
+        // failure is not one either: the engine blocks first and saves the ban when it can.
         if (IpMatcher.TryNormalize(value, out var ip))
         {
             try

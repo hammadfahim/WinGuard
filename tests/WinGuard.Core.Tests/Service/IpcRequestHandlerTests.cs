@@ -262,15 +262,14 @@ public sealed class IpcRequestHandlerTests
     }
 
     [Fact]
-    public async Task A_blacklisted_host_the_database_would_not_ban_is_reported()
+    public async Task A_blacklisted_host_is_blocked_even_when_the_database_refuses_the_ban()
     {
         await using var h = await Harness.StartAsync();
         h.Store.FailWrites = true;
 
-        var response = await h.CallAsync(IpcMethods.BlacklistAdd, new ListValueParams { Value = "203.0.113.20" });
+        await h.SendAsync(IpcMethods.BlacklistAdd, new ListValueParams { Value = "203.0.113.20" });
 
-        Assert.False(response.Ok);
-        Assert.Contains("Simulated database failure", response.Error);
+        Assert.Contains("203.0.113.20", h.Firewall.Blocked);
     }
 
     [Fact]

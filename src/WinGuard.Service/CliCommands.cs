@@ -297,8 +297,8 @@ internal static class CliCommands
 
     /// <summary>
     /// Whether the firewall's rules can really be read. <see cref="IFirewall.ListBlocked"/> never
-    /// throws and answers an empty list when it failed, so its answer proves nothing; the failure
-    /// only shows in what it logs, which is why the probe listens there.
+    /// throws and answers null when it failed; the reason only shows in what it logs, which is why
+    /// the probe listens there.
     /// </summary>
     /// <param name="create">Creates the firewall to probe, logging to the given logger.</param>
     internal static (bool Ok, string Detail) ProbeFirewall(Func<ILogger<WindowsFirewall>, IFirewall> create)
@@ -307,9 +307,9 @@ internal static class CliCommands
         try
         {
             var blocked = create(errors).ListBlocked();
-            if (errors.First is { } error)
+            if (blocked is null)
             {
-                return (false, error);
+                return (false, errors.First ?? "The firewall rules could not be read.");
             }
 
             return (true, blocked.Count == 0 ? "reachable, no WinGuard rules" : $"reachable, {blocked.Count} address(es) blocked");
