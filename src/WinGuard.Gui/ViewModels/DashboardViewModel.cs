@@ -383,7 +383,7 @@ public sealed partial class DashboardViewModel : ObservableObject
     /// <param name="statistics">The loaded statistics.</param>
     public void UpdateStatistics(StatisticsDto statistics)
     {
-        var today = DateTime.UtcNow.Date;
+        var today = DateTime.Today;
         var byDay = statistics.Daily
             .GroupBy(entry => entry.DayUtc.Date)
             .ToDictionary(group => group.Key, group => (double)group.Sum(entry => entry.Bans));

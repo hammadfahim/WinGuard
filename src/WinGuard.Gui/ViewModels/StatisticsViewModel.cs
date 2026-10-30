@@ -89,7 +89,7 @@ public sealed partial class StatisticsViewModel : ObservableObject
     private bool _hasData;
     private IReadOnlyList<DailyStatDto> _daily = [];
     private int _shownDays = 30;
-    private DateTime _today = DateTime.UtcNow.Date;
+    private DateTime _today = DateTime.Today;
 
     /// <summary>Creates the view-model.</summary>
     public StatisticsViewModel(PipeClient client, ToastCenter toasts)
@@ -225,7 +225,8 @@ public sealed partial class StatisticsViewModel : ObservableObject
                 return;
             }
 
-            Apply(statistics, days, DateTime.UtcNow.Date);
+            // The service buckets statistics by its local day.
+            Apply(statistics, days, DateTime.Today);
             if (history is not null)
             {
                 ApplyHistory(history);
