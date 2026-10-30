@@ -6,6 +6,13 @@ namespace WinGuard.Core.Detection;
 /// <summary>Parsing helpers shared by the event-log detectors.</summary>
 internal static class DetectorUtil
 {
+    /// <summary>Longest log line kept in <c>FailedLogin.RawLog</c>; a client can make lines very long.</summary>
+    private const int MaxRawLogLength = 2048;
+
+    /// <summary>Caps a raw log line before it reaches the event store.</summary>
+    internal static string LimitRawLog(string line) =>
+        line.Length > MaxRawLogLength ? line[..MaxRawLogLength] : line;
+
     /// <summary>Reads <c>System/TimeCreated@SystemTime</c> as UTC, falling back to now.</summary>
     internal static DateTime ParseSystemTime(XElement system, XNamespace ns)
     {

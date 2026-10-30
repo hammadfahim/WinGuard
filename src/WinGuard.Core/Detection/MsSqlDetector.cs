@@ -157,7 +157,13 @@ public sealed class MsSqlDetector : EventLogDetectorBase
             return false;
         }
 
-        if (formattedMessage is not null && IsIgnored(formattedMessage, settings.MsSql.IgnoreMessagePatterns))
+        var user = NormalizeOptional(
+            root.Element(ns + "EventData")?.Elements(ns + "Data").FirstOrDefault()?.Value);
+
+        // The message quotes the login name, which the client chooses: one spelled like an ignore
+        // pattern must not switch counting off for that client.
+        if (formattedMessage is not null
+            && IsIgnored(user is null ? formattedMessage : formattedMessage.Replace($"'{user}'", string.Empty), settings.MsSql.IgnoreMessagePatterns))
         {
             return false;
         }
@@ -167,9 +173,6 @@ public sealed class MsSqlDetector : EventLogDetectorBase
         {
             return false;
         }
-
-        var user = NormalizeOptional(
-            root.Element(ns + "EventData")?.Elements(ns + "Data").FirstOrDefault()?.Value);
 
         failed = new FailedLogin
         {

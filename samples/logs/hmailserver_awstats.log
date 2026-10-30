@@ -1,0 +1,2 @@
+2026-10-04 09:41:12	a@example.com	b@example.org	198.51.100.70	192.0.2.25	SMTP	?	250	18234
+2026-10-04 09:42:30	c@example.com	d@example.org	198.51.100.70	127.0.0.1	SMTP	?	550	0

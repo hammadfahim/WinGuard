@@ -9,10 +9,14 @@ namespace WinGuard.Core.Detection;
 /// <para>
 /// It keeps a byte offset and a partial-line buffer per file in memory, so every poll
 /// cycle returns only the lines appended since the previous cycle. Log rotation or
-/// truncation is detected by the file shrinking (the offset resets to 0), and the number
-/// of bytes read per call is capped so one huge file cannot stall the poller. A line that
-/// straddles a read boundary is retained and completed on the next cycle, so callers only
-/// ever see whole lines.
+/// truncation is detected by the file's identity changing or by it shrinking (the offset
+/// resets to 0), and the number of bytes read per call is capped so one huge file cannot
+/// stall the poller. A line that straddles a read boundary is retained and completed on the
+/// next cycle, so callers only ever see whole lines.
+/// </para>
+/// <para>
+/// The encoding comes from the BOM at the start of the file (UTF-8, UTF-16 or UTF-32), read
+/// again after a rotation; a file without one is read as UTF-8.
 /// </para>
 /// <para>
 /// On first sight of a file the cursor is positioned at the file's current length
@@ -28,12 +32,19 @@ public sealed class LogFileTailer
     /// <summary>Default maximum number of bytes read from a single file per <see cref="ReadNewLines"/> call.</summary>
     public const int DefaultMaxBytesPerCycle = 1024 * 1024;
 
-    /// <summary>Upper bound on buffered partial-line length; older data is discarded if exceeded.</summary>
+    /// <summary>Upper bound on buffered partial-line length; a longer line is dropped whole.</summary>
     private const int MaxPendingChars = 64 * 1024;
+
+    /// <summary>How many cursors of rotated-away files are kept in case the file reappears under a new name.</summary>
+    private const int MaxRotatedCursors = 32;
+
+    /// <summary>Environment variables can point at each other; stop expanding after this many rounds.</summary>
+    private const int MaxExpansionRounds = 8;
 
     private readonly int _maxBytesPerCycle;
     private readonly object _gate = new();
     private readonly Dictionary<string, FileCursor> _cursors = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<FileCursor> _rotated = [];
 
     /// <summary>
     /// When <see langword="false"/> (the default), the first time a file is seen its cursor is
@@ -68,8 +79,13 @@ public sealed class LogFileTailer
     /// already being watched, so this is a file created since (e.g. the next daily log) and all of
     /// it is new.
     /// </param>
+    /// <param name="crLfRecords">
+    /// <see langword="true"/> when the file's writer ends every record with CRLF and may log client
+    /// text containing a bare LF. Only CRLF then ends a line: splitting at the LF would turn the rest
+    /// of the client's text into a line of its own, complete with an address the client chose.
+    /// </param>
     /// <returns>The newly read lines (without line terminators); empty when nothing new or unreadable.</returns>
-    public IReadOnlyList<string> ReadNewLines(string path, bool readFromStartIfNew = false)
+    public IReadOnlyList<string> ReadNewLines(string path, bool readFromStartIfNew = false, bool crLfRecords = false)
     {
         var lines = new List<string>();
         if (string.IsNullOrWhiteSpace(path))
@@ -105,36 +121,43 @@ public sealed class LogFileTailer
                 if (cursor.Initialized && identity is not null && cursor.Identity is not null
                     && !string.Equals(identity, cursor.Identity, StringComparison.Ordinal))
                 {
-                    cursor.Offset = 0;
-                    cursor.Pending = string.Empty;
-                    cursor.Decoder.Reset();
+                    // The old file may come back under a new name; see ContinueRenamedFile.
+                    _rotated.Add(cursor);
+                    if (_rotated.Count > MaxRotatedCursors)
+                    {
+                        _rotated.RemoveAt(0);
+                    }
+
+                    cursor = _cursors[path] = new FileCursor { Initialized = true };
                 }
 
                 cursor.Identity = identity;
                 if (!cursor.Initialized)
                 {
                     cursor.Initialized = true;
-                    if (!ProcessExistingContent && !cursor.FromStart)
+                    if (!ContinueRenamedFile(cursor) && !ProcessExistingContent && !cursor.FromStart)
                     {
                         // First sight of the file and we are not reading history: skip to the end
                         // so a restart never replays historical failures (PLAN.md §4.4; phase-3
-                        // topic #3 ruling). Rotation below still resets to 0 for new content.
-                        cursor.Offset = length;
+                        // topic #3 ruling). Rotation below still resets to 0 for new content. The
+                        // BOM is at the start, so the encoding has to be read before skipping it.
+                        DetectEncoding(cursor, stream);
+                        cursor.Offset = AlignToChar(cursor, length);
                         cursor.Pending = string.Empty;
                         return lines;
                     }
                 }
-                else if (length < cursor.Offset)
+
+                if (length < cursor.Offset)
                 {
                     // File shrank: rotated or truncated. Start again from byte 0 so the rotated
                     // or newly written file is read fully.
-                    cursor.Offset = 0;
-                    cursor.Pending = string.Empty;
-                    cursor.Decoder.Reset();
+                    cursor = _cursors[path] = new FileCursor { Initialized = true, Identity = identity };
                 }
 
+                DetectEncoding(cursor, stream);
                 var available = length - cursor.Offset;
-                if (available <= 0)
+                if (available <= 0 || cursor.Decoder is null)
                 {
                     return lines;
                 }
@@ -151,11 +174,6 @@ public sealed class LogFileTailer
                 cursor.Offset += read;
                 // Stateful decoder: a multi-byte character split across two reads is not corrupted.
                 var chunk = new string(DecodeChars(cursor.Decoder, buffer, read));
-                if (cursor.Pending.Length == 0 && chunk.Length > 0 && chunk[0] == '\uFEFF')
-                {
-                    chunk = chunk[1..];
-                }
-
                 var text = cursor.Pending + chunk;
                 var start = 0;
                 for (var i = 0; i < text.Length; i++)
@@ -170,15 +188,30 @@ public sealed class LogFileTailer
                     {
                         end--;
                     }
+                    else if (crLfRecords)
+                    {
+                        continue;
+                    }
 
-                    lines.Add(text[start..end]);
+                    if (cursor.DroppingLongLine)
+                    {
+                        cursor.DroppingLongLine = false;
+                    }
+                    else
+                    {
+                        lines.Add(text[start..end]);
+                    }
+
                     start = i + 1;
                 }
 
                 var pending = text[start..];
                 if (pending.Length > MaxPendingChars)
                 {
-                    pending = pending[^MaxPendingChars..];
+                    // Keeping only the tail would pass off the end of the line, which may be text a
+                    // client chose, as a line of its own. Drop the whole line instead.
+                    pending = string.Empty;
+                    cursor.DroppingLongLine = true;
                 }
 
                 cursor.Pending = pending;
@@ -280,8 +313,9 @@ public sealed class LogFileTailer
     }
 
     /// <summary>
-    /// False for UNC and device paths (<c>\\server\share</c>, <c>\\?\</c>, <c>\\.\</c>). Log sources
-    /// must be on a local drive.
+    /// False for UNC and device paths (<c>\\server\share</c>, <c>\\?\</c>, <c>\\.\</c>, <c>\??\</c>),
+    /// whichever separators they use and whether written out or reached through environment
+    /// variables. Log sources must be on a local drive.
     /// </summary>
     public static bool IsLocalPath(string? path)
     {
@@ -290,8 +324,91 @@ public sealed class LogFileTailer
             return false;
         }
 
-        var expanded = Environment.ExpandEnvironmentVariables(path.Trim());
-        return !(expanded.StartsWith(@"\\", StringComparison.Ordinal) || expanded.StartsWith("//", StringComparison.Ordinal));
+        var expanded = path.Trim();
+        for (var round = 0; round < MaxExpansionRounds; round++)
+        {
+            var next = Environment.ExpandEnvironmentVariables(expanded);
+            if (next == expanded)
+            {
+                break;
+            }
+
+            expanded = next;
+        }
+
+        // Windows treats '/' and '\' alike, so \/server\share and /\server\share are UNC paths too.
+        var normalized = expanded.Trim().Trim('"').Replace('/', '\\');
+        return !(normalized.StartsWith(@"\\", StringComparison.Ordinal) || normalized.StartsWith(@"\??\", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Reads the encoding from the BOM once per file. Waits for the file to have content, and the
+    /// cursor then starts after the BOM.
+    /// </summary>
+    private static void DetectEncoding(FileCursor cursor, FileStream stream)
+    {
+        if (cursor.Decoder is not null || stream.Length == 0)
+        {
+            return;
+        }
+
+        Span<byte> head = stackalloc byte[4];
+        stream.Seek(0, SeekOrigin.Begin);
+        head = head[..stream.ReadAtLeast(head, head.Length, throwOnEndOfStream: false)];
+
+        // UTF-32 first: its little-endian BOM begins with the UTF-16 one.
+        (Encoding Encoding, int BomLength, int CharSize) detected = head switch
+        {
+            [0xFF, 0xFE, 0x00, 0x00] => (new UTF32Encoding(false, false), 4, 4),
+            [0x00, 0x00, 0xFE, 0xFF] => (new UTF32Encoding(true, false), 4, 4),
+            [0xFF, 0xFE, ..] => (new UnicodeEncoding(false, false), 2, 2),
+            [0xFE, 0xFF, ..] => (new UnicodeEncoding(true, false), 2, 2),
+            [0xEF, 0xBB, 0xBF, ..] => (new UTF8Encoding(false), 3, 1),
+            _ => (new UTF8Encoding(false), 0, 1),
+        };
+
+        cursor.Encoding = detected.Encoding;
+        cursor.Decoder = detected.Encoding.GetDecoder();
+        cursor.BomLength = detected.BomLength;
+        cursor.CharSize = detected.CharSize;
+        cursor.Offset = Math.Max(cursor.Offset, detected.BomLength);
+    }
+
+    /// <summary>Moves an offset back to the start of a character, so a half-written one cannot shift all later decoding.</summary>
+    private static long AlignToChar(FileCursor cursor, long offset) =>
+        offset - ((offset - cursor.BomLength) % cursor.CharSize);
+
+    /// <summary>
+    /// A file seen for the first time may be one we already follow, renamed by rotation
+    /// (<c>app.log</c> to <c>app.log.1</c>) into a folder or glob we watch. Reading it as new would
+    /// count its whole history again, so the read continues where the old name stopped; that also
+    /// picks up lines written just before the rotation.
+    /// </summary>
+    private bool ContinueRenamedFile(FileCursor cursor)
+    {
+        if (cursor.Identity is null)
+        {
+            return false;
+        }
+
+        bool SameFile(FileCursor other) => other.Initialized
+            && !ReferenceEquals(other, cursor)
+            && string.Equals(other.Identity, cursor.Identity, StringComparison.Ordinal);
+
+        var previous = _cursors.Values.FirstOrDefault(SameFile) ?? _rotated.LastOrDefault(SameFile);
+        if (previous is null)
+        {
+            return false;
+        }
+
+        cursor.Encoding = previous.Encoding;
+        cursor.Decoder = previous.Encoding?.GetDecoder();
+        cursor.BomLength = previous.BomLength;
+        cursor.CharSize = previous.CharSize;
+        cursor.Offset = AlignToChar(previous, previous.Offset);
+        cursor.Pending = previous.Pending;
+        cursor.DroppingLongLine = previous.DroppingLongLine;
+        return true;
     }
 
     /// <summary>Volume serial + file index: stable for a file's lifetime, different for its replacement.</summary>
@@ -333,9 +450,13 @@ public sealed class LogFileTailer
 
     private sealed class FileCursor
     {
-        public Decoder Decoder = new UTF8Encoding(false).GetDecoder();
+        public Encoding? Encoding;
+        public Decoder? Decoder;
+        public int BomLength;
+        public int CharSize = 1;
         public long Offset;
         public string Pending = string.Empty;
+        public bool DroppingLongLine;
         public bool Initialized;
         public bool FromStart;
         public string? Identity;

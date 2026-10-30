@@ -1,4 +1,5 @@
 using System.Diagnostics.Eventing.Reader;
+using System.Globalization;
 using System.Runtime.Versioning;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
@@ -11,7 +12,8 @@ namespace WinGuard.Core.Detection;
 /// Shared plumbing for the Windows event-log detectors: subscribes with an
 /// <see cref="EventLogWatcher"/>, reports whether the subscription is actually alive through
 /// <see cref="IsRunning"/>, and re-subscribes when it could not be created or later fails (channel
-/// cleared, Event Log service restarted, channel enabled after start-up).
+/// cleared, Event Log service restarted, channel enabled after start-up). Events logged while there
+/// was no subscription are replayed once it is back, within the same limits as the start-up replay.
 /// <para>
 /// The subscription is created regardless of the enabled setting; <see cref="IsEnabled"/> is checked
 /// per event, so toggling an engine in the GUI takes effect without a service restart.
@@ -26,7 +28,11 @@ public abstract class EventLogDetectorBase : IDetector
     private readonly object _lock = new();
     private EventLogWatcher? _watcher;
     private Channel<FailedLogin>? _sink;
+    private CancellationToken _stopping;
     private DateTime _lastFaultUtc = DateTime.MinValue;
+
+    // When the subscription was lost or first failed to open; null while there is no gap.
+    private DateTime? _gapStartUtc;
     private bool _failureLogged;
     private volatile bool _running;
     private volatile bool _stopped;
@@ -81,6 +87,7 @@ public abstract class EventLogDetectorBase : IDetector
     public Task StartAsync(Channel<FailedLogin> sink, CancellationToken ct)
     {
         _sink = sink ?? throw new ArgumentNullException(nameof(sink));
+        _stopping = ct;
         ct.Register(Stop);
 
         var backlog = BacklogWindow();
@@ -103,7 +110,8 @@ public abstract class EventLogDetectorBase : IDetector
     {
         try
         {
-            await ReplayBacklogAsync(backlog, ct).ConfigureAwait(false);
+            var now = DateTime.UtcNow;
+            await ReplayBacklogAsync(now - backlog, now, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -119,84 +127,129 @@ public abstract class EventLogDetectorBase : IDetector
     }
 
     /// <summary>
-    /// Reads events from <see cref="BacklogWindow"/> ago up to now and pushes them through the
-    /// normal <see cref="Parse"/> path, so failures logged while the service was stopped still
-    /// count towards a ban. Honors the live enabled setting per record and stops early once
-    /// <see cref="MaxReplayRecords"/> records were seen. The window can reach back into the
-    /// previous run: the engine drops what that run already processed (see
-    /// <see cref="FailedLogin.IsReplayed"/>).
+    /// Pushes the events logged in a time range through the normal <see cref="Parse"/> path, so
+    /// failures logged while the service was stopped or unsubscribed still count towards a ban.
+    /// The range can reach back into the previous run: the engine drops what that run already
+    /// processed (see <see cref="FailedLogin.IsReplayed"/>).
     /// </summary>
-    private async Task ReplayBacklogAsync(TimeSpan backlog, CancellationToken ct)
+    private async Task ReplayBacklogAsync(DateTime fromUtc, DateTime toUtc, CancellationToken ct)
     {
-        var milliseconds = Math.Max(0, (long)backlog.TotalMilliseconds);
-        var xpath = $"*[System[{BacklogEventXPath!.Trim('/', ' ')} and TimeCreated[timediff(@SystemTime) <= {milliseconds}]]]";
-        var query = new EventLogQuery(LogChannel, PathType.LogName, xpath)
-        {
-            TolerateQueryErrors = true,
-            ReverseDirection = true,
-        };
-
         var replayed = 0;
         var examined = 0;
-        using (var reader = new EventLogReader(query))
+        foreach (var failed in ReadBacklog(fromUtc, toUtc, ct))
         {
-            while (examined < MaxReplayRecords && !ct.IsCancellationRequested && !_stopped)
+            examined++;
+            if (failed is not null)
             {
-                EventRecord? record;
-                try
+                failed.IsReplayed = true;
+                if (_sink is { } sink && sink.Writer.TryWrite(failed))
                 {
-                    record = reader.ReadEvent();
+                    replayed++;
                 }
-                catch (Exception ex)
-                {
-                    Logger.LogDebug(ex, "{Detector}: backlog replay read failed (channel may not exist).", Name);
-                    break;
-                }
+            }
 
-                if (record is null)
-                {
-                    break;
-                }
-
-                examined++;
-                try
-                {
-                    if (!IsEnabled())
-                    {
-                        continue;
-                    }
-
-                    var failed = Parse(record);
-                    if (failed is not null)
-                    {
-                        failed.IsReplayed = true;
-                        if (_sink is { } sink && sink.Writer.TryWrite(failed))
-                        {
-                            replayed++;
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogDebug(ex, "{Detector}: backlog replay parse failed for one record.", Name);
-                }
-                finally
-                {
-                    record.Dispose();
-                }
-
-                // The reads are synchronous COM calls; yield so cancellation is observed promptly.
-                if ((examined & 0x3F) == 0)
-                {
-                    await Task.Yield();
-                }            }
+            // The reads are synchronous COM calls; yield so cancellation is observed promptly.
+            if ((examined & 0x3F) == 0)
+            {
+                await Task.Yield();
+            }
         }
 
         if (replayed > 0)
         {
             Logger.LogInformation(
-                "{Detector}: replayed {Replayed} failure(s) from the last {Minutes} minute(s) of the {Channel} channel.",
-                Name, replayed, (int)backlog.TotalMinutes, LogChannel);
+                "{Detector}: replayed {Replayed} failure(s) logged in the {Channel} channel between {From:u} and {To:u}.",
+                Name, replayed, LogChannel, fromUtc, toUtc);
+        }
+    }
+
+    /// <summary>
+    /// Reads and parses the events of a time range, newest first. Yields null for a record that is
+    /// no failure, honors the live enabled setting per record and stops early once
+    /// <see cref="MaxReplayRecords"/> records were seen. Tests replace it to run a replay without
+    /// real event logs.
+    /// </summary>
+    private protected virtual IEnumerable<FailedLogin?> ReadBacklog(DateTime fromUtc, DateTime toUtc, CancellationToken ct)
+    {
+        var query = new EventLogQuery(LogChannel, PathType.LogName, BuildReplayXPath(BacklogEventXPath!, fromUtc, toUtc))
+        {
+            TolerateQueryErrors = true,
+            ReverseDirection = true,
+        };
+
+        using var reader = new EventLogReader(query);
+        for (var examined = 0; examined < MaxReplayRecords && !ct.IsCancellationRequested && !_stopped; examined++)
+        {
+            EventRecord? record;
+            try
+            {
+                record = reader.ReadEvent();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug(ex, "{Detector}: backlog replay read failed (channel may not exist).", Name);
+                yield break;
+            }
+
+            if (record is null)
+            {
+                yield break;
+            }
+
+            yield return ParseReplayRecord(record);
+        }
+    }
+
+    private FailedLogin? ParseReplayRecord(EventRecord record)
+    {
+        try
+        {
+            return IsEnabled() ? Parse(record) : null;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "{Detector}: backlog replay parse failed for one record.", Name);
+            return null;
+        }
+        finally
+        {
+            record.Dispose();
+        }
+    }
+
+    /// <summary>The replay query: <paramref name="eventXPath"/> within a half-open UTC time range.</summary>
+    internal static string BuildReplayXPath(string eventXPath, DateTime fromUtc, DateTime toUtc)
+    {
+        static string Stamp(DateTime utc) => utc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
+
+        return $"*[System[{eventXPath.Trim('/', ' ')} and TimeCreated[@SystemTime>='{Stamp(fromUtc)}' and @SystemTime<'{Stamp(toUtc)}']]]";
+    }
+
+    /// <summary>
+    /// Catches up on what was logged while there was no subscription. The range ends where the new
+    /// subscription begins, so an event is never seen by both, and it is limited like the start-up
+    /// replay: <see cref="BacklogWindow"/> caps it, and a window of zero turns it off.
+    /// </summary>
+    internal async Task ReplayGapAsync(DateTime gapStartUtc, DateTime subscribedUtc, CancellationToken ct)
+    {
+        var window = BacklogWindow();
+        if (window <= TimeSpan.Zero || BacklogEventXPath is null)
+        {
+            return;
+        }
+
+        var oldest = subscribedUtc - window;
+        try
+        {
+            await ReplayBacklogAsync(gapStartUtc > oldest ? gapStartUtc : oldest, subscribedUtc, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Shutting down.
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "{Detector}: replaying the subscription gap failed; live detection is unaffected.", Name);
         }
     }
 
@@ -220,60 +273,90 @@ public abstract class EventLogDetectorBase : IDetector
         }
     }
 
-    private void TrySubscribe()
+    internal void TrySubscribe()
     {
+        // Taken before subscribing: an event in the instant between the two is missed rather than
+        // counted twice, the same trade-off as the start-up replay.
+        var subscribedUtc = DateTime.UtcNow;
+        DateTime? gapStartUtc;
         lock (_lock)
         {
-            if (_stopped || _watcher is not null)
+            if (_stopped || _running)
             {
                 return;
             }
 
-            Exception? lastError = null;
-            foreach (var (queryText, tolerate) in Queries)
+            if (OpenSubscription(out var lastError))
             {
-                EventLogWatcher? watcher = null;
-                try
-                {
-                    var query = new EventLogQuery(LogChannel, PathType.LogName, queryText)
-                    {
-                        TolerateQueryErrors = tolerate,
-                    };
-                    watcher = new EventLogWatcher(query);
-                    watcher.EventRecordWritten += OnEventRecordWritten;
-                    watcher.Enabled = true;
-
-                    _watcher = watcher;
-                    _running = true;
-                    Logger.LogInformation(
-                        _failureLogged ? "{Detector}: subscription to {Channel} restored." : "{Detector}: subscribed to {Channel}.",
-                        Name,
-                        LogChannel);
-                    _failureLogged = false;
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    lastError = ex;
-                    SafeDispose(watcher);
-                }
-            }
-
-            // Log the failure once, not on every retry.
-            if (!_failureLogged)
-            {
-                _failureLogged = true;
-                Logger.LogError(
-                    lastError,
-                    "{Detector} could not subscribe to the {Channel} channel; detection is inactive (retrying every {Seconds}s).",
+                _running = true;
+                Logger.LogInformation(
+                    _failureLogged ? "{Detector}: subscription to {Channel} restored." : "{Detector}: subscribed to {Channel}.",
                     Name,
-                    LogChannel,
-                    RetryInterval.TotalSeconds);
+                    LogChannel);
+                _failureLogged = false;
+                gapStartUtc = _gapStartUtc;
+                _gapStartUtc = null;
             }
             else
             {
-                Logger.LogDebug(lastError, "{Detector}: subscription retry failed.", Name);
+                _gapStartUtc ??= subscribedUtc;
+                gapStartUtc = null;
+                LogSubscribeFailure(lastError);
             }
+        }
+
+        if (gapStartUtc is { } gapStart)
+        {
+            _ = Task.Run(() => ReplayGapAsync(gapStart, subscribedUtc, _stopping), CancellationToken.None);
+        }
+    }
+
+    /// <summary>Opens the first query the channel accepts. Tests replace it to run without real event logs.</summary>
+    private protected virtual bool OpenSubscription(out Exception? lastError)
+    {
+        lastError = null;
+        foreach (var (queryText, tolerate) in Queries)
+        {
+            EventLogWatcher? watcher = null;
+            try
+            {
+                var query = new EventLogQuery(LogChannel, PathType.LogName, queryText)
+                {
+                    TolerateQueryErrors = tolerate,
+                };
+                watcher = new EventLogWatcher(query);
+                watcher.EventRecordWritten += OnEventRecordWritten;
+                watcher.Enabled = true;
+
+                _watcher = watcher;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                lastError = ex;
+                SafeDispose(watcher);
+            }
+        }
+
+        return false;
+    }
+
+    private void LogSubscribeFailure(Exception? lastError)
+    {
+        // Log the failure once, not on every retry.
+        if (!_failureLogged)
+        {
+            _failureLogged = true;
+            Logger.LogError(
+                lastError,
+                "{Detector} could not subscribe to the {Channel} channel; detection is inactive (retrying every {Seconds}s).",
+                Name,
+                LogChannel,
+                RetryInterval.TotalSeconds);
+        }
+        else
+        {
+            Logger.LogDebug(lastError, "{Detector}: subscription retry failed.", Name);
         }
     }
 
@@ -282,9 +365,9 @@ public abstract class EventLogDetectorBase : IDetector
         var record = args.EventRecord;
         if (record is null)
         {
-            if (args.EventException is not null)
+            if (args.EventException is not null && sender is EventLogWatcher watcher)
             {
-                OnSubscriptionFault(sender as EventLogWatcher, args.EventException);
+                OnSubscriptionFault(watcher, args.EventException);
             }
 
             return;
@@ -316,13 +399,14 @@ public abstract class EventLogDetectorBase : IDetector
     /// <summary>
     /// The watcher reports a broken subscription through an event with no record. Drop it and
     /// subscribe again: quickly the first time, then on the monitor's schedule if faults repeat.
+    /// What is logged until then is replayed once the new subscription is up.
     /// </summary>
-    private void OnSubscriptionFault(EventLogWatcher? source, Exception error)
+    internal void OnSubscriptionFault(EventLogWatcher? source, Exception error)
     {
         bool quickRetry;
         lock (_lock)
         {
-            if (source is null || !ReferenceEquals(source, _watcher))
+            if (!ReferenceEquals(source, _watcher))
             {
                 return;
             }
@@ -330,6 +414,7 @@ public abstract class EventLogDetectorBase : IDetector
             _watcher = null;
             _running = false;
             var now = DateTime.UtcNow;
+            _gapStartUtc ??= now;
             quickRetry = now - _lastFaultUtc > RetryInterval;
             _lastFaultUtc = now;
         }

@@ -27,7 +27,7 @@ public static class SettingsValidator
 
             if (!LogFileTailer.IsLocalPath(source.Path))
             {
-                errors.Add($"FTP source '{Label(source.Name)}': network (UNC) paths are not allowed; use a path on a local drive.");
+                errors.Add($"FTP source '{Label(source.Name)}': network (UNC) and device paths are not allowed; use a path on a local drive.");
             }
         }
 
@@ -41,7 +41,7 @@ public static class SettingsValidator
             var label = Label(source.Name);
             if (!string.IsNullOrWhiteSpace(source.PathGlob) && !LogFileTailer.IsLocalPath(source.PathGlob))
             {
-                errors.Add($"Custom source '{label}': network (UNC) paths are not allowed; use a path on a local drive.");
+                errors.Add($"Custom source '{label}': network (UNC) and device paths are not allowed; use a path on a local drive.");
             }
 
             if (string.IsNullOrWhiteSpace(source.Regex))
