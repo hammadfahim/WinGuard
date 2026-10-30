@@ -16,9 +16,10 @@ public static class PipeConstants
     /// <summary>
     /// Bumped whenever a request, response or DTO changes shape. The service reports it in
     /// <see cref="ServiceStatusDto.ProtocolVersion"/> so a GUI from another release can say so
-    /// instead of misbehaving. v3: statistics + ban history + report-only.
+    /// instead of misbehaving. v3: statistics + ban history + report-only. v4: BlockNow answers
+    /// with the ban it recorded.
     /// </summary>
-    public const int ProtocolVersion = 3;
+    public const int ProtocolVersion = 4;
 }
 
 /// <summary>Method names used in <see cref="IpcRequest.Method"/>.</summary>
@@ -29,7 +30,7 @@ public static class IpcMethods
     public const string ListEvents = "ListEvents";           // params: ListEventsParams; result: List<EventDto>
     public const string ListLists = "ListLists";             // result: List<ListEntryDto>
     public const string Unblock = "Unblock";                 // params: UnblockParams
-    public const string BlockNow = "BlockNow";               // params: BlockNowParams
+    public const string BlockNow = "BlockNow";               // params: BlockNowParams; result: BanDto
     public const string WhitelistAdd = "WhitelistAdd";       // params: ListValueParams
     public const string BlacklistAdd = "BlacklistAdd";       // params: ListValueParams
     public const string ListRemove = "ListRemove";           // params: ListRemoveParams

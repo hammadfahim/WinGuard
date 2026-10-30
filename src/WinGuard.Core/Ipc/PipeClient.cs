@@ -16,9 +16,19 @@ namespace WinGuard.Core.Ipc;
 /// A background loop reconnects every two seconds while the service is down; callers observe
 /// <see cref="IsConnected"/> / <see cref="StateChanged"/>. All public typed helpers never throw
 /// for connectivity problems — they return null/empty so the UI can render "service not running".
+/// <para>
+/// Nothing is sent until <see cref="PipeServerIdentity"/> has confirmed who owns the pipe: its name
+/// is free for any local user to take while the service is down.
+/// </para>
 /// </summary>
 public sealed class PipeClient : IDisposable
 {
+    /// <summary>What to tell the user when there is no service to talk to.</summary>
+    public const string ServiceNotRunningMessage = "The WinGuard service is not running.";
+
+    private const string UnreadableAnswerMessage =
+        "The WinGuard service sent an answer this console does not understand. Reinstall so both are the same version.";
+
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
 
     // How long one attempt waits for a free instance of the service's pipe.
@@ -33,6 +43,7 @@ public sealed class PipeClient : IDisposable
     private readonly object _stateLock = new();
 
     private readonly string _pipeName;
+    private readonly Func<NamedPipeClientStream, PipeServerIdentity.Result> _verifyServer;
 
     private NamedPipeClientStream? _pipe;
     private StreamReader? _reader;
@@ -50,8 +61,19 @@ public sealed class PipeClient : IDisposable
     /// <summary>Creates the client.</summary>
     /// <param name="pipeName">Pipe to connect to; the service's pipe when omitted (tests pass their own).</param>
     public PipeClient(string? pipeName = null)
+        : this(pipeName, PipeServerIdentity.Verify)
+    {
+    }
+
+    /// <summary>
+    /// For the end-to-end tests only (internal, and only the test assembly sees this library's
+    /// internals): tests serve on their own pipe from a process that need not be elevated, so they
+    /// stand in for the server check. The console and the CLI always use the public constructor.
+    /// </summary>
+    internal PipeClient(string? pipeName, Func<NamedPipeClientStream, PipeServerIdentity.Result> verifyServer)
     {
         _pipeName = string.IsNullOrWhiteSpace(pipeName) ? PipeConstants.PipeName : pipeName;
+        _verifyServer = verifyServer ?? throw new ArgumentNullException(nameof(verifyServer));
     }
 
     /// <summary>Raised whenever the connection state changes (true = connected).</summary>
@@ -64,14 +86,20 @@ public sealed class PipeClient : IDisposable
     public bool IsConnected => _isConnected;
 
     /// <summary>
-    /// Why the service cannot be used although it is there (it refused this caller, or Windows
-    /// denied access to its pipe). Null when there is no such problem — including when the service
-    /// is simply not running.
+    /// Why the service cannot be used although something is there (it refused this caller, Windows
+    /// denied access to its pipe, or the pipe belongs to a process that is not the service). Null
+    /// when there is no such problem — including when the service is simply not running.
     /// </summary>
     public string? LastProblem { get; private set; }
 
     /// <summary>Raised when <see cref="LastProblem"/> changes.</summary>
     public event Action<string?>? ProblemChanged;
+
+    /// <summary>
+    /// Why the last typed read returned null (the service reported an error, sent something
+    /// unreadable, or could not be reached), so that a null can be explained. Null after a success.
+    /// </summary>
+    public string? LastRequestError { get; private set; }
 
     /// <summary>Starts the background connect/retry loop.</summary>
     public void Start()
@@ -121,8 +149,8 @@ public sealed class PipeClient : IDisposable
                     throw new IOException("The WinGuard service closed the connection.");
                 }
 
-                response = JsonSerializer.Deserialize<IpcResponse>(line, IpcJson.Options)
-                    ?? throw new IOException("Malformed response from the WinGuard service.");
+                response = ParseResponse(line)
+                    ?? throw new IOException(UnreadableAnswerMessage);
 
                 // One request, one response, in order: anything else means the stream is out of step.
                 if (response.Id != request.Id)
@@ -203,9 +231,21 @@ public sealed class PipeClient : IDisposable
     public Task UnblockAsync(string ip, bool alsoWhitelist, CancellationToken ct = default) =>
         PostAsync(IpcMethods.Unblock, new UnblockParams { Ip = ip, AlsoWhitelist = alsoWhitelist }, ct);
 
-    /// <summary>Manually blocks an IP for a duration or permanently.</summary>
-    public Task BlockNowAsync(string ip, TimeSpan? duration, bool permanent, string? note, CancellationToken ct = default) =>
-        PostAsync(IpcMethods.BlockNow, new BlockNowParams { Ip = ip, Duration = duration, Permanent = permanent, Note = note }, ct);
+    /// <summary>
+    /// Manually blocks an IP for a duration or permanently. Returns the ban the service recorded,
+    /// which is the real outcome: without a duration the service picks it, and it caps what it is
+    /// given. Null when the service did not say (a release before protocol v4).
+    /// </summary>
+    public async Task<BanDto?> BlockNowAsync(string ip, TimeSpan? duration, bool permanent, string? note, CancellationToken ct = default)
+    {
+        var response = await SendAsync(
+                IpcMethods.BlockNow,
+                new BlockNowParams { Ip = ip, Duration = duration, Permanent = permanent, Note = note },
+                ct,
+                LongRequestTimeout)
+            .ConfigureAwait(false);
+        return response.Result is { } result ? JsonSerializer.Deserialize<BanDto>(result, IpcJson.Options) : null;
+    }
 
     /// <summary>Adds an entry to the whitelist or the blacklist.</summary>
     public Task AddToListAsync(bool whitelist, string value, CancellationToken ct = default) =>
@@ -276,12 +316,23 @@ public sealed class PipeClient : IDisposable
         try
         {
             var response = await SendAsync(method, parameters, ct, requestTimeout).ConfigureAwait(false);
-            return response.Result is { } result
+            var value = response.Result is { } result
                 ? JsonSerializer.Deserialize<T>(result, IpcJson.Options)
                 : default;
+            LastRequestError = null;
+            return value;
+        }
+        catch (JsonException)
+        {
+            // A well-formed line whose result has another shape: a service from another release.
+            LastRequestError = UnreadableAnswerMessage;
+            return default;
         }
         catch (Exception ex) when (ex is IOException or InvalidOperationException or OperationCanceledException or TimeoutException)
         {
+            LastRequestError = ex is OperationCanceledException or TimeoutException
+                ? "The WinGuard service did not answer in time."
+                : ex.Message;
             return default;
         }
     }
@@ -300,7 +351,7 @@ public sealed class PipeClient : IDisposable
 
         if (!await TryConnectAsync(ct).ConfigureAwait(false))
         {
-            throw new IOException("The WinGuard service is not running.");
+            throw new IOException(LastProblem ?? ServiceNotRunningMessage);
         }
     }
 
@@ -361,6 +412,17 @@ public sealed class PipeClient : IDisposable
                 SetProblem(ex is TimeoutException
                     ? "The WinGuard service is running but is not accepting connections (its pipe is busy). Restart the WinGuard service; if this keeps happening, check the service log."
                     : "Could not connect to the WinGuard service: " + ex.Message);
+                NoteFailedAttempt();
+                return false;
+            }
+
+            // Before a single byte goes out: a process squatting on the name must learn nothing,
+            // and must not be able to pose as the service.
+            var server = _verifyServer(pipe);
+            if (!server.Trusted)
+            {
+                CloseQuietly(null, null, pipe);
+                SetProblem(server.Problem ?? "This console could not verify that the WinGuard pipe belongs to the service.");
                 NoteFailedAttempt();
                 return false;
             }
@@ -447,29 +509,34 @@ public sealed class PipeClient : IDisposable
             return "The WinGuard service closed the connection without answering.";
         }
 
-        IpcResponse? response;
-        try
-        {
-            response = JsonSerializer.Deserialize<IpcResponse>(line, IpcJson.Options);
-        }
-        catch (JsonException)
-        {
-            response = null;
-        }
-
+        var response = ParseResponse(line);
         if (response is null)
         {
-            return "The WinGuard service sent an answer this console does not understand. Reinstall so both are the same version.";
+            return UnreadableAnswerMessage;
+        }
+
+        if (response.Id == probe.Id)
+        {
+            return null;
         }
 
         // A refusal is not an answer to our request (it carries id 0): it is the service telling
-        // every unauthorized caller why it is about to hang up.
-        if (!response.Ok && response.Id != probe.Id)
-        {
-            return response.Error ?? "The WinGuard service refused this console.";
-        }
+        // every unauthorized caller why it is about to hang up. Any other stray id would leave the
+        // stream out of step for every request that follows.
+        return response.Ok ? UnreadableAnswerMessage : response.Error ?? "The WinGuard service refused this console.";
+    }
 
-        return null;
+    /// <summary>Parses one response line; null when it is not one.</summary>
+    private static IpcResponse? ParseResponse(string line)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<IpcResponse>(line, IpcJson.Options);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
