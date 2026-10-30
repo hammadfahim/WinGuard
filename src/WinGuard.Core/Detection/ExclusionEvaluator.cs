@@ -107,16 +107,17 @@ public static class ExclusionEvaluator
 
         while (inputIndex < input.Length)
         {
-            if (patternIndex < pattern.Length
-                && char.ToUpperInvariant(pattern[patternIndex]) == char.ToUpperInvariant(input[inputIndex]))
-            {
-                inputIndex++;
-                patternIndex++;
-            }
-            else if (patternIndex < pattern.Length && pattern[patternIndex] == '*')
+            // The wildcard check comes first: a literal '*' in the input must not use up the pattern's.
+            if (patternIndex < pattern.Length && pattern[patternIndex] == '*')
             {
                 starIndex = patternIndex;
                 matchIndex = inputIndex;
+                patternIndex++;
+            }
+            else if (patternIndex < pattern.Length
+                && char.ToUpperInvariant(pattern[patternIndex]) == char.ToUpperInvariant(input[inputIndex]))
+            {
+                inputIndex++;
                 patternIndex++;
             }
             else if (starIndex != -1)

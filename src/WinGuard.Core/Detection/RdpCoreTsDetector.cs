@@ -135,16 +135,17 @@ public sealed class RdpCoreTsDetector : EventLogDetectorBase
             return false;
         }
 
-        var dataElements = root.Element(ns + "EventData")?.Elements(ns + "Data").ToList();
-        var rawIp = dataElements?
+        var dataElements = root.Element(ns + "EventData")?.Elements(ns + "Data").ToList() ?? [];
+        var rawIp = dataElements
             .FirstOrDefault(data => string.Equals((string?)data.Attribute("Name"), "IPString", StringComparison.OrdinalIgnoreCase))
             ?.Value;
 
-        if (string.IsNullOrEmpty(rawIp))
+        // Some RdpCoreTS builds emit event 140 with a single unnamed Data element. Only that exact
+        // shape falls back to it: a named field, or one of several, could be a build number or a
+        // reason code that happens to read as an address, and an address here gets banned.
+        if (rawIp is null && dataElements is [var only] && only.Attribute("Name") is null)
         {
-            // Some RdpCoreTS builds emit event 140 with a single unnamed Data element; fall back
-            // to the first positional value when the named IPString field is absent (or empty).
-            rawIp = dataElements?.FirstOrDefault()?.Value;
+            rawIp = only.Value;
         }
 
         if (!IpMatcher.TryNormalize(rawIp, out var ip))
