@@ -161,7 +161,7 @@ public sealed class BanEngineTests
         Assert.NotNull(ban);
         Assert.True(ban!.IsPermanent);
         Assert.Equal(DateTime.MaxValue, ban.ExpiresUtc);
-        Assert.Contains(ip, h.Firewall.ListBlocked());
+        Assert.Contains(ip, h.Firewall.Blocked);
     }
 
     // ---------- already banned ----------
@@ -306,7 +306,7 @@ public sealed class BanEngineTests
         Assert.True(ban!.IsPermanent);
         Assert.Equal(DateTime.MaxValue, ban.ExpiresUtc);
         Assert.Equal("manual test", ban.Note);
-        Assert.Contains(ip, h.Firewall.ListBlocked());
+        Assert.Contains(ip, h.Firewall.Blocked);
         Assert.Contains(h.Store.Events, e => e.Message.StartsWith("MANUAL BLOCK", StringComparison.Ordinal));
 
         h.Time.Advance(TimeSpan.FromDays(1000));

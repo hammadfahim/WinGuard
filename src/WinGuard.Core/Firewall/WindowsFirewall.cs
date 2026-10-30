@@ -4,7 +4,6 @@ using Microsoft.Extensions.Logging;
 using WinGuard.Core.Abstractions;
 using WinGuard.Core.Config;
 using WinGuard.Core.Engine;
-using WinGuard.Core.Model;
 
 namespace WinGuard.Core.Firewall;
 
@@ -176,9 +175,9 @@ public sealed class WindowsFirewall : IFirewall
     }
 
     /// <inheritdoc />
-    public void SyncRules(IEnumerable<BanEntry> activeBans)
+    public void SyncRules(IEnumerable<string> targets)
     {
-        if (activeBans is null)
+        if (targets is null)
         {
             return;
         }
@@ -189,49 +188,59 @@ public sealed class WindowsFirewall : IFirewall
             {
                 var ports = CurrentPorts();
                 var max = MaxAddressesPerRule();
-                var seen = new HashSet<string>(StringComparer.Ordinal);
-                var desired = new List<RuleBatch>();
-                RuleBatch? current = null;
-
-                foreach (var ban in activeBans)
+                var wanted = new List<string>();
+                var unplaced = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var target in targets)
                 {
-                    if (ban is null || !TryNormalizeTarget(ban.IpAddress, out var normalized) || !seen.Add(normalized))
+                    if (TryNormalizeTarget(target, out var normalized) && unplaced.Add(normalized))
                     {
-                        continue;
+                        wanted.Add(normalized);
                     }
-
-                    if (current is null || current.Addresses.Count >= max)
-                    {
-                        current = new RuleBatch { Index = desired.Count + 1 };
-                        desired.Add(current);
-                    }
-
-                    current.Addresses.Add(normalized);
                 }
 
-                // Write the wanted rules first and only then delete what is left over, so there is
-                // no moment at start-up where existing bans are unenforced.
-                var existing = LoadBatches();
-                foreach (var batch in desired)
+                // Every address stays in the rule that already holds it: moving one between rules
+                // would leave it unenforced from the first rule's write until the second's. The only
+                // exception is a lowered MaxAddressesPerRule, which the write order below covers.
+                var batches = LoadBatches();
+                foreach (var batch in batches)
                 {
-                    var old = existing.FirstOrDefault(b => b.Index == batch.Index);
-                    if (old is not null)
+                    var kept = batch.Addresses.Where(unplaced.Contains).Take(max).ToList();
+                    unplaced.ExceptWith(kept);
+                    batch.Addresses.Clear();
+                    batch.Addresses.AddRange(kept);
+                }
+
+                var grown = new HashSet<RuleBatch>();
+                foreach (var address in wanted.Where(unplaced.Contains))
+                {
+                    var batch = batches.FirstOrDefault(b => b.Addresses.Count < max);
+                    if (batch is null)
                     {
-                        batch.ExistingKinds.UnionWith(old.ExistingKinds);
+                        batch = new RuleBatch { Index = NextFreeIndex(batches) };
+                        batches.Add(batch);
                     }
 
+                    batch.Addresses.Add(address);
+                    grown.Add(batch);
+                }
+
+                // Write the rules that gain addresses first and delete what is left over last, so
+                // there is no moment at start-up where existing bans are unenforced.
+                foreach (var batch in batches.Where(b => b.Addresses.Count > 0).OrderByDescending(grown.Contains))
+                {
                     WriteBatch(batch, ports);
                 }
 
-                var wanted = desired.Select(b => b.Index).ToHashSet();
-                foreach (var stale in existing.Where(b => !wanted.Contains(b.Index)))
+                foreach (var stale in batches.Where(b => b.Addresses.Count == 0))
                 {
                     DeleteBatchRules(stale);
                 }
 
-                _batchCache = desired;
+                batches.RemoveAll(b => b.Addresses.Count == 0);
+                batches.Sort((a, b) => a.Index.CompareTo(b.Index));
+                _batchCache = batches;
                 _appliedPortsKey = PortsKey(ports);
-                _logger.LogInformation("Reconciled firewall rules: {Rules} rule(s) for {Addresses} active ban(s).", desired.Count, seen.Count);
+                _logger.LogInformation("Reconciled firewall rules: {Rules} rule(s) for {Addresses} address(es).", batches.Count, wanted.Count);
             }
             catch (Exception ex)
             {
@@ -242,7 +251,7 @@ public sealed class WindowsFirewall : IFirewall
     }
 
     /// <inheritdoc />
-    public IReadOnlyList<string> ListBlocked()
+    public IReadOnlyList<string>? ListBlocked()
     {
         lock (_gate)
         {
@@ -270,6 +279,7 @@ public sealed class WindowsFirewall : IFirewall
             {
                 _batchCache = null;
                 _logger.LogError(ex, "Failed to enumerate WinGuard firewall rules.");
+                return null;
             }
 
             return results;
@@ -527,6 +537,14 @@ public sealed class WindowsFirewall : IFirewall
     /// </summary>
     private void WriteBatch(RuleBatch batch, string[] ports)
     {
+        // A rule with no remote addresses applies to every address. A batch gets here empty when
+        // none of its rule's addresses could be parsed; such a rule must not be rewritten as "all".
+        if (batch.Addresses.Count == 0)
+        {
+            DeleteBatchRules(batch);
+            return;
+        }
+
         var csv = string.Join(",", batch.Addresses);
         if (ports.Length == 0)
         {

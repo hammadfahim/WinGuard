@@ -26,6 +26,133 @@ public sealed class ReviewRound5Tests
     private const string Attacker = "203.0.113.50";
     private const string Range = "198.51.100.0/24";
 
+    // ---------- blacklisted ranges across a restart ----------
+
+    [Fact]
+    public async Task The_start_up_sync_includes_blacklisted_ranges()
+    {
+        await using var h = await EngineHarness.StartAsync(
+            T0,
+            seed: async store =>
+            {
+                await store.AddToListAsync(ListKind.Blacklist, Range);
+                await store.UpsertBanAsync(ActiveBan(Attacker));
+            });
+
+        // No housekeeping pass yet: one sync put everything in place, in a single call.
+        var sync = Assert.Single(h.Firewall.SyncRulesCalls);
+        Assert.Contains(Range, sync);
+        Assert.Contains(Attacker, sync);
+        Assert.Contains(Range, h.Firewall.Blocked);
+        Assert.Empty(h.Firewall.UnblockCalls);
+    }
+
+    [Fact]
+    public async Task The_start_up_sync_keeps_whitelisted_addresses_out_of_blacklisted_ranges()
+    {
+        await using var h = await EngineHarness.StartAsync(
+            T0,
+            seed: async store =>
+            {
+                await store.AddToListAsync(ListKind.Blacklist, "198.51.100.0/30");
+                await store.AddToListAsync(ListKind.Whitelist, "198.51.100.1");
+            });
+
+        Assert.DoesNotContain("198.51.100.0/30", h.Firewall.Blocked);
+        Assert.DoesNotContain("198.51.100.1", h.Firewall.Blocked);
+        Assert.Contains("198.51.100.0", h.Firewall.Blocked);
+        Assert.Contains("198.51.100.2/31", h.Firewall.Blocked);
+    }
+
+    [Fact]
+    public async Task Clearing_bans_on_start_up_leaves_the_blacklisted_ranges_enforced()
+    {
+        await using var h = await EngineHarness.StartAsync(
+            T0,
+            s => s.ClearBansOnStartup = true,
+            seed: async store =>
+            {
+                await store.AddToListAsync(ListKind.Blacklist, Range);
+                await store.UpsertBanAsync(ActiveBan(Attacker));
+            });
+
+        Assert.Equal([Range], Assert.Single(h.Firewall.SyncRulesCalls));
+        Assert.Equal([Range], h.Firewall.Blocked);
+        Assert.Empty(await h.Store.GetActiveBansAsync());
+    }
+
+    [Fact]
+    public async Task Report_only_start_up_touches_no_firewall_rule_at_all()
+    {
+        await using var h = await EngineHarness.StartAsync(
+            T0,
+            s => s.ReportOnly = true,
+            seed: async store =>
+            {
+                await store.AddToListAsync(ListKind.Blacklist, Range);
+                await store.UpsertBanAsync(ActiveBan(Attacker));
+            });
+
+        AssertFirewallUntouched(h);
+    }
+
+    [Fact]
+    public async Task Clearing_bans_on_start_up_in_report_only_mode_leaves_the_firewall_alone()
+    {
+        await using var h = await EngineHarness.StartAsync(
+            T0,
+            s =>
+            {
+                s.ReportOnly = true;
+                s.ClearBansOnStartup = true;
+            },
+            seed: store => store.UpsertBanAsync(ActiveBan(Attacker)));
+
+        AssertFirewallUntouched(h);
+        Assert.Empty(await h.Store.GetActiveBansAsync());
+    }
+
+    [Fact]
+    public async Task Unreadable_bans_at_start_up_do_not_wipe_the_firewall()
+    {
+        await using var h = await EngineHarness.StartAsync(
+            T0,
+            seed: async store =>
+            {
+                await store.UpsertBanAsync(ActiveBan(Attacker));
+                store.FailActiveBansRead = true;
+            });
+
+        // A sync with nothing would delete every rule, and leave them deleted until the store recovers.
+        Assert.Empty(h.Firewall.SyncRulesCalls);
+
+        h.Store.FailActiveBansRead = false;
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Contains(Attacker, h.Firewall.Blocked);
+    }
+
+    [Fact]
+    public async Task Unreadable_lists_do_not_get_blacklisted_ranges_removed_as_orphans()
+    {
+        await using var h = await EngineHarness.StartAsync(
+            T0,
+            seed: async store =>
+            {
+                await store.AddToListAsync(ListKind.Blacklist, Range);
+                store.FailListRead = true;
+            });
+        h.Firewall.Block(Range); // the rule a previous run left in place
+
+        Assert.Empty(h.Firewall.SyncRulesCalls);
+        await h.Engine.HousekeepOnceAsync();
+        Assert.Contains(Range, h.Firewall.Blocked);
+
+        h.Store.FailListRead = false;
+        await h.Engine.HousekeepOnceAsync();
+        Assert.Contains(Range, h.Firewall.Blocked);
+    }
+
     // ---------- offense memory ----------
 
     [Fact]
@@ -363,6 +490,79 @@ public sealed class ReviewRound5Tests
 
         Assert.Equal(2, tracker.GetCount(Attacker));
         Assert.Equal(0, tracker.PruneStale([], now.AddDays(-1)));
+    }
+
+    // ---------- firewall reconcile ----------
+
+    [Fact]
+    public async Task An_unreadable_firewall_is_left_alone_instead_of_retrying_every_ban()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        await BanSeveralAsync(h);
+        var blocksBefore = h.Firewall.BlockCalls.Count;
+        var syncsBefore = h.Firewall.SyncRulesCalls.Count;
+
+        h.Firewall.FailListBlocked = true;
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Equal(blocksBefore, h.Firewall.BlockCalls.Count);
+        Assert.Equal(syncsBefore, h.Firewall.SyncRulesCalls.Count);
+        Assert.Empty(h.Firewall.UnblockCalls);
+    }
+
+    [Fact]
+    public async Task A_firewall_reset_is_healed_by_one_call()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, seed: store => store.AddToListAsync(ListKind.Blacklist, Range));
+        await BanSeveralAsync(h);
+        var blocksBefore = h.Firewall.BlockCalls.Count;
+        var syncsBefore = h.Firewall.SyncRulesCalls.Count;
+
+        h.Firewall.ClearAll();
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Equal(syncsBefore + 1, h.Firewall.SyncRulesCalls.Count);
+        Assert.Equal(blocksBefore, h.Firewall.BlockCalls.Count);
+        Assert.Equal(4, h.Firewall.Blocked.Count);
+        Assert.Contains(Range, h.Firewall.Blocked);
+    }
+
+    [Fact]
+    public async Task A_firewall_that_matches_is_not_written_to()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, seed: store => store.AddToListAsync(ListKind.Blacklist, Range));
+        await BanSeveralAsync(h);
+        await h.Engine.HousekeepOnceAsync();
+        var syncsBefore = h.Firewall.SyncRulesCalls.Count;
+
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Equal(syncsBefore, h.Firewall.SyncRulesCalls.Count);
+    }
+
+    [Fact]
+    public async Task Reconcile_removes_an_orphan_rule()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        await BanSeveralAsync(h);
+
+        h.Firewall.Block("192.0.2.200");
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.DoesNotContain("192.0.2.200", h.Firewall.Blocked);
+        Assert.Equal(3, h.Firewall.Blocked.Count);
+    }
+
+    [Fact]
+    public async Task Reconcile_does_not_treat_an_unsaved_ban_as_an_orphan()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        h.Store.FailWrites = true;
+        await SendThresholdAsync(h);
+
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Contains(Attacker, h.Firewall.Blocked);
     }
 
     // ---------- settings bounds ----------

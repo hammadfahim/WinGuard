@@ -4,7 +4,6 @@ using System.Runtime.Versioning;
 using Microsoft.Extensions.Logging.Abstractions;
 using WinGuard.Core.Config;
 using WinGuard.Core.Firewall;
-using WinGuard.Core.Model;
 using Xunit;
 
 namespace WinGuard.Core.Tests;
@@ -65,11 +64,11 @@ public sealed class WindowsFirewallBatchingTests
 
         // A second instance has no cache: everything it knows comes from reading the rules back.
         var fresh = Create(store);
-        Assert.Equal(new[] { "2001:db8::7", "203.0.113.1", "203.0.113.2" }, fresh.ListBlocked().Order());
+        Assert.Equal(new[] { "2001:db8::7", "203.0.113.1", "203.0.113.2" }, fresh.ListBlocked()!.Order());
 
         // Blocking through the fresh instance must add to the rule, not replace its content.
         fresh.Block("203.0.113.3");
-        Assert.Equal(4, Create(store).ListBlocked().Count);
+        Assert.Equal(4, Create(store).ListBlocked()!.Count);
         Assert.Single(store.Rules);
     }
 
@@ -84,7 +83,7 @@ public sealed class WindowsFirewallBatchingTests
 
         for (var i = 0; i < 5; i++)
         {
-            Assert.Equal(2, firewall.ListBlocked().Count);
+            Assert.Equal(2, firewall.ListBlocked()!.Count);
             firewall.Block("203.0.113.1");
         }
 
@@ -100,15 +99,15 @@ public sealed class WindowsFirewallBatchingTests
         firewall.Block("203.0.113.2");
 
         firewall.Unblock("203.0.113.1");
-        Assert.Equal(new[] { "203.0.113.2" }, firewall.ListBlocked());
+        Assert.Equal(new[] { "203.0.113.2" }, firewall.ListBlocked()!);
 
         firewall.Unblock("203.0.113.2");
-        Assert.Empty(firewall.ListBlocked());
+        Assert.Empty(firewall.ListBlocked()!);
         Assert.Empty(store.Rules);
 
         // The emptied batch is gone; a later block creates a fresh rule.
         firewall.Block("203.0.113.9");
-        Assert.Equal(new[] { "203.0.113.9" }, Create(store).ListBlocked());
+        Assert.Equal(new[] { "203.0.113.9" }, Create(store).ListBlocked()!);
     }
 
     [Fact]
@@ -123,7 +122,7 @@ public sealed class WindowsFirewallBatchingTests
         }
 
         Assert.Equal(new[] { "WinGuard_Block_0001", "WinGuard_Block_0002", "WinGuard_Block_0003" }, store.Rules.Keys.Order());
-        Assert.Equal(5, Create(store, maxPerRule: 2).ListBlocked().Count);
+        Assert.Equal(5, Create(store, maxPerRule: 2).ListBlocked()!.Count);
     }
 
     [Fact]
@@ -137,17 +136,109 @@ public sealed class WindowsFirewallBatchingTests
         }
 
         store.RemovedNames.Clear();
-        Create(store, maxPerRule: 2).SyncRules(
-        [
-            new BanEntry { IpAddress = "203.0.113.1" },
-            new BanEntry { IpAddress = "198.51.100.7" },
-        ]);
+        Create(store, maxPerRule: 2).SyncRules(["203.0.113.1", "198.51.100.7"]);
 
-        Assert.Equal(new[] { "198.51.100.7", "203.0.113.1" }, Create(store).ListBlocked().Order());
+        Assert.Equal(new[] { "198.51.100.7", "203.0.113.1" }, Create(store).ListBlocked()!.Order());
         Assert.Equal(new[] { "WinGuard_Block_0001" }, store.Rules.Keys);
 
         // The rule that stays in use is updated in place, never deleted and recreated.
         Assert.DoesNotContain("WinGuard_Block_0001", store.RemovedNames);
+    }
+
+    [Fact]
+    public void Sync_holds_bans_and_ranges_and_refuses_anything_else()
+    {
+        var store = new FakeRuleStore();
+
+        Create(store).SyncRules(["203.0.113.1", "198.51.100.0/24", "LocalSubnet", "203.0.113.1", "not an address"]);
+
+        Assert.Equal(new[] { "198.51.100.0/24", "203.0.113.1" }, Create(store).ListBlocked()!.Order());
+    }
+
+    [Fact]
+    public void Sync_keeps_every_address_in_the_rule_that_holds_it()
+    {
+        // Moving an address from a rule written early to one written late would leave it
+        // unenforced in between, here: the range in rule 1 while the bans change around it.
+        var store = new FakeRuleStore();
+        var firewall = Create(store, maxPerRule: 2);
+        firewall.Block("198.51.100.0/24");
+        firewall.Block("203.0.113.1");
+        firewall.Block("203.0.113.2");
+        firewall.Block("203.0.113.3");
+        var rangeRule = store.Rules.Single(rule => rule.Value.Remote.Contains("198.51.100.0")).Key;
+
+        store.StateAfterEachWrite.Clear();
+        Create(store, maxPerRule: 2).SyncRules(["203.0.113.2", "203.0.113.4", "203.0.113.5", "203.0.113.6", "198.51.100.0/24"]);
+
+        Assert.Contains("198.51.100.0", store.Rules[rangeRule].Remote);
+        Assert.NotEmpty(store.StateAfterEachWrite);
+        Assert.All(store.StateAfterEachWrite, state =>
+        {
+            Assert.Contains("198.51.100.0", state);
+            Assert.Contains("203.0.113.2", state);
+        });
+        Assert.Equal(
+            new[] { "198.51.100.0/24", "203.0.113.2", "203.0.113.4", "203.0.113.5", "203.0.113.6" },
+            Create(store).ListBlocked()!.Order());
+    }
+
+    [Fact]
+    public void Sync_with_a_lowered_rule_size_never_drops_an_address_on_the_way()
+    {
+        var store = new FakeRuleStore();
+        var firewall = Create(store, maxPerRule: 4);
+        foreach (var ip in new[] { "203.0.113.1", "203.0.113.2", "203.0.113.3", "203.0.113.4" })
+        {
+            firewall.Block(ip);
+        }
+
+        store.StateAfterEachWrite.Clear();
+        Create(store, maxPerRule: 2).SyncRules(["203.0.113.1", "203.0.113.2", "203.0.113.3", "203.0.113.4"]);
+
+        Assert.Equal(2, store.Rules.Count);
+        Assert.All(store.StateAfterEachWrite, state => Assert.Contains("203.0.113.4", state));
+    }
+
+    [Fact]
+    public void A_failed_read_is_reported_as_unknown_not_as_no_rules()
+    {
+        var store = new FakeRuleStore();
+        var firewall = Create(store);
+        firewall.Block("203.0.113.1");
+
+        store.FailReads = true;
+        Assert.Null(firewall.ListBlocked());
+
+        store.FailReads = false;
+        Assert.Equal(new[] { "203.0.113.1" }, firewall.ListBlocked());
+    }
+
+    [Fact]
+    public void Clearing_still_reports_a_firewall_it_could_not_read()
+    {
+        var store = new FakeRuleStore { FailReads = true };
+
+        Assert.False(Create(store).TryClearAll(out var error));
+        Assert.NotNull(error);
+    }
+
+    [Fact]
+    public void A_rule_with_no_readable_address_is_never_rewritten_as_applying_to_everyone()
+    {
+        // An empty RemoteAddresses means "any": rewriting such a rule would block the whole internet.
+        var settings = new WinGuardSettings();
+        var store = new FakeRuleStore();
+        store.Rules["WinGuard_Block_0001"] = (WindowsFirewall.ProtocolAny, null, "*");
+        var firewall = new WindowsFirewall(NullLogger<WindowsFirewall>.Instance, store, 1000, () => settings);
+        firewall.SyncRules(["203.0.113.1"]);
+        store.Rules["WinGuard_Block_0002"] = (WindowsFirewall.ProtocolAny, null, "*");
+
+        settings.BlockedPorts = ["3389"];
+        Assert.Single(firewall.ListBlocked()!);
+
+        Assert.DoesNotContain(store.Rules.Values, rule => rule.Remote.Length == 0);
+        Assert.DoesNotContain(store.Rules.Keys, name => name.StartsWith("WinGuard_Block_0002", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -157,11 +248,11 @@ public sealed class WindowsFirewallBatchingTests
         var store = new FakeRuleStore();
         var firewall = new WindowsFirewall(NullLogger<WindowsFirewall>.Instance, store, 1000, () => settings);
 
-        firewall.SyncRules([new BanEntry { IpAddress = "203.0.113.1" }]);
+        firewall.SyncRules(["203.0.113.1"]);
         Assert.Equal(new[] { "WinGuard_Block_0001" }, store.Rules.Keys);
 
         settings.BlockedPorts = ["3389", "1433"];
-        Assert.Single(firewall.ListBlocked());
+        Assert.Single(firewall.ListBlocked()!);
         Assert.Equal(new[] { "WinGuard_Block_0001_TCP", "WinGuard_Block_0001_UDP" }, store.Rules.Keys.Order());
         Assert.All(store.Rules.Values, rule => Assert.Equal("3389,1433", rule.LocalPorts));
 
@@ -170,7 +261,7 @@ public sealed class WindowsFirewallBatchingTests
         Assert.All(store.Rules.Values, rule => Assert.Equal("3389", rule.LocalPorts));
 
         settings.BlockedPorts = [];
-        Assert.Equal(2, firewall.ListBlocked().Count);
+        Assert.Equal(2, firewall.ListBlocked()!.Count);
         Assert.Equal(new[] { "WinGuard_Block_0001" }, store.Rules.Keys);
     }
 
@@ -184,7 +275,7 @@ public sealed class WindowsFirewallBatchingTests
         Assert.True(firewall.TryClearAll(out var error));
         Assert.Null(error);
         Assert.Empty(store.Rules);
-        Assert.Empty(firewall.ListBlocked());
+        Assert.Empty(firewall.ListBlocked()!);
     }
 
     private static WindowsFirewall Create(FakeRuleStore store, int maxPerRule = 1000) =>
@@ -199,14 +290,22 @@ public sealed class WindowsFirewallBatchingTests
 
         public int UpsertCount { get; private set; }
 
-        public IReadOnlyList<FirewallRuleInfo> ReadRules() =>
-            Rules.Select(pair => new FirewallRuleInfo(pair.Key, pair.Value.Remote)).ToList();
+        /// <summary>When true, reading fails the way it does with the firewall service stopped.</summary>
+        public bool FailReads { get; set; }
+
+        /// <summary>Every rule's remote addresses after each write, to see what a write sequence exposes.</summary>
+        public List<string> StateAfterEachWrite { get; } = [];
+
+        public IReadOnlyList<FirewallRuleInfo> ReadRules() => FailReads
+            ? throw new InvalidOperationException("The RPC server is unavailable.")
+            : Rules.Select(pair => new FirewallRuleInfo(pair.Key, pair.Value.Remote)).ToList();
 
         public void Upsert(string name, int protocol, string? localPorts, string remoteAddresses)
         {
             UpsertCount++;
             var ports = localPorts ?? (Rules.TryGetValue(name, out var existing) ? existing.LocalPorts : null);
             Rules[name] = (protocol, ports, AsWindowsReportsIt(remoteAddresses));
+            StateAfterEachWrite.Add(string.Join(",", Rules.Values.Select(rule => rule.Remote)));
         }
 
         public void Remove(string name)
@@ -217,8 +316,10 @@ public sealed class WindowsFirewallBatchingTests
 
         private static string AsWindowsReportsIt(string csv) =>
             string.Join(",", csv.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(address =>
-                IPAddress.Parse(address).AddressFamily == AddressFamily.InterNetwork
-                    ? $"{address}/255.255.255.255"
-                    : $"{address}-{address}"));
+                address.Contains('/')
+                    ? address
+                    : IPAddress.Parse(address).AddressFamily == AddressFamily.InterNetwork
+                        ? $"{address}/255.255.255.255"
+                        : $"{address}-{address}"));
     }
 }

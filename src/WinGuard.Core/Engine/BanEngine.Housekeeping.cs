@@ -282,14 +282,20 @@ public sealed partial class BanEngine
             return;
         }
 
-        List<BanEntry> activeBans;
-        IReadOnlyList<string> blocked;
+        // Without the lists every blacklisted range would look like an orphan.
+        if (!_listsLoaded)
+        {
+            return;
+        }
+
+        List<string> expected;
+        IReadOnlyList<string>? blocked;
         try
         {
-            // Bans the store has not taken yet are enforced too: they are not orphans.
-            activeBans = (await _store.GetActiveBansAsync(ct).ConfigureAwait(false))
-                .Concat(_unsavedBans.Values)
-                .ToList();
+            // Blacklisted CIDR entries are enforced as whole-subnet range rules: they belong to the
+            // expected state just like active bans (a blacklisted range is blocked as a whole, not
+            // address-by-address on first contact).
+            expected = FirewallTargets(await _store.GetActiveBansAsync(ct).ConfigureAwait(false));
             blocked = _firewall.ListBlocked();
         }
         catch (Exception ex)
@@ -298,47 +304,26 @@ public sealed partial class BanEngine
             return;
         }
 
+        // An unreadable firewall (MpsSvc down) says nothing about its rules: treating it as empty
+        // would count every ban as missing.
+        if (blocked is null)
+        {
+            _logger.LogWarning("Skipping firewall reconcile: the rules could not be read.");
+            return;
+        }
+
+        var expectedSet = new HashSet<string>(expected, StringComparer.OrdinalIgnoreCase);
         var blockedSet = new HashSet<string>(blocked, StringComparer.OrdinalIgnoreCase);
-        var activeSet = new HashSet<string>(activeBans.Select(b => b.IpAddress), StringComparer.OrdinalIgnoreCase);
-
-        // Blacklisted CIDR entries are enforced as whole-subnet range rules: they belong to the
-        // expected state just like active bans (a blacklisted range is blocked as a whole, not
-        // address-by-address on first contact).
-        var expectedRanges = new List<string>();
-        foreach (var range in _blacklistedRanges)
+        var missing = expectedSet.Count(target => !blockedSet.Contains(target));
+        var orphans = blockedSet.Count(target => !expectedSet.Contains(target));
+        if (missing == 0 && orphans == 0)
         {
-            if (activeSet.Add(range))
-            {
-                expectedRanges.Add(range);
-            }
+            return;
         }
 
-        // Remove orphan rules that no longer correspond to an active ban or blacklisted range.
-        foreach (var blockedIp in blocked)
-        {
-            if (!activeSet.Contains(blockedIp))
-            {
-                TryFirewall(() => _firewall.Unblock(blockedIp), "unblock orphan", blockedIp);
-            }
-        }
-
-        // Re-add missing rules for active bans (self-heal after reboot/firewall reset) and for
-        // newly blacklisted subnets.
-        foreach (var ban in activeBans)
-        {
-            if (!blockedSet.Contains(ban.IpAddress))
-            {
-                TryFirewall(() => _firewall.Block(ban.IpAddress), "re-block", ban.IpAddress);
-            }
-        }
-
-        foreach (var range in expectedRanges)
-        {
-            if (!blockedSet.Contains(range))
-            {
-                TryFirewall(() => _firewall.Block(range), "blacklist range", range);
-                _logger.LogInformation("Enforcing blacklisted subnet {Range} as a firewall range rule.", range);
-            }
-        }
+        // Self-heal after a reboot or firewall reset, enforce newly blacklisted subnets and remove
+        // orphan rules, all in one go: one write per rule, not one per address.
+        _logger.LogInformation("Reconciling firewall rules: {Missing} target(s) missing, {Orphans} orphan(s).", missing, orphans);
+        TryFirewall(() => _firewall.SyncRules(expected), "reconcile", $"{expected.Count} target(s)");
     }
 }

@@ -246,7 +246,6 @@ public sealed class BanEngineV02FeaturesTests
         await h.Engine.HousekeepOnceAsync();
 
         Assert.Contains("203.0.113.0/24", h.Firewall.Blocked);
-        Assert.Contains(h.Firewall.BlockCalls, call => call == "203.0.113.0/24");
     }
 
     [Fact]

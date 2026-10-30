@@ -120,15 +120,16 @@ public sealed partial class BanEngine
         {
             var settings = _settingsAccessor();
 
-            IReadOnlyList<BanEntry> activeBans;
+            IReadOnlyList<BanEntry> activeBans = Array.Empty<BanEntry>();
+            var bansKnown = false;
             try
             {
                 activeBans = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
+                bansKnown = true;
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "BanEngine could not read active bans during startup.");
-                activeBans = Array.Empty<BanEntry>();
             }
 
             foreach (var ban in activeBans)
@@ -140,15 +141,24 @@ public sealed partial class BanEngine
             await LoadPersistedOffenseCountsAsync(ct).ConfigureAwait(false);
             await LoadReplayCutoffAsync(ct).ConfigureAwait(false);
 
+            // The lists come before any firewall work: a sync removes whatever it is not given, so
+            // it has to know the blacklisted ranges or they would be unenforced until housekeeping.
+            await ReloadListsCoreAsync(ct).ConfigureAwait(false);
+
             if (settings.ClearBansOnStartup)
             {
-                try
+                // The bans go, the blacklisted ranges stay. Sync instead of ClearAll, which would
+                // leave the ranges unenforced for a moment. Report-only leaves the firewall alone.
+                if (!settings.ReportOnly)
                 {
-                    _firewall.ClearAll();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "BanEngine failed to clear firewall rules on startup.");
+                    try
+                    {
+                        _firewall.SyncRules(_blacklistedRanges);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "BanEngine failed to clear firewall rules on startup.");
+                    }
                 }
 
                 foreach (var ban in activeBans)
@@ -177,19 +187,24 @@ public sealed partial class BanEngine
                 _logger.LogInformation("BanEngine started in report-only mode: failures are counted and recorded, but the firewall is not modified.");
                 await TryAddEventAsync(null, null, "Started in report-only mode: bans are recorded but NOT enforced in the firewall.", ct).ConfigureAwait(false);
             }
-            else
+            else if (bansKnown && _listsLoaded)
             {
                 try
                 {
-                    _firewall.SyncRules(activeBans);
+                    _firewall.SyncRules(FirewallTargets(activeBans));
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "BanEngine failed to synchronize firewall rules on startup.");
                 }
             }
+            else
+            {
+                // A sync removes everything it is not given, so on an unreadable database it would
+                // wipe every enforced ban. The rules stay; reconcile corrects them once it is back.
+                _logger.LogWarning("BanEngine left the firewall rules as they are: the bans or lists could not be read.");
+            }
 
-            await ReloadListsCoreAsync(ct).ConfigureAwait(false);
             await SeedDetectionsTodayAsync(ct).ConfigureAwait(false);
 
             StartHousekeepingLoop(ct);
@@ -1111,6 +1126,31 @@ public sealed partial class BanEngine
 
         TryFirewall(() => _firewall.Block(ipOrRange), "block", ipOrRange);
     }
+
+    /// <summary>
+    /// Enforcement-side unblock, honoring report-only mode like <see cref="TryBlock"/>. A rule from
+    /// before the mode was switched on outlives its ban until then: reconcile lifts it as an orphan.
+    /// </summary>
+    private void TryUnblock(string ipOrRange)
+    {
+        if (_settingsAccessor().ReportOnly)
+        {
+            return;
+        }
+
+        TryFirewall(() => _firewall.Unblock(ipOrRange), "unblock", ipOrRange);
+    }
+
+    private string ReportSuffix() => _settingsAccessor().ReportOnly ? ReportOnlyNote : string.Empty;
+
+    /// <summary>What the firewall should hold: these bans, the ones the store has not taken yet, and the blacklisted ranges.</summary>
+    private List<string> FirewallTargets(IEnumerable<BanEntry> activeBans) =>
+        activeBans
+            .Select(ban => ban.IpAddress)
+            .Concat(_unsavedBans.Keys)
+            .Concat(_blacklistedRanges)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
     /// <summary>Appends a ban-history row; failures are logged, never propagated.</summary>
     private async Task AddBanHistoryCoreAsync(BanHistoryEntry entry, CancellationToken ct)

@@ -1,5 +1,3 @@
-using WinGuard.Core.Model;
-
 namespace WinGuard.Core.Abstractions;
 
 /// <summary>
@@ -22,11 +20,18 @@ public interface IFirewall
     /// <summary>Removes the target from whichever batch rule holds it.</summary>
     void Unblock(string ipOrRange);
 
-    /// <summary>Rebuild all WinGuard_* batch rules from the given active bans (startup reconcile / self-heal).</summary>
-    void SyncRules(IEnumerable<BanEntry> activeBans);
+    /// <summary>
+    /// Makes the WinGuard_* batch rules hold exactly the given targets (active bans and blacklisted
+    /// ranges) and nothing else (startup reconcile / self-heal). One call however many targets
+    /// differ; a target that is wanted and already blocked stays blocked throughout.
+    /// </summary>
+    void SyncRules(IEnumerable<string> targets);
 
-    /// <summary>All IPs currently present in WinGuard_* block rules.</summary>
-    IReadOnlyList<string> ListBlocked();
+    /// <summary>
+    /// All targets currently present in WinGuard_* block rules, or <see langword="null"/> when the
+    /// rules could not be read. That is not the same as empty: nothing is known about them.
+    /// </summary>
+    IReadOnlyList<string>? ListBlocked();
 
     /// <summary>Delete every WinGuard_* rule.</summary>
     void ClearAll();

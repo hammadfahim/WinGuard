@@ -1,5 +1,4 @@
 using WinGuard.Core.Abstractions;
-using WinGuard.Core.Model;
 
 namespace WinGuard.Core.Tests.Fakes;
 
@@ -18,8 +17,11 @@ public sealed class FakeFirewall : IFirewall
     /// <summary>Every IP passed to <see cref="Unblock"/>, in call order.</summary>
     public List<string> UnblockCalls { get; } = new();
 
-    /// <summary>Snapshot of the ban list given to each <see cref="SyncRules"/> call.</summary>
+    /// <summary>Snapshot of the target list given to each <see cref="SyncRules"/> call.</summary>
     public List<IReadOnlyList<string>> SyncRulesCalls { get; } = new();
+
+    /// <summary>When true, <see cref="ListBlocked"/> fails the way an unreachable firewall does.</summary>
+    public bool FailListBlocked { get; set; }
 
     /// <summary>Number of times <see cref="ClearAll"/> was invoked.</summary>
     public int ClearAllCallCount { get; private set; }
@@ -54,11 +56,11 @@ public sealed class FakeFirewall : IFirewall
         }
     }
 
-    public void SyncRules(IEnumerable<BanEntry> activeBans)
+    public void SyncRules(IEnumerable<string> targets)
     {
         lock (_gate)
         {
-            var ips = activeBans.Select(b => b.IpAddress).ToList();
+            var ips = targets.ToList();
             SyncRulesCalls.Add(ips);
             _blocked.Clear();
             foreach (var ip in ips)
@@ -71,11 +73,11 @@ public sealed class FakeFirewall : IFirewall
         }
     }
 
-    public IReadOnlyList<string> ListBlocked()
+    public IReadOnlyList<string>? ListBlocked()
     {
         lock (_gate)
         {
-            return _blocked.ToList();
+            return FailListBlocked ? null : _blocked.ToList();
         }
     }
 

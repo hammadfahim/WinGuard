@@ -31,24 +31,24 @@ public sealed class WindowsFirewallIntegrationTests
             firewall.ClearAll();
 
             firewall.Block(TestIp);
-            Assert.Contains(TestIp, firewall.ListBlocked());
+            Assert.Contains(TestIp, firewall.ListBlocked()!);
 
             // A second address must be added to the rule, not replace the first one, and a
             // fresh instance (no cache) must read both back from Windows.
             firewall.Block(SecondTestIp);
             var fresh = new WindowsFirewall(NullLogger<WindowsFirewall>.Instance);
-            Assert.Contains(TestIp, fresh.ListBlocked());
-            Assert.Contains(SecondTestIp, fresh.ListBlocked());
+            Assert.Contains(TestIp, fresh.ListBlocked()!);
+            Assert.Contains(SecondTestIp, fresh.ListBlocked()!);
             firewall.Unblock(SecondTestIp);
 
             firewall.Unblock(TestIp);
-            Assert.DoesNotContain(TestIp, firewall.ListBlocked());
+            Assert.DoesNotContain(TestIp, firewall.ListBlocked()!);
 
             firewall.Block(TestIp);
-            Assert.Contains(TestIp, firewall.ListBlocked());
+            Assert.Contains(TestIp, firewall.ListBlocked()!);
 
             firewall.ClearAll();
-            Assert.DoesNotContain(TestIp, firewall.ListBlocked());
+            Assert.DoesNotContain(TestIp, firewall.ListBlocked()!);
         }
         finally
         {
