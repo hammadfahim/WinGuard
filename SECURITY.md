@@ -76,9 +76,19 @@ Public disclosure is coordinated with you after a fix is released.
   only entering a new value replaces it. Moving WinGuard to another machine means entering the
   secrets again.
 - WinGuard makes **no outbound connections** of its own; the only network traffic it can produce
-  is to the notification destinations (webhook / Telegram / SMTP) an administrator explicitly
-  configures. Webhook URLs and Telegram tokens are secrets and never reach the log; a plain
-  `http://` webhook still works but logs a warning.
+  is to the notification destinations (webhook / Telegram / SMTP / syslog) an administrator
+  explicitly configures. Webhook URLs and Telegram tokens are secrets and never reach the log; a
+  plain `http://` webhook still works but logs a warning.
+- **Syslog** is plain UDP or TCP without TLS, so events, including attacker addresses, travel
+  unencrypted, and over UDP nothing confirms that a message arrived; use a trusted network or a
+  local collector. Control characters in event text are escaped, so a crafted user name cannot
+  forge a second message.
+- **Metrics** open no port: WinGuard only writes the `.prom` file named in the settings, for
+  windows_exporter to read. The path must be a full path on a local drive, because the service
+  runs as SYSTEM and a network path would authenticate the machine to whatever host it names. The
+  folder should be writable by administrators only; the file holds counts, flags and a timestamp,
+  no addresses. Writes go through a randomly named temporary file created fresh, so a file planted
+  in the folder cannot be written through.
 
 ## Scope notes
 

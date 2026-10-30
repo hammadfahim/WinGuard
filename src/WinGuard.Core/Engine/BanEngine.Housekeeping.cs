@@ -276,6 +276,8 @@ public sealed partial class BanEngine
             _lastReconcileUtc = now;
             await ReconcileFirewallCoreAsync(ct).ConfigureAwait(false);
         }
+
+        PublishMetrics(settings, activeForPrune, now);
     }
 
     private async Task ReconcileFirewallCoreAsync(CancellationToken ct)

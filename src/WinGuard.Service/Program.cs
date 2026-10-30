@@ -8,6 +8,7 @@ using WinGuard.Core.Config;
 using WinGuard.Core.Detection;
 using WinGuard.Core.Engine;
 using WinGuard.Core.Firewall;
+using WinGuard.Core.Monitoring;
 using WinGuard.Core.Notifications;
 using WinGuard.Core.Store;
 using WinGuard.Service.Ipc;
@@ -195,6 +196,7 @@ internal static class Program
                 sp.GetRequiredService<IEventPublisher>())
             {
                 BreakGlass = new DisarmFile(Defaults.DisarmFilePath),
+                Metrics = new PrometheusTextfileWriter(sp.GetRequiredService<ILogger<PrometheusTextfileWriter>>()),
             });
 
         builder.Services.AddSingleton<IDetector>(sp =>

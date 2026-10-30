@@ -272,6 +272,35 @@ public sealed class CliCommandsTests
         Assert.True(hosted.IndexOf(typeof(NotificationHostedService)) < hosted.IndexOf(typeof(GuardWorker)));
     }
 
+    [Fact]
+    public void The_service_wires_up_break_glass_metrics_and_the_new_optional_dependencies()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "winguard-wiring-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var builder = Host.CreateEmptyApplicationBuilder(new HostApplicationBuilderSettings());
+            builder.Configuration["DatabasePath"] = Path.Combine(folder, "winguard.db");
+            ServiceProgram.ConfigureServices(builder);
+
+            using (var host = builder.Build())
+            {
+                var engine = host.Services.GetRequiredService<Core.Engine.BanEngine>();
+
+                Assert.NotNull(engine.BreakGlass);
+                Assert.Equal(Core.Engine.DisarmFile.FileName, Path.GetFileName(engine.BreakGlass.Path));
+                Assert.IsType<Core.Monitoring.PrometheusTextfileWriter>(engine.Metrics);
+                Assert.NotNull(host.Services.GetRequiredService<SettingsHolder>());
+                Assert.NotNull(host.Services.GetRequiredService<IpcRequestHandler>());
+            }
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
     private sealed class BrokenRuleStore : IFirewallRuleStore
     {
         public IReadOnlyList<FirewallRuleInfo> ReadRules() => throw new InvalidOperationException("COM is broken");

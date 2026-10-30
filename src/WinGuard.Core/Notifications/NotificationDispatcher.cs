@@ -167,6 +167,7 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
     private readonly Func<WinGuardSettings> _settingsAccessor;
     private readonly ILogger<NotificationDispatcher> _logger;
     private readonly WindowsEventLogWriter? _windowsEventLog;
+    private readonly SyslogSender _syslog;
     private readonly TimeProvider _timeProvider;
     private readonly Channel<LogEvent> _queue;
     private readonly object _rateLock = new();
@@ -201,10 +202,23 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         WindowsEventLogWriter? windowsEventLog = null,
         HttpClient? httpClient = null,
         TimeProvider? timeProvider = null)
+        : this(settingsAccessor, logger, windowsEventLog, httpClient, timeProvider, new SocketSyslogTransport())
+    {
+    }
+
+    /// <summary>For the tests: a syslog transport that needs no network.</summary>
+    internal NotificationDispatcher(
+        Func<WinGuardSettings> settingsAccessor,
+        ILogger<NotificationDispatcher> logger,
+        WindowsEventLogWriter? windowsEventLog,
+        HttpClient? httpClient,
+        TimeProvider? timeProvider,
+        ISyslogTransport syslogTransport)
     {
         _settingsAccessor = settingsAccessor ?? throw new ArgumentNullException(nameof(settingsAccessor));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _windowsEventLog = windowsEventLog;
+        _syslog = new SyslogSender(logger, syslogTransport);
         _ownsHttpClient = httpClient is null;
         _httpClient = httpClient ?? new HttpClient();
         _timeProvider = timeProvider ?? TimeProvider.System;
@@ -246,6 +260,7 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
 
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
+        _syslog.Start();
         _loop = Task.Run(() => DeliverLoopAsync(token), CancellationToken.None);
         _logger.LogInformation("Notification dispatcher started.");
     }
@@ -270,6 +285,7 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         }
 
         _loop = null;
+        await _syslog.StopAsync().ConfigureAwait(false);
 
         // The summary that was not due yet, so the count is not lost with the process.
         var unreported = SuppressedCount;
@@ -367,11 +383,13 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         var settings = _settingsAccessor();
         var notifications = settings?.Notifications;
 
-        // The Windows Application log is delivered regardless of the notification master switch
-        // (it has its own toggle) and is not rate limited: SIEM consumers want full fidelity.
+        // The Windows Application log and syslog are delivered regardless of the notification master
+        // switch (they have their own toggles) and are not rate limited: SIEM consumers want full
+        // fidelity. Syslog only queues here, so a hanging receiver holds nothing back.
         if (settings is not null)
         {
             _windowsEventLog?.Write(logEvent, settings.Notifications);
+            _syslog.Enqueue(logEvent, notifications?.Syslog);
         }
 
         if (notifications is not { Enabled: true })
@@ -464,6 +482,7 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         if (settings is not null)
         {
             _windowsEventLog?.Write(summary, settings.Notifications);
+            _syslog.Enqueue(summary, settings.Notifications?.Syslog);
         }
 
         if (settings?.Notifications is { Enabled: true } notifications)
@@ -637,6 +656,7 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         _disposed = true;
         _cts?.Cancel();
         _cts?.Dispose();
+        _syslog.Dispose();
         if (_ownsHttpClient)
         {
             _httpClient.Dispose();

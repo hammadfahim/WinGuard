@@ -59,6 +59,12 @@ public sealed class WinGuardSettings
     /// <summary>Out-of-band notifications (webhook / Telegram / e-mail / Windows Event Log).</summary>
     public NotificationSettings Notifications { get; set; } = new();
 
+    /// <summary>
+    /// A <c>.prom</c> file on a local drive that housekeeping keeps up to date, for the textfile
+    /// collector of windows_exporter. Empty (the default) writes nothing; WinGuard opens no port.
+    /// </summary>
+    public string PrometheusTextfilePath { get; set; } = string.Empty;
+
     /// <summary>Empty = block all ports (1 firewall condition per IP; cheapest). Non-empty = block only these ports.</summary>
     public string[] BlockedPorts { get; set; } = [];
 
@@ -115,6 +121,9 @@ public sealed class WinGuardSettings
         BlockedPorts ??= [];
         BanTiers ??= [];
         Notifications.Smtp ??= new();
+        Notifications.Syslog ??= new();
+        Notifications.Syslog.Normalize();
+        PrometheusTextfilePath = PrometheusTextfilePath?.Trim() ?? string.Empty;
 
         foreach (var source in CustomSources)
         {
@@ -316,6 +325,9 @@ public sealed class NotificationSettings
     /// <summary>Also write WinGuard events to the Windows Application event log (source "WinGuard")
     /// so SIEM/Windows-Event-Forwarding setups can consume them without polling WinGuard's pipe.</summary>
     public bool WriteToWindowsEventLog { get; set; } = true;
+
+    /// <summary>Syslog output; has its own switch and is not rate limited, like the Windows Event Log.</summary>
+    public SyslogSettings Syslog { get; set; } = new();
 }
 
 /// <summary>Minimal SMTP relay configuration for notifications.</summary>

@@ -33,7 +33,7 @@ namespace WinGuard.Core.Firewall;
 /// </para>
 /// </summary>
 [SupportedOSPlatform("windows")]
-public sealed class WindowsFirewall : IFirewall
+public sealed class WindowsFirewall : IFirewall, IFirewallRuleCounter
 {
     internal const int ProtocolAny = 256;        // NET_FW_IP_PROTOCOL_ANY
     internal const int ProtocolTcp = 6;          // NET_FW_IP_PROTOCOL_TCP
@@ -80,6 +80,18 @@ public sealed class WindowsFirewall : IFirewall
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _maxAddressesPerRule = Math.Max(1, maxAddressesPerRule);
         _settingsAccessor = settingsAccessor;
+    }
+
+    /// <inheritdoc />
+    public int? CachedRuleCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _batchCache?.Sum(batch => batch.ExistingKinds.Count);
+            }
+        }
     }
 
     /// <inheritdoc />
