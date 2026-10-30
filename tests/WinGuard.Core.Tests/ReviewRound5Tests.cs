@@ -26,6 +26,197 @@ public sealed class ReviewRound5Tests
     private const string Attacker = "203.0.113.50";
     private const string Range = "198.51.100.0/24";
 
+    // ---------- offense memory ----------
+
+    [Fact]
+    public async Task An_attacker_returning_days_after_a_ban_ended_continues_at_the_next_tier()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+
+        await SendThresholdAsync(h);
+        await ExpireAsync(h, TimeSpan.FromHours(25));
+
+        // Well past the old ExpireTime x 4 (4 days with the defaults).
+        h.Time.Advance(TimeSpan.FromDays(5));
+        await h.Engine.HousekeepOnceAsync();
+        await SendThresholdAsync(h);
+
+        var ban = await h.Store.GetBanAsync(Attacker);
+        Assert.Equal(2, ban!.OffenseCount);
+        Assert.Equal(TimeSpan.FromDays(7), ban.ExpiresUtc - ban.BannedAtUtc);
+    }
+
+    [Fact]
+    public async Task Past_the_offense_memory_an_attacker_starts_over_and_is_forgotten_in_the_store_too()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, s => s.OffenseMemory = TimeSpan.FromDays(10));
+
+        await SendThresholdAsync(h);
+        await ExpireAsync(h, TimeSpan.FromHours(25));
+        Assert.Contains(Attacker, h.Store.OffenseCounts.Keys);
+
+        h.Time.Advance(TimeSpan.FromDays(11));
+        await h.Engine.HousekeepOnceAsync();
+        Assert.DoesNotContain(Attacker, h.Store.OffenseCounts.Keys);
+
+        await SendThresholdAsync(h);
+        Assert.Equal(1, (await h.Store.GetBanAsync(Attacker))!.OffenseCount);
+    }
+
+    [Fact]
+    public async Task The_offense_memory_runs_from_when_the_ban_ended()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, s => s.OffenseMemory = TimeSpan.FromDays(3));
+
+        await SendThresholdAsync(h);
+        await ExpireAsync(h, TimeSpan.FromHours(25));
+        await SendThresholdAsync(h); // 7 days, longer than the memory
+        await ExpireAsync(h, TimeSpan.FromDays(8));
+
+        h.Time.Advance(TimeSpan.FromDays(2));
+        await h.Engine.HousekeepOnceAsync();
+        await SendThresholdAsync(h);
+
+        Assert.Equal(3, (await h.Store.GetBanAsync(Attacker))!.OffenseCount);
+    }
+
+    [Fact]
+    public void Settings_saved_before_offense_memory_existed_get_the_default()
+    {
+        var settings = JsonSerializer.Deserialize<WinGuardSettings>("""{"failedLoginThreshold":7}""", IpcJson.Options)!;
+
+        settings.Normalize();
+
+        Assert.Equal(7, settings.FailedLoginThreshold);
+        Assert.Equal(TimeSpan.FromDays(90), settings.OffenseMemory);
+        Assert.Equal(365, settings.BanHistoryRetentionDays);
+    }
+
+    [Theory]
+    [InlineData(0, 90)]
+    [InlineData(-5, 90)]
+    [InlineData(7, 7)]
+    [InlineData(100000, 3650)]
+    public void Offense_memory_is_normalized(int days, int expected)
+    {
+        var settings = new WinGuardSettings { OffenseMemory = TimeSpan.FromDays(days) };
+
+        settings.Normalize();
+
+        Assert.Equal(TimeSpan.FromDays(expected), settings.OffenseMemory);
+    }
+
+    // ---------- offense counts in their own table ----------
+
+    [Fact]
+    public async Task A_ban_writes_one_offense_row_however_many_are_remembered()
+    {
+        await using var h = await EngineHarness.StartAsync(
+            T0,
+            seed: async store =>
+            {
+                var remembered = Enumerable.Range(0, 2000)
+                    .Select(i => new OffenseCountEntry { IpAddress = $"192.0.{i / 256}.{i % 256}", Count = 1, LastUtc = T0.UtcDateTime })
+                    .ToList();
+                await store.SaveOffenseCountsAsync(remembered, []);
+            });
+        var before = h.Store.OffenseRowsWritten;
+
+        await SendThresholdAsync(h);
+
+        Assert.Equal(1, h.Store.OffenseRowsWritten - before);
+        Assert.False(h.Store.SettingValues.ContainsKey("offense_counts"));
+        Assert.Equal(1, h.Store.OffenseCounts[Attacker].Count);
+    }
+
+    [Fact]
+    public async Task A_failed_offense_write_does_not_stop_the_ban_and_is_repeated()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        h.Store.FailOffenseWrites = true;
+
+        await SendThresholdAsync(h);
+
+        Assert.Contains(Attacker, h.Firewall.Blocked);
+        Assert.NotNull(await h.Store.GetBanAsync(Attacker));
+        Assert.Empty(h.Store.OffenseCounts);
+
+        h.Store.FailOffenseWrites = false;
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Equal(1, h.Store.OffenseCounts[Attacker].Count);
+    }
+
+    [Fact]
+    public async Task A_failed_offense_removal_is_repeated_too()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        await SendThresholdAsync(h);
+        h.Store.FailOffenseWrites = true;
+
+        await h.Engine.UnbanAsync(Attacker);
+
+        Assert.Contains(Attacker, h.Store.OffenseCounts.Keys);
+
+        h.Store.FailOffenseWrites = false;
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Empty(h.Store.OffenseCounts);
+    }
+
+    [Fact]
+    public async Task Stopping_saves_what_the_store_refused_while_running()
+    {
+        var h = await EngineHarness.StartAsync(T0);
+        h.Store.FailOffenseWrites = true;
+        await SendThresholdAsync(h);
+
+        h.Store.FailOffenseWrites = false;
+        await h.DisposeAsync();
+
+        Assert.Equal(1, h.Store.OffenseCounts[Attacker].Count);
+    }
+
+    [Fact]
+    public async Task Clearing_bans_on_start_up_forgets_the_saved_offense_counts()
+    {
+        await using var h = await EngineHarness.StartAsync(
+            T0,
+            s => s.ClearBansOnStartup = true,
+            seed: store => store.SaveOffenseCountsAsync(
+                [new OffenseCountEntry { IpAddress = Attacker, Count = 3, LastUtc = T0.UtcDateTime }],
+                []));
+
+        Assert.Empty(h.Store.OffenseCounts);
+    }
+
+    [Fact]
+    public async Task The_store_keeps_offense_counts_and_applies_a_batch_as_a_whole()
+    {
+        await WithSqliteStoreAsync(async (store, _) =>
+        {
+            var last = new DateTime(2026, 5, 1, 10, 0, 0, DateTimeKind.Utc);
+            await store.SaveOffenseCountsAsync(
+                [
+                    new OffenseCountEntry { IpAddress = "203.0.113.1", Count = 1, LastUtc = last },
+                    new OffenseCountEntry { IpAddress = "203.0.113.2", Count = 2, LastUtc = last },
+                ],
+                []);
+
+            await store.SaveOffenseCountsAsync(
+                [new OffenseCountEntry { IpAddress = "203.0.113.1", Count = 5, LastUtc = last.AddDays(1) }],
+                ["203.0.113.2", "203.0.113.99"]);
+
+            var row = Assert.Single(await store.GetOffenseCountsAsync());
+            Assert.Equal("203.0.113.1", row.IpAddress);
+            Assert.Equal(5, row.Count);
+            Assert.Equal(last.AddDays(1), row.LastUtc);
+
+            await store.SaveOffenseCountsAsync([], []);
+            Assert.Single(await store.GetOffenseCountsAsync());
+        });
+    }
+
     // ---------- internal addresses ----------
 
     [Theory]
@@ -55,6 +246,35 @@ public sealed class ReviewRound5Tests
         }
 
         Assert.Equal("64:ff9b::808:808", Assert.Single(h.Firewall.BlockCalls));
+    }
+
+    // ---------- offense tracker ----------
+
+    [Fact]
+    public void Touching_an_ip_without_a_count_creates_nothing()
+    {
+        var tracker = new OffenseTracker();
+        var old = T0.UtcDateTime;
+
+        tracker.Touch(Attacker, old.AddDays(10));
+        Assert.Empty(tracker.GetUnsaved().Changed);
+
+        // Had the touch left a time behind, the IP would now look recently active.
+        tracker.Seed(Attacker, 1, old);
+        Assert.Equal(1, tracker.PruneStale([], old.AddDays(5)));
+    }
+
+    [Fact]
+    public void Seeding_never_moves_the_last_offense_backwards()
+    {
+        var tracker = new OffenseTracker();
+        var now = T0.UtcDateTime;
+
+        tracker.Seed(Attacker, 2, now);
+        tracker.Seed(Attacker, 1, now.AddDays(-50));
+
+        Assert.Equal(2, tracker.GetCount(Attacker));
+        Assert.Equal(0, tracker.PruneStale([], now.AddDays(-1)));
     }
 
     // ---------- settings bounds ----------

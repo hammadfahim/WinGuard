@@ -1,6 +1,4 @@
 using System.Globalization;
-using System.Text.Json;
-using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using WinGuard.Core.Abstractions;
 using WinGuard.Core.Config;
@@ -11,31 +9,18 @@ namespace WinGuard.Core.Engine;
 /// <summary>Offense-count persistence, ban expiry, pruning and firewall reconciliation.</summary>
 public sealed partial class BanEngine
 {
-    /// <summary>Restores offense counts from the settings blob, merging with the active-ban seed (max wins).</summary>
+    /// <summary>Restores the persisted offense counts, merging with the active-ban seed (max wins).</summary>
     private async Task LoadPersistedOffenseCountsAsync(CancellationToken ct)
     {
         try
         {
-            var all = await _store.GetAllSettingsAsync(ct).ConfigureAwait(false);
-            if (!all.TryGetValue(OffenseCountsSettingKey, out var json) || string.IsNullOrWhiteSpace(json))
+            var persisted = await _store.GetOffenseCountsAsync(ct).ConfigureAwait(false);
+            foreach (var entry in persisted)
             {
-                return;
-            }
-
-            var persisted = JsonSerializer.Deserialize<Dictionary<string, OffenseRecord>>(json);
-            if (persisted is null)
-            {
-                return;
-            }
-
-            foreach (var (ip, record) in persisted)
-            {
-                if (record is null || record.Count <= 0)
+                if (entry.Count > 0)
                 {
-                    continue;
+                    _offenses.Seed(entry.IpAddress, entry.Count, entry.LastUtc);
                 }
-
-                _offenses.Seed(ip, record.Count, record.LastUtc);
             }
 
             _logger.LogInformation(
@@ -48,21 +33,26 @@ public sealed partial class BanEngine
         }
     }
 
-    /// <summary>Persists the offense-count map so escalation survives service restarts (review ruling, topic #1).</summary>
+    /// <summary>
+    /// Persists what changed so escalation survives service restarts (review ruling, topic #1). What
+    /// the store refuses stays marked as changed for the next call; a ban never depends on this.
+    /// </summary>
     private async Task SaveOffenseCountsAsync(CancellationToken ct)
     {
+        var (changed, removed) = _offenses.GetUnsaved();
+        if (changed.Count == 0 && removed.Count == 0)
+        {
+            return;
+        }
+
         try
         {
-            var now = NowUtc();
-            var snapshot = _offenses.Snapshot(now);
-            await _store.SetSettingAsync(
-                OffenseCountsSettingKey,
-                JsonSerializer.Serialize(snapshot),
-                ct).ConfigureAwait(false);
+            await _store.SaveOffenseCountsAsync(changed, removed, ct).ConfigureAwait(false);
+            _offenses.MarkSaved();
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Could not persist offense counts; escalation may reset on restart.");
+            _logger.LogWarning(ex, "Could not persist offense counts; retrying later, but escalation may reset if the service restarts first.");
         }
     }
 
@@ -162,7 +152,6 @@ public sealed partial class BanEngine
         var dueBans = await _store.GetDueBansAsync(now, ct).ConfigureAwait(false);
 
         // Expire due bans (the engine's clock is authoritative; the store must not pre-filter).
-        var offensesTouched = false;
         foreach (var ban in dueBans)
         {
             if (ban.IsPermanent || ban.ExpiresUtc > now)
@@ -197,7 +186,6 @@ public sealed partial class BanEngine
             // was recorded — otherwise a 7d/30d ban would outlive its own offense record
             // and tier escalation would silently reset (E-M2 pruning interaction).
             _offenses.Touch(ban.IpAddress, now);
-            offensesTouched = true;
 
             _logger.LogInformation("Unbanned {Ip} (ban expired).", ban.IpAddress);
             await TryAddEventAsync(new LogEvent
@@ -208,11 +196,6 @@ public sealed partial class BanEngine
                 IpAddress = ban.IpAddress,
                 Message = $"UNBANNED {ban.IpAddress}",
             }, ct).ConfigureAwait(false);
-        }
-
-        if (offensesTouched)
-        {
-            await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
         }
 
         // Forget stale counters.
@@ -229,7 +212,7 @@ public sealed partial class BanEngine
         // Event retention (review S-N4): keep the events table bounded.
         try
         {
-            await _store.PruneEventsAsync(now - TimeSpan.FromDays(settings.EventRetentionDays > 0 ? settings.EventRetentionDays : DefaultEventRetentionDays), ct).ConfigureAwait(false);
+            await _store.PruneEventsAsync(now - TimeSpan.FromDays(settings.EventRetentionDays > 0 ? settings.EventRetentionDays : Defaults.EventRetentionDays), ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -243,24 +226,21 @@ public sealed partial class BanEngine
             _replayDedup.Clear();
         }
 
-        // Prune stale offense counts (review E-M2): no active ban and no offense within
-        // ExpireTime x 4; rewrite the persisted blob when anything was removed.
+        // Prune stale offense counts (review E-M2): no active ban and nothing within OffenseMemory.
         IReadOnlyList<BanEntry>? activeForPrune = null;
         try
         {
             activeForPrune = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
-            var activeIps = new HashSet<string>(activeForPrune.Select(b => b.IpAddress), StringComparer.Ordinal);
-            var offenseCutoff = now - TimeSpan.FromTicks(settings.ExpireTime.Ticks * 4);
-            var removed = _offenses.PruneStale(activeIps, offenseCutoff);
-            if (removed > 0)
-            {
-                await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
-            }
+            var activeIps = new HashSet<string>(activeForPrune.Select(b => b.IpAddress).Concat(_unsavedBans.Keys), StringComparer.Ordinal);
+            _offenses.PruneStale(activeIps, now - settings.OffenseMemory);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Housekeeping failed to prune stale offense counts.");
         }
+
+        // Everything this pass changed, plus whatever the store refused earlier.
+        await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
 
         await ReloadListsCoreAsync(ct).ConfigureAwait(false);
 

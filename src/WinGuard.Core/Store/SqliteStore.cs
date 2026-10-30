@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using WinGuard.Core.Abstractions;
@@ -311,6 +312,87 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
                 return true;
             },
             ct).ConfigureAwait(false);
+    }
+
+    // ---- offense counts ----
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<OffenseCountEntry>> GetOffenseCountsAsync(CancellationToken ct = default)
+    {
+        return await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText = "SELECT ip, offense_count, last_utc FROM offense_counts;";
+
+                var rows = new List<OffenseCountEntry>();
+                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    rows.Add(new OffenseCountEntry
+                    {
+                        IpAddress = reader.GetString(0),
+                        Count = reader.GetInt32(1),
+                        LastUtc = FromDb(reader.GetString(2)),
+                    });
+                }
+
+                return (IReadOnlyList<OffenseCountEntry>)rows;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task SaveOffenseCountsAsync(IReadOnlyCollection<OffenseCountEntry> changed, IReadOnlyCollection<string> removed, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(changed);
+        ArgumentNullException.ThrowIfNull(removed);
+        if (changed.Count == 0 && removed.Count == 0)
+        {
+            return;
+        }
+
+        await WithConnectionAsync(
+            async connection =>
+            {
+                await using var transaction = connection.BeginTransaction();
+                await UpsertOffenseCountsAsync(connection, transaction, changed, ct).ConfigureAwait(false);
+
+                await using (var cmd = connection.CreateCommand())
+                {
+                    cmd.Transaction = transaction;
+                    cmd.CommandText = "DELETE FROM offense_counts WHERE ip = $ip;";
+                    var ip = cmd.Parameters.Add("$ip", SqliteType.Text);
+                    foreach (var value in removed)
+                    {
+                        ip.Value = value;
+                        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    }
+                }
+
+                await transaction.CommitAsync(ct).ConfigureAwait(false);
+                return true;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    private static async Task UpsertOffenseCountsAsync(SqliteConnection connection, SqliteTransaction transaction, IEnumerable<OffenseCountEntry> rows, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText =
+            "INSERT INTO offense_counts (ip, offense_count, last_utc) VALUES ($ip, $count, $last) " +
+            "ON CONFLICT(ip) DO UPDATE SET offense_count = excluded.offense_count, last_utc = excluded.last_utc;";
+        var ip = cmd.Parameters.Add("$ip", SqliteType.Text);
+        var count = cmd.Parameters.Add("$count", SqliteType.Integer);
+        var last = cmd.Parameters.Add("$last", SqliteType.Text);
+        foreach (var row in rows)
+        {
+            ip.Value = row.IpAddress;
+            count.Value = row.Count;
+            last.Value = ToDb(row.LastUtc);
+            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
     }
 
     // ---- whitelist / blacklist ----
@@ -729,8 +811,9 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
     /// Brings an existing database up to <see cref="SchemaVersion"/> (tracked in PRAGMA user_version).
     /// v2: the events table gets an AUTOINCREMENT id so the GUI's event cursor never sees an id
     /// reused after pruning, and raw log lines stored by older versions are discarded.
+    /// v4: offense counts move from one settings row into their own table.
     /// </summary>
-    private static async Task MigrateAsync(SqliteConnection connection, CancellationToken ct)
+    private async Task MigrateAsync(SqliteConnection connection, CancellationToken ct)
     {
         int version;
         await using (var cmd = connection.CreateCommand())
@@ -775,13 +858,71 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
                 ct).ConfigureAwait(false);
         }
 
+        await ImportOffenseCountsBlobAsync(connection, ct).ConfigureAwait(false);
+
         await ExecuteNonQueryAsync(
             connection,
             $"UPDATE failed_logins SET raw = NULL WHERE raw IS NOT NULL; PRAGMA user_version = {SchemaVersion};",
             ct).ConfigureAwait(false);
     }
 
-    private const int SchemaVersion = 3;
+    /// <summary>
+    /// Moves the offense counts that versions before schema 4 kept in one JSON settings row into the
+    /// offense_counts table. A row that cannot be read costs escalation memory, not the service: it
+    /// is dropped with a warning, because a store that refuses to open would stop all protection.
+    /// </summary>
+    private async Task ImportOffenseCountsBlobAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        string? json;
+        await using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "SELECT value FROM settings WHERE key = $key;";
+            cmd.Parameters.AddWithValue("$key", LegacyOffenseCountsKey);
+            json = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) as string;
+        }
+
+        if (json is null)
+        {
+            return;
+        }
+
+        var rows = new List<OffenseCountEntry>();
+        try
+        {
+            var legacy = JsonSerializer.Deserialize<Dictionary<string, LegacyOffenseCount>>(json);
+            foreach (var (ip, record) in legacy ?? [])
+            {
+                if (record is { Count: > 0 })
+                {
+                    rows.Add(new OffenseCountEntry { IpAddress = ip, Count = record.Count, LastUtc = record.LastUtc });
+                }
+            }
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Discarding unreadable offense counts; tier escalation restarts for the IPs without an active ban.");
+        }
+
+        // One transaction: an interrupted upgrade finds the row still there and starts over.
+        await using var transaction = connection.BeginTransaction();
+        await UpsertOffenseCountsAsync(connection, transaction, rows, ct).ConfigureAwait(false);
+        await using (var cmd = connection.CreateCommand())
+        {
+            cmd.Transaction = transaction;
+            cmd.CommandText = "DELETE FROM settings WHERE key = $key;";
+            cmd.Parameters.AddWithValue("$key", LegacyOffenseCountsKey);
+            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(ct).ConfigureAwait(false);
+        _logger.LogInformation("Moved {Count} offense count(s) into their own table.", rows.Count);
+    }
+
+    private const int SchemaVersion = 4;
+
+    private const string LegacyOffenseCountsKey = "offense_counts";
+
+    private sealed record LegacyOffenseCount(int Count, DateTime LastUtc);
 
     private static async Task ExecuteNonQueryAsync(SqliteConnection connection, string sql, CancellationToken ct)
     {
@@ -1031,6 +1172,13 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
         );
         CREATE INDEX IF NOT EXISTS ix_ban_history_ts ON ban_history(ts_utc);
         CREATE INDEX IF NOT EXISTS ix_ban_history_ip_ts ON ban_history(ip, ts_utc);
+        CREATE INDEX IF NOT EXISTS ix_ban_history_top ON ban_history(ip, offense_count, ts_utc) WHERE action = 0;
+
+        CREATE TABLE IF NOT EXISTS offense_counts (
+          ip TEXT PRIMARY KEY,
+          offense_count INTEGER NOT NULL,
+          last_utc TEXT NOT NULL
+        );
 
         CREATE TABLE IF NOT EXISTS daily_stats (
           day_utc TEXT NOT NULL,

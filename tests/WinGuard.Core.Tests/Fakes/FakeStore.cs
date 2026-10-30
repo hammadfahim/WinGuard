@@ -28,6 +28,21 @@ public sealed class FakeStore : IStore
     /// <summary>When true, ban and failed-login writes throw, as a locked or full database would.</summary>
     public bool FailWrites { get; set; }
 
+    /// <summary>When true, offense-count writes throw.</summary>
+    public bool FailOffenseWrites { get; set; }
+
+    /// <summary>When true, daily-statistics writes throw.</summary>
+    public bool FailStatsWrites { get; set; }
+
+    /// <summary>When true, reading the active bans throws, as an unreadable database would.</summary>
+    public bool FailActiveBansRead { get; set; }
+
+    /// <summary>When true, reading the whitelist or blacklist throws.</summary>
+    public bool FailListRead { get; set; }
+
+    /// <summary>When true, removing a ban throws.</summary>
+    public bool FailBanRemoval { get; set; }
+
     /// <summary>Snapshot of stored failed logins (oldest first).</summary>
     public List<FailedLogin> FailedLogins
     {
@@ -144,6 +159,11 @@ public sealed class FakeStore : IStore
     /// </summary>
     public Task<IReadOnlyList<BanEntry>> GetActiveBansAsync(CancellationToken ct = default)
     {
+        if (FailActiveBansRead)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
         lock (_gate)
         {
             IReadOnlyList<BanEntry> result = _bans.Values.Select(Clone).ToList();
@@ -185,6 +205,11 @@ public sealed class FakeStore : IStore
 
     public Task RemoveBanAsync(string ip, CancellationToken ct = default)
     {
+        if (FailBanRemoval)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
         lock (_gate)
         {
             _bans.Remove(ip);
@@ -193,8 +218,63 @@ public sealed class FakeStore : IStore
         return Task.CompletedTask;
     }
 
+    // ---- offense counts ----
+
+    private readonly Dictionary<string, OffenseCountEntry> _offenseCounts = new(StringComparer.Ordinal);
+
+    /// <summary>Snapshot of the persisted offense counts by IP.</summary>
+    public Dictionary<string, OffenseCountEntry> OffenseCounts
+    {
+        get { lock (_gate) { return _offenseCounts.ToDictionary(pair => pair.Key, pair => Clone(pair.Value), StringComparer.Ordinal); } }
+    }
+
+    /// <summary>Number of rows written or deleted through <see cref="SaveOffenseCountsAsync"/>, successful or not.</summary>
+    public int OffenseRowsWritten { get; private set; }
+
+    public Task<IReadOnlyList<OffenseCountEntry>> GetOffenseCountsAsync(CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            IReadOnlyList<OffenseCountEntry> result = _offenseCounts.Values.Select(Clone).ToList();
+            return Task.FromResult(result);
+        }
+    }
+
+    public Task SaveOffenseCountsAsync(IReadOnlyCollection<OffenseCountEntry> changed, IReadOnlyCollection<string> removed, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            OffenseRowsWritten += changed.Count + removed.Count;
+        }
+
+        if (FailOffenseWrites)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
+        lock (_gate)
+        {
+            foreach (var entry in changed)
+            {
+                _offenseCounts[entry.IpAddress] = Clone(entry);
+            }
+
+            foreach (var ip in removed)
+            {
+                _offenseCounts.Remove(ip);
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
     public Task<IReadOnlyList<string>> GetListAsync(ListKind kind, CancellationToken ct = default)
     {
+        if (FailListRead)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
         lock (_gate)
         {
             IReadOnlyList<string> values = _lists[kind].ToList();
@@ -281,6 +361,11 @@ public sealed class FakeStore : IStore
 
     public Task AddDailyStatsAsync(DateTime dayUtc, ProtocolSource source, int detectionsDelta, int bansDelta, CancellationToken ct = default)
     {
+        if (FailStatsWrites)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
         lock (_gate)
         {
             var key = (dayUtc.Date, source);
@@ -408,6 +493,13 @@ public sealed class FakeStore : IStore
         OffenseCount = source.OffenseCount,
         IsPermanent = source.IsPermanent,
         Note = source.Note,
+    };
+
+    private static OffenseCountEntry Clone(OffenseCountEntry source) => new()
+    {
+        IpAddress = source.IpAddress,
+        Count = source.Count,
+        LastUtc = source.LastUtc,
     };
 
     private static LogEvent Clone(LogEvent source) => new()

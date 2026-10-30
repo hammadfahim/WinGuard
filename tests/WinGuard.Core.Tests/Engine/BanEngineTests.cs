@@ -341,13 +341,13 @@ public sealed class BanEngineTests
     public async Task Offense_escalation_survives_an_engine_restart()
     {
         // Review ruling (topic #1): escalation must survive service restarts — offense
-        // counts persist in the settings blob and are merged at startup.
+        // counts persist in the store and are merged at startup.
         const string ip = "203.0.113.120";
         await using var h1 = await EngineHarness.StartAsync(T0);
         await SendThresholdAsync(h1, ip);
         AssertTier(await h1.Store.GetBanAsync(ip), 1, TimeSpan.FromHours(24));
 
-        // Let the 24h ban expire (stay within ExpireTime x 4 so the count is not stale-pruned).
+        // Let the 24h ban expire (stay within OffenseMemory so the count is not stale-pruned).
         h1.Time.Advance(TimeSpan.FromHours(25));
         await h1.Engine.HousekeepOnceAsync();
         Assert.Null(await h1.Store.GetBanAsync(ip));

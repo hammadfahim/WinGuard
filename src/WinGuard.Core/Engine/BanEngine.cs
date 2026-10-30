@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using WinGuard.Core.Abstractions;
@@ -31,12 +30,16 @@ public sealed partial class BanEngine
     private readonly object _lifecycle = new();
 
     // Offense counts drive tier escalation (24h -> 7d -> 30d). They survive expired-then-
-    // deleted ban rows in memory AND across service restarts via a settings-table blob
-    // (key "offense_counts") — review ruling: escalation must survive monthly reboots.
-    private const string OffenseCountsSettingKey = "offense_counts";
-    private const int DefaultEventRetentionDays = 30;
-
+    // deleted ban rows in memory AND across service restarts via the offense_counts table
+    // — review ruling: escalation must survive monthly reboots.
     private readonly OffenseTracker _offenses = new();
+
+    // Appended to what is reported about a ban the firewall does not reflect, so an event or a
+    // notification never claims an IP was blocked or unblocked when nothing was enforced.
+    private const string ReportOnlyNote = " (report-only: firewall unchanged)";
+
+    // Ban-history rows pruned per housekeeping pass, so working off a backlog cannot hold the gate.
+    private const int BanHistoryPruneBatch = 5_000;
 
     // Recent RDP failures per IP for detector-aware 4625/140 de-dup (accessed under _gate).
     private readonly RdpDeduplicator _rdpDedup = new();
@@ -133,7 +136,7 @@ public sealed partial class BanEngine
                 _offenses.Seed(ban.IpAddress, ban.OffenseCount, ban.BannedAtUtc);
             }
 
-            // Merge offense counts persisted in the settings blob (survives restarts).
+            // Merge the persisted offense counts (survive restarts).
             await LoadPersistedOffenseCountsAsync(ct).ConfigureAwait(false);
             await LoadReplayCutoffAsync(ct).ConfigureAwait(false);
 
@@ -526,6 +529,18 @@ public sealed partial class BanEngine
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Could not flush daily statistics on stop.");
+        }
+
+        // One last try for what the store refused: a ban unsaved now would be an orphan at next start.
+        await _gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            await RetryUnsavedBansAsync(NowUtc(), CancellationToken.None).ConfigureAwait(false);
+            await SaveOffenseCountsAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
         }
 
         await SaveLastAliveAsync(CancellationToken.None).ConfigureAwait(false);

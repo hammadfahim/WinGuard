@@ -58,6 +58,17 @@ public interface IStore
 
     Task RemoveBanAsync(string ip, CancellationToken ct = default);
 
+    // ---- offense counts (ban-tier escalation) ----
+
+    /// <summary>Every persisted offense count.</summary>
+    Task<IReadOnlyList<OffenseCountEntry>> GetOffenseCountsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Writes the given rows and deletes the given IPs' rows in one transaction. Only what changed
+    /// is written, so the cost of a ban does not grow with the number of remembered attackers.
+    /// </summary>
+    Task SaveOffenseCountsAsync(IReadOnlyCollection<OffenseCountEntry> changed, IReadOnlyCollection<string> removed, CancellationToken ct = default);
+
     // ---- whitelist / blacklist ----
     Task<IReadOnlyList<string>> GetListAsync(ListKind kind, CancellationToken ct = default);
 

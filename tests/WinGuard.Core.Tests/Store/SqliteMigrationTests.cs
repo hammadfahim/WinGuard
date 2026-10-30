@@ -85,22 +85,142 @@ public class SqliteMigrationTests
                 await check.OpenAsync();
                 await using var cmd = check.CreateCommand();
                 cmd.CommandText = "PRAGMA user_version;";
-                Assert.Equal(3L, (long)(await cmd.ExecuteScalarAsync())!);
+                Assert.Equal(4L, (long)(await cmd.ExecuteScalarAsync())!);
                 cmd.CommandText = "SELECT COUNT(*) FROM failed_logins WHERE raw IS NOT NULL;";
                 Assert.Equal(0L, (long)(await cmd.ExecuteScalarAsync())!);
             }
         }
         finally
         {
-            SqliteConnection.ClearAllPools();
-            try
+            DeleteDirectory(dir);
+        }
+    }
+
+    [Fact]
+    public async Task A_version_3_database_gets_its_offense_counts_moved_out_of_the_settings_row()
+    {
+        var path = await CreateVersion3DatabaseAsync(
+            """{"203.0.113.5":{"Count":3,"LastUtc":"2026-05-01T10:00:00.0000000Z"},"2001:db8:1:2::/64":{"Count":1,"LastUtc":"2026-05-02T10:00:00.0000000Z"},"203.0.113.6":{"Count":0,"LastUtc":"2026-05-02T10:00:00.0000000Z"}}""");
+        try
+        {
+            await using (var store = new SqliteStore(path, NullLogger<SqliteStore>.Instance))
             {
-                Directory.Delete(dir, recursive: true);
+                var counts = await store.GetOffenseCountsAsync();
+
+                Assert.Equal(2, counts.Count);
+                var entry = Assert.Single(counts, c => c.IpAddress == "203.0.113.5");
+                Assert.Equal(3, entry.Count);
+                Assert.Equal(new DateTime(2026, 5, 1, 10, 0, 0, DateTimeKind.Utc), entry.LastUtc);
+                Assert.Contains(counts, c => c.IpAddress == "2001:db8:1:2::/64" && c.Count == 1);
+
+                var settings = await store.GetAllSettingsAsync();
+                Assert.False(settings.ContainsKey("offense_counts"));
+                Assert.Equal("kept", settings["other"]);
             }
-            catch (IOException)
+
+            // Opening it again changes nothing, and the rows are ordinary rows from now on.
+            await using (var store = new SqliteStore(path, NullLogger<SqliteStore>.Instance))
             {
-                // Best effort.
+                Assert.Equal(2, (await store.GetOffenseCountsAsync()).Count);
             }
+
+            Assert.Equal(4L, await ReadUserVersionAsync(path));
+        }
+        finally
+        {
+            DeleteDirectory(Path.GetDirectoryName(path)!);
+        }
+    }
+
+    [Theory]
+    [InlineData("{ this is not json")]
+    [InlineData("[1, 2, 3]")]
+    [InlineData("""{"203.0.113.5":{"Count":"many"}}""")]
+    public async Task An_unreadable_offense_blob_costs_the_counts_not_the_service(string blob)
+    {
+        var path = await CreateVersion3DatabaseAsync(blob);
+        try
+        {
+            await using var store = new SqliteStore(path, NullLogger<SqliteStore>.Instance);
+
+            Assert.Empty(await store.GetOffenseCountsAsync());
+            Assert.False((await store.GetAllSettingsAsync()).ContainsKey("offense_counts"));
+            Assert.Equal(4L, await ReadUserVersionAsync(path));
+        }
+        finally
+        {
+            DeleteDirectory(Path.GetDirectoryName(path)!);
+        }
+    }
+
+    [Fact]
+    public async Task A_version_3_database_with_no_offense_blob_upgrades_cleanly()
+    {
+        var path = await CreateVersion3DatabaseAsync(blob: null);
+        try
+        {
+            await using var store = new SqliteStore(path, NullLogger<SqliteStore>.Instance);
+
+            Assert.Empty(await store.GetOffenseCountsAsync());
+            Assert.Equal(4L, await ReadUserVersionAsync(path));
+        }
+        finally
+        {
+            DeleteDirectory(Path.GetDirectoryName(path)!);
+        }
+    }
+
+    /// <summary>The schema as release 0.2.0 left it, with the offense counts in a settings row.</summary>
+    private static async Task<string> CreateVersion3DatabaseAsync(string? blob)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "winguard-mig-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "old.db");
+
+        await using var legacy = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
+        await legacy.OpenAsync();
+        await using var cmd = legacy.CreateCommand();
+        cmd.CommandText = """
+            CREATE TABLE failed_logins (ip TEXT NOT NULL, source INTEGER NOT NULL, ts_utc TEXT NOT NULL, user TEXT, raw TEXT);
+            CREATE TABLE bans (ip TEXT PRIMARY KEY, source INTEGER NOT NULL, banned_at_utc TEXT NOT NULL, expires_utc TEXT NOT NULL,
+                               offense_count INTEGER NOT NULL DEFAULT 1, is_permanent INTEGER NOT NULL DEFAULT 0, note TEXT);
+            CREATE TABLE lists (value TEXT NOT NULL, kind INTEGER NOT NULL);
+            CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts_utc TEXT NOT NULL, level INTEGER NOT NULL, source INTEGER, ip TEXT, message TEXT);
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO settings (key, value) VALUES ('other', 'kept');
+            PRAGMA user_version = 3;
+            """;
+        await cmd.ExecuteNonQueryAsync();
+
+        if (blob is not null)
+        {
+            cmd.CommandText = "INSERT INTO settings (key, value) VALUES ('offense_counts', $blob);";
+            cmd.Parameters.AddWithValue("$blob", blob);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        return path;
+    }
+
+    private static async Task<long> ReadUserVersionAsync(string path)
+    {
+        await using var check = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
+        await check.OpenAsync();
+        await using var cmd = check.CreateCommand();
+        cmd.CommandText = "PRAGMA user_version;";
+        return (long)(await cmd.ExecuteScalarAsync())!;
+    }
+
+    private static void DeleteDirectory(string dir)
+    {
+        SqliteConnection.ClearAllPools();
+        try
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+        catch (IOException)
+        {
+            // Best effort.
         }
     }
 }

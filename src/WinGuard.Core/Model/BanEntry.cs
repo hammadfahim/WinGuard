@@ -22,3 +22,14 @@ public sealed class BanEntry
 
     public string? Note { get; set; }
 }
+
+/// <summary>How many times one IP (or IPv6 prefix) has offended, which picks its next ban tier.</summary>
+public sealed class OffenseCountEntry
+{
+    public string IpAddress { get; set; } = string.Empty;
+
+    public int Count { get; set; }
+
+    /// <summary>When the IP last offended or a ban of it ended; the offense memory runs from here.</summary>
+    public DateTime LastUtc { get; set; }
+}
