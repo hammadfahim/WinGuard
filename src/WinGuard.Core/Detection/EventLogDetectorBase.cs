@@ -69,6 +69,12 @@ public abstract class EventLogDetectorBase : IDetector
     protected virtual string? BacklogEventXPath => null;
 
     /// <summary>
+    /// Optional XPath on the event's payload, e.g. <c>EventData[...]</c>, for the replay query.
+    /// <see cref="BacklogEventXPath"/> sits inside <c>System[...]</c> and cannot reach those fields.
+    /// </summary>
+    protected virtual string? BacklogDataXPath => null;
+
+    /// <summary>
     /// How much history to replay at start-up (covers failures logged while the service was
     /// stopped). Derived classes read the live setting; zero disables the replay.
     /// </summary>
@@ -79,6 +85,17 @@ public abstract class EventLogDetectorBase : IDetector
 
     /// <summary>Turns one event record into a failure, or null when it is not one.</summary>
     protected abstract FailedLogin? Parse(EventRecord record);
+
+    /// <summary>
+    /// Whether the channel should be subscribed at all. A detector for a busy channel can stay
+    /// unsubscribed while its feature is off, instead of ignoring every event. Checked by the monitor
+    /// loop, so a change applies within <see cref="RetryInterval"/>. Nothing is replayed for the time
+    /// it was off.
+    /// </summary>
+    private protected virtual bool WantsSubscription() => true;
+
+    /// <summary>Whether a parsed record may enter the sink right now; a low-priority detector can give way under load.</summary>
+    private protected virtual bool ShouldForward(Channel<FailedLogin> sink) => true;
 
     /// <summary>Upper bound on records examined per replay, so a huge backlog cannot stall startup.</summary>
     private const int MaxReplayRecords = 5000;
@@ -142,7 +159,7 @@ public abstract class EventLogDetectorBase : IDetector
             if (failed is not null)
             {
                 failed.IsReplayed = true;
-                if (_sink is { } sink && sink.Writer.TryWrite(failed))
+                if (_sink is { } sink && ShouldForward(sink) && sink.Writer.TryWrite(failed))
                 {
                     replayed++;
                 }
@@ -171,7 +188,7 @@ public abstract class EventLogDetectorBase : IDetector
     /// </summary>
     private protected virtual IEnumerable<FailedLogin?> ReadBacklog(DateTime fromUtc, DateTime toUtc, CancellationToken ct)
     {
-        var query = new EventLogQuery(LogChannel, PathType.LogName, BuildReplayXPath(BacklogEventXPath!, fromUtc, toUtc))
+        var query = new EventLogQuery(LogChannel, PathType.LogName, BuildReplayXPath(BacklogEventXPath!, fromUtc, toUtc, BacklogDataXPath))
         {
             TolerateQueryErrors = true,
             ReverseDirection = true,
@@ -217,12 +234,13 @@ public abstract class EventLogDetectorBase : IDetector
         }
     }
 
-    /// <summary>The replay query: <paramref name="eventXPath"/> within a half-open UTC time range.</summary>
-    internal static string BuildReplayXPath(string eventXPath, DateTime fromUtc, DateTime toUtc)
+    /// <summary>The replay query: <paramref name="eventXPath"/> within a half-open UTC time range, plus an optional payload filter.</summary>
+    internal static string BuildReplayXPath(string eventXPath, DateTime fromUtc, DateTime toUtc, string? dataXPath = null)
     {
         static string Stamp(DateTime utc) => utc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
 
-        return $"*[System[{eventXPath.Trim('/', ' ')} and TimeCreated[@SystemTime>='{Stamp(fromUtc)}' and @SystemTime<'{Stamp(toUtc)}']]]";
+        var data = dataXPath is null ? string.Empty : " and " + dataXPath;
+        return $"*[System[{eventXPath.Trim('/', ' ')} and TimeCreated[@SystemTime>='{Stamp(fromUtc)}' and @SystemTime<'{Stamp(toUtc)}']]{data}]";
     }
 
     /// <summary>
@@ -266,10 +284,21 @@ public abstract class EventLogDetectorBase : IDetector
                 return;
             }
 
-            if (!_running)
-            {
-                TrySubscribe();
-            }
+            ReconcileSubscription();
+        }
+    }
+
+    /// <summary>Subscribes or lets go, whichever the current state calls for.</summary>
+    internal void ReconcileSubscription()
+    {
+        if (!_running)
+        {
+            TrySubscribe();
+        }
+        else if (!WantsSubscription())
+        {
+            Unsubscribe();
+            Logger.LogInformation("{Detector}: unsubscribed from {Channel}; the feature is off.", Name, LogChannel);
         }
     }
 
@@ -281,7 +310,7 @@ public abstract class EventLogDetectorBase : IDetector
         DateTime? gapStartUtc;
         lock (_lock)
         {
-            if (_stopped || _running)
+            if (_stopped || _running || !WantsSubscription())
             {
                 return;
             }
@@ -384,7 +413,7 @@ public abstract class EventLogDetectorBase : IDetector
                 }
 
                 var failed = Parse(record);
-                if (failed is not null && _sink is { } sink && !sink.Writer.TryWrite(failed))
+                if (failed is not null && _sink is { } sink && ShouldForward(sink) && !sink.Writer.TryWrite(failed))
                 {
                     Logger.LogWarning("{Detector} could not write to the sink channel (closed).", Name);
                 }
@@ -435,10 +464,15 @@ public abstract class EventLogDetectorBase : IDetector
 
     private void Stop()
     {
+        _stopped = true;
+        Unsubscribe();
+    }
+
+    private void Unsubscribe()
+    {
         EventLogWatcher? watcher;
         lock (_lock)
         {
-            _stopped = true;
             watcher = _watcher;
             _watcher = null;
             _running = false;

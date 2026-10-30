@@ -51,6 +51,7 @@ public sealed partial class BanEngine
         CancellationToken ct)
     {
         var ip = failed.IpAddress;
+        _cleanLogons.Remove(ip);
 
         if (rules.MatchHoneypot(failed.UserName) is { } honeypot)
         {

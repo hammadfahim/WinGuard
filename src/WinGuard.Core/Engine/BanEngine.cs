@@ -235,7 +235,14 @@ public sealed partial class BanEngine
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await ProcessCoreAsync(failed, ct).ConfigureAwait(false);
+            if (failed.IsSuccess)
+            {
+                await ProcessSuccessCoreAsync(failed, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                await ProcessCoreAsync(failed, ct).ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -376,6 +383,7 @@ public sealed partial class BanEngine
                 throw new InvalidOperationException($"'{normalized}' is whitelisted and will not be blocked.");
             }
 
+            ForgetLogonState(normalized);
             var settings = _settingsAccessor();
             var now = NowUtc();
             var isPermanent = permanent;
@@ -554,6 +562,7 @@ public sealed partial class BanEngine
         {
             await RetryUnsavedBansAsync(NowUtc(), CancellationToken.None).ConfigureAwait(false);
             await SaveOffenseCountsAsync(CancellationToken.None).ConfigureAwait(false);
+            await EvaluateReplayedSuccessesAsync(NowUtc(), all: true, CancellationToken.None).ConfigureAwait(false);
         }
         finally
         {
@@ -576,6 +585,7 @@ public sealed partial class BanEngine
         var existing = _unsavedBans.GetValueOrDefault(normalized) ?? await SafeGetBanAsync(normalized, ct).ConfigureAwait(false);
         _unsavedBans.Remove(normalized);
         _fallbackCounts.Remove(normalized);
+        _failuresAtBan.Remove(normalized);
 
         try
         {
@@ -663,7 +673,7 @@ public sealed partial class BanEngine
         }
 
         // 2. Whitelist always wins.
-        if (_matcher.IsWhitelisted(ip))
+        if (_matcher.IsWhitelisted(ip) || IsTemporarilyTrusted(ip, settings))
         {
             _logger.LogDebug("Skipping whitelisted IP {Ip}.", ip);
             if (ShouldRecordSkip("w:" + ip))
@@ -695,7 +705,7 @@ public sealed partial class BanEngine
             // A block rule beats every allow rule, so banning a prefix that holds a whitelisted
             // address (this server's own, for one) would block that address too. Such a prefix
             // stays on per-address bans.
-            if (_matcher.OverlapsWhitelist(aggregatedPrefix))
+            if (_matcher.OverlapsWhitelist(aggregatedPrefix) || OverlapsTemporaryTrust(aggregatedPrefix))
             {
                 _logger.LogDebug("Not aggregating {Ip}: prefix {Prefix} overlaps the whitelist.", ip, aggregatedPrefix);
             }
@@ -864,6 +874,7 @@ public sealed partial class BanEngine
         await SaveBanAsync(ban, ct).ConfigureAwait(false);
         _offenses.Set(ip, nextOffense, now);
         await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
+        RememberFailuresAtBan(ip, count, expiresUtc, settings.Rules);
         _fallbackCounts.Remove(ip);
         try
         {

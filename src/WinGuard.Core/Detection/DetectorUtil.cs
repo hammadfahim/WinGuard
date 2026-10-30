@@ -14,9 +14,12 @@ internal static class DetectorUtil
         line.Length > MaxRawLogLength ? line[..MaxRawLogLength] : line;
 
     /// <summary>Reads <c>System/TimeCreated@SystemTime</c> as UTC, falling back to now.</summary>
-    internal static DateTime ParseSystemTime(XElement system, XNamespace ns)
+    internal static DateTime ParseSystemTime(XElement system, XNamespace ns) =>
+        ParseSystemTime((string?)system.Element(ns + "TimeCreated")?.Attribute("SystemTime"));
+
+    /// <summary>Reads a <c>SystemTime</c> value as UTC, falling back to now.</summary>
+    internal static DateTime ParseSystemTime(string? value)
     {
-        var value = (string?)system.Element(ns + "TimeCreated")?.Attribute("SystemTime");
         if (!string.IsNullOrWhiteSpace(value)
             && DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed))
         {

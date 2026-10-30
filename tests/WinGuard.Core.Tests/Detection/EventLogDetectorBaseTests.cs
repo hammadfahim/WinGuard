@@ -194,6 +194,46 @@ public sealed class EventLogDetectorBaseTests
         TimestampUtc = DateTime.UtcNow,
     };
 
+    [Fact]
+    public async Task A_detector_that_wants_no_events_does_not_subscribe_or_report_a_failure()
+    {
+        var detector = new FakeDetector { Wanted = false, Window = TimeSpan.Zero };
+        var sink = Channel.CreateUnbounded<FailedLogin>();
+        using var cts = new CancellationTokenSource();
+
+        await detector.StartAsync(sink, cts.Token);
+        detector.ReconcileSubscription();
+        await cts.CancelAsync();
+
+        Assert.Equal(0, detector.OpenAttempts);
+        Assert.False(detector.IsRunning);
+    }
+
+    [Fact]
+    public async Task A_subscription_follows_the_setting_and_replays_nothing_for_the_time_it_was_off()
+    {
+        var detector = new FakeDetector { Wanted = false, Window = TimeSpan.Zero };
+        var sink = Channel.CreateUnbounded<FailedLogin>();
+        using var cts = new CancellationTokenSource();
+        await detector.StartAsync(sink, cts.Token);
+
+        detector.Wanted = true;
+        detector.Window = TimeSpan.FromMinutes(30);
+        detector.ReconcileSubscription();
+        Assert.True(detector.IsRunning);
+
+        detector.Wanted = false;
+        detector.ReconcileSubscription();
+        Assert.False(detector.IsRunning);
+
+        detector.Wanted = true;
+        detector.ReconcileSubscription();
+        Assert.True(detector.IsRunning);
+        await cts.CancelAsync();
+
+        Assert.Empty(detector.Ranges);
+    }
+
     private sealed class FakeDetector : EventLogDetectorBase
     {
         private readonly TaskCompletionSource _opened = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -206,7 +246,9 @@ public sealed class EventLogDetectorBaseTests
 
         public List<FailedLogin?> Backlog { get; set; } = [];
 
-        public TimeSpan Window { get; init; } = TimeSpan.FromMinutes(30);
+        public TimeSpan Window { get; set; } = TimeSpan.FromMinutes(30);
+
+        public bool Wanted { get; set; } = true;
 
         public bool CanOpen { get; set; } = true;
 
@@ -235,6 +277,8 @@ public sealed class EventLogDetectorBaseTests
         protected override bool IsEnabled() => true;
 
         protected override FailedLogin? Parse(EventRecord record) => throw new NotSupportedException();
+
+        private protected override bool WantsSubscription() => Wanted;
 
         private protected override IEnumerable<FailedLogin?> ReadBacklog(DateTime fromUtc, DateTime toUtc, CancellationToken ct)
         {
