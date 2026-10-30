@@ -28,6 +28,19 @@ public interface IStore
     /// <summary>Deletes the newest attempt of this IP for the source (takes back one count). No-op when none.</summary>
     Task RemoveLatestFailedLoginAsync(string ip, ProtocolSource source, CancellationToken ct = default);
 
+    /// <summary>
+    /// The distinct user names this IP tried with ts_utc &gt;= sinceUtc, across all sources, exactly as
+    /// they were logged. Attempts without a user name are left out.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetFailedLoginUsersAsync(string ip, DateTime sinceUtc, CancellationToken ct = default);
+
+    /// <summary>
+    /// Names the newest nameless attempt of this IP for the source with ts_utc &gt;= sinceUtc: an
+    /// attempt counted from an event without a user name, once the other event for it supplies one.
+    /// No-op when there is none.
+    /// </summary>
+    Task SetFailedLoginUserAsync(string ip, ProtocolSource source, string user, DateTime sinceUtc, CancellationToken ct = default);
+
     /// <summary>Delete this IP's counter rows (after a ban fires, so the next tier starts fresh).</summary>
     Task ClearFailedLoginsAsync(string ip, CancellationToken ct = default);
 

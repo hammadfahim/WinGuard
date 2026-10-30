@@ -14,6 +14,9 @@ public enum BanHistoryAction
 
     /// <summary>The ban was superseded (e.g. promoted to permanent or re-banned while still banned).</summary>
     Updated = 3,
+
+    /// <summary>No change to a ban: an IP with failures or an active ban logged on successfully.</summary>
+    SuspiciousLogon = 4,
 }
 
 /// <summary>

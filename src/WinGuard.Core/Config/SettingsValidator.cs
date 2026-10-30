@@ -18,6 +18,14 @@ public static class SettingsValidator
         ArgumentNullException.ThrowIfNull(settings);
         var errors = new List<string>();
 
+        foreach (var name in settings.Rules?.HoneypotUsernames ?? [])
+        {
+            if (name?.IndexOfAny(['*', '?']) >= 0)
+            {
+                errors.Add($"Honeypot user name '{name}': wildcards are not supported; list exact account names.");
+            }
+        }
+
         foreach (var source in settings.Ftp?.Sources ?? [])
         {
             if (source is null || string.IsNullOrWhiteSpace(source.Path))

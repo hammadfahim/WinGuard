@@ -201,6 +201,11 @@ internal static class Program
                 sp.GetRequiredService<TimeProvider>()));
 
         builder.Services.AddSingleton<IDetector>(sp =>
+            new LogonSuccessDetector(
+                () => sp.GetRequiredService<SettingsHolder>().Current,
+                sp.GetRequiredService<ILogger<LogonSuccessDetector>>()));
+
+        builder.Services.AddSingleton<IDetector>(sp =>
             new MsSqlDetector(
                 () => sp.GetRequiredService<SettingsHolder>().Current,
                 sp.GetRequiredService<ILogger<MsSqlDetector>>(),

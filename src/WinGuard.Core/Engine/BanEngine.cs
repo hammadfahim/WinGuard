@@ -235,7 +235,14 @@ public sealed partial class BanEngine
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await ProcessCoreAsync(failed, ct).ConfigureAwait(false);
+            if (failed.IsSuccess)
+            {
+                await ProcessSuccessCoreAsync(failed, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                await ProcessCoreAsync(failed, ct).ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -376,6 +383,7 @@ public sealed partial class BanEngine
                 throw new InvalidOperationException($"'{normalized}' is whitelisted and will not be blocked.");
             }
 
+            ForgetLogonState(normalized);
             var settings = _settingsAccessor();
             var now = NowUtc();
             var isPermanent = permanent;
@@ -554,6 +562,7 @@ public sealed partial class BanEngine
         {
             await RetryUnsavedBansAsync(NowUtc(), CancellationToken.None).ConfigureAwait(false);
             await SaveOffenseCountsAsync(CancellationToken.None).ConfigureAwait(false);
+            await EvaluateReplayedSuccessesAsync(NowUtc(), all: true, CancellationToken.None).ConfigureAwait(false);
         }
         finally
         {
@@ -576,6 +585,7 @@ public sealed partial class BanEngine
         var existing = _unsavedBans.GetValueOrDefault(normalized) ?? await SafeGetBanAsync(normalized, ct).ConfigureAwait(false);
         _unsavedBans.Remove(normalized);
         _fallbackCounts.Remove(normalized);
+        _failuresAtBan.Remove(normalized);
 
         try
         {
@@ -663,7 +673,7 @@ public sealed partial class BanEngine
         }
 
         // 2. Whitelist always wins.
-        if (_matcher.IsWhitelisted(ip))
+        if (_matcher.IsWhitelisted(ip) || IsTemporarilyTrusted(ip, settings))
         {
             _logger.LogDebug("Skipping whitelisted IP {Ip}.", ip);
             if (ShouldRecordSkip("w:" + ip))
@@ -695,7 +705,7 @@ public sealed partial class BanEngine
             // A block rule beats every allow rule, so banning a prefix that holds a whitelisted
             // address (this server's own, for one) would block that address too. Such a prefix
             // stays on per-address bans.
-            if (_matcher.OverlapsWhitelist(aggregatedPrefix))
+            if (_matcher.OverlapsWhitelist(aggregatedPrefix) || OverlapsTemporaryTrust(aggregatedPrefix))
             {
                 _logger.LogDebug("Not aggregating {Ip}: prefix {Prefix} overlaps the whitelist.", ip, aggregatedPrefix);
             }
@@ -733,13 +743,22 @@ public sealed partial class BanEngine
 
         // RDP de-dup: merge only cross-detector 4625+140 pairs describing the SAME attempt
         // (PLAN §4.2). Same-detector events within the window are distinct attempts.
-        if (failed.Source == ProtocolSource.Rdp && rdpDedup.IsDuplicateAndRecord(ip, failed.Detector, failed.TimestampUtc))
+        var alreadyCounted = false;
+        if (failed.Source == ProtocolSource.Rdp && rdpDedup.IsDuplicateAndRecord(ip, failed.Detector, failed.TimestampUtc, out var partnerCounted))
         {
             _logger.LogDebug("Skipping duplicate RDP failure for {Ip} (detector {Detector}).", ip, failed.Detector);
-            return;
+            if (!partnerCounted || !NamesCountedAttempt(failed, settings.Rules))
+            {
+                return;
+            }
+
+            alreadyCounted = true;
         }
 
-        RecordDetection(failed.Source);
+        if (!alreadyCounted)
+        {
+            RecordDetection(failed.Source);
+        }
 
         var current = _unsavedBans.GetValueOrDefault(ip) ?? await SafeGetBanAsync(ip, ct).ConfigureAwait(false);
         var now = NowUtc();
@@ -819,11 +838,14 @@ public sealed partial class BanEngine
         }
 
         var since = now - window;
-        var count = await CountFailureAsync(failed, since, ct).ConfigureAwait(false);
+        var count = alreadyCounted
+            ? await NameCountedAttemptAsync(failed, ct).ConfigureAwait(false)
+            : await CountFailureAsync(failed, since, ct).ConfigureAwait(false);
 
-        // 7. Threshold crossed -> escalate and ban.
+        // 7. Threshold crossed or a detection rule fired -> escalate and ban.
         var threshold = Math.Max(1, settings.ThresholdFor(failed.Source));
-        if (count < threshold)
+        var rule = await EvaluateRulesAsync(failed, count, threshold, settings.Rules, now, ct).ConfigureAwait(false);
+        if (count < threshold && rule is null)
         {
             return;
         }
@@ -844,6 +866,7 @@ public sealed partial class BanEngine
             ExpiresUtc = expiresUtc,
             OffenseCount = nextOffense,
             IsPermanent = false,
+            Note = rule,
         };
 
         // Enforce first: a database problem must never leave an attacker unblocked.
@@ -851,6 +874,7 @@ public sealed partial class BanEngine
         await SaveBanAsync(ban, ct).ConfigureAwait(false);
         _offenses.Set(ip, nextOffense, now);
         await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
+        RememberFailuresAtBan(ip, count, expiresUtc, settings.Rules);
         _fallbackCounts.Remove(ip);
         try
         {
@@ -870,17 +894,19 @@ public sealed partial class BanEngine
             Source = failed.Source,
             OffenseCount = nextOffense,
             Duration = duration,
+            Note = rule,
         }, ct).ConfigureAwait(false);
 
         var reportSuffix = ReportSuffix();
-        _logger.LogWarning("Blocked {Ip} for {Duration} (offense #{Offense}).{Suffix}", ip, duration, nextOffense, reportSuffix);
+        var ruleText = rule is null ? string.Empty : $" ({rule})";
+        _logger.LogWarning("Blocked {Ip} for {Duration}{Rule} (offense #{Offense}).{Suffix}", ip, duration, ruleText, nextOffense, reportSuffix);
         await TryAddEventAsync(new LogEvent
         {
             TimestampUtc = now,
             Level = LogEventLevel.Warning,
             Source = failed.Source,
             IpAddress = ip,
-            Message = $"BLOCKED {ip} for {FormatDuration(duration)} (offense #{nextOffense}){reportSuffix}",
+            Message = $"BLOCKED {ip} for {FormatDuration(duration)}{ruleText} (offense #{nextOffense}){reportSuffix}",
         }, ct).ConfigureAwait(false);
     }
 

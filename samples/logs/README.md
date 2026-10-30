@@ -8,6 +8,8 @@ these results:
 |---|---|---|
 | `security-4625.xml` | `RdpSecurityLogDetector.TryParse` | FailedLogin: Ip=`203.0.113.45`, User=`administrator`, Source=`Rdp`, Detector=`4625`, TsUtc=`2026-10-04T09:15:32.1234567Z` |
 | `security-4625-empty-ip.xml` | `RdpSecurityLogDetector.TryParse` | **false** (IpAddress is `-`; must be dropped, PLAN.md §4.1) |
+| `security-4624.xml` | `LogonSuccessDetector.TryParse` | Success: Ip=`203.0.113.45`, User=`administrator`, Source=`Rdp`, Detector=`4624`, LogonType=`10`, TsUtc=`2026-10-04T09:21:47.7654321Z`. Field layout from Microsoft's [event 4624 reference](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4624); not captured from a live server |
+| `security-4624-anonymous.xml` | `LogonSuccessDetector.TryParse` | **false** (ANONYMOUS LOGON, a null session: type 3 with a client address, but no password was proven) |
 | `rdpcorets-140.xml` | `RdpCoreTsDetector.TryParse` | FailedLogin: Ip=`198.51.100.23`, User=`null`, Source=`Rdp`, Detector=`140`, TsUtc=`2026-10-04T09:20:11.456789Z` |
 | `mssql-18456.xml` + `mssql-18456-message.txt` | `MsSqlDetector.TryParse(xml, message, settings)` | FailedLogin: Ip=`203.0.113.77`, User=`sa`, Source=`MsSql`, Detector=`18456` |
 | `mssql-18456.xml` + `mssql-18456-message-ignored.txt` | `MsSqlDetector.TryParse` | **false** (matches default IgnoreMessagePatterns, PLAN.md §4.3) |

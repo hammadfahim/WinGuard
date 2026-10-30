@@ -239,6 +239,8 @@ public sealed partial class BanEngine
             _replayDedup.Clear();
         }
 
+        await HousekeepLogonsAsync(now, ct).ConfigureAwait(false);
+
         // Prune stale offense counts (review E-M2): no active ban and nothing within OffenseMemory.
         IReadOnlyList<BanEntry>? activeForPrune = null;
         try

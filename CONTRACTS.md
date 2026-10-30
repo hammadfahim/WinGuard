@@ -84,8 +84,11 @@ public sealed class BanEngine
 }
 ```
 Events recorded to the store (via `IStore.AddEventAsync`) with messages starting with
-stable prefixes: `"BLOCKED {ip} for {duration} (offense #{n})"`, `"UNBANNED {ip}"`,
-`"SKIPPED {ip} (whitelist)"`, `"MANUAL BLOCK {ip}"`, `"MANUAL UNBLOCK {ip}"`.
+stable prefixes: `"BLOCKED {ip} for {duration} (offense #{n})"` (with `" ({rule})"` before the
+offense when a detection rule fired), `"UNBANNED {ip}"`, `"SKIPPED {ip} (whitelist)"`,
+`"MANUAL BLOCK {ip}"`, `"MANUAL UNBLOCK {ip}"`,
+`"POSSIBLE COMPROMISE: {user} logged on from {ip} after {n} failed attempt(s)"`,
+`"TEMPORARILY TRUSTED {ip} for {duration} after RDP logon by {user}"`.
 
 ### `WinGuard.Core.Store.SqliteStore` (Store/SqliteStore.cs)
 

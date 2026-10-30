@@ -20,6 +20,12 @@ internal sealed class FallbackFailureCounter
             ? failures.Count(failure => failure.Source == source && failure.TimestampUtc >= sinceUtc)
             : 0;
 
+    /// <summary>Failures held here for this IP from any source since <paramref name="sinceUtc"/>.</summary>
+    public int Count(string ip, DateTime sinceUtc) =>
+        _recent.TryGetValue(ip, out var failures)
+            ? failures.Count(failure => failure.TimestampUtc >= sinceUtc)
+            : 0;
+
     /// <summary>Records one failure the store refused.</summary>
     public void Record(string ip, ProtocolSource source, DateTime timestampUtc)
     {

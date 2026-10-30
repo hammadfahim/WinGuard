@@ -17,9 +17,10 @@ public static class PipeConstants
     /// Bumped whenever a request, response or DTO changes shape. The service reports it in
     /// <see cref="ServiceStatusDto.ProtocolVersion"/> so a GUI from another release can say so
     /// instead of misbehaving. v3: statistics + ban history + report-only. v4: BlockNow answers
-    /// with the ban it recorded.
+    /// with the ban it recorded. v5: settings carry the detection rules, which a client that does
+    /// not know them would reset on save.
     /// </summary>
-    public const int ProtocolVersion = 4;
+    public const int ProtocolVersion = 5;
 }
 
 /// <summary>Method names used in <see cref="IpcRequest.Method"/>.</summary>
