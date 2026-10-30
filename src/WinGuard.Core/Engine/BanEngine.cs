@@ -84,7 +84,9 @@ public sealed partial class BanEngine
     // range rules so a blacklisted subnet is blocked as a whole, not address-by-address.
     private List<string> _blacklistedRanges = [];
 
-    private IpMatcher _matcher = new(Array.Empty<string>(), Array.Empty<string>());
+    // Holds the server's own addresses from the start, so an unreadable database cannot lift the
+    // self-lockout protection along with the configured lists.
+    private IpMatcher _matcher = new(IpMatcher.GetLocalAddresses(), Array.Empty<string>());
     private bool _listsLoaded;
 
     private CancellationTokenSource? _housekeepingCts;
@@ -398,7 +400,7 @@ public sealed partial class BanEngine
                 expiresUtc = now + chosen;
             }
 
-            var existing = await SafeGetBanAsync(normalized, ct).ConfigureAwait(false);
+            var existing = _unsavedBans.GetValueOrDefault(normalized) ?? await SafeGetBanAsync(normalized, ct).ConfigureAwait(false);
 
             // Re-banning an IP that is still banned (e.g. "promote to permanent") is not a new
             // offense; only a fresh ban moves the escalation tier.
@@ -418,10 +420,11 @@ public sealed partial class BanEngine
                 Note = string.IsNullOrWhiteSpace(note) ? null : note.Trim(),
             };
 
-            await _store.UpsertBanAsync(ban, ct).ConfigureAwait(false);
+            // Enforce first: a database problem must never leave an attacker unblocked.
+            TryBlock(normalized);
+            await SaveBanAsync(ban, ct).ConfigureAwait(false);
             _offenses.Set(normalized, offense, now);
             await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
-            TryBlock(normalized);
             if (!stillBanned)
             {
                 RecordBanStat(ban.Source);
@@ -570,6 +573,7 @@ public sealed partial class BanEngine
     /// </summary>
     private async Task UnbanCoreAsync(string normalized, string eventMessage, CancellationToken ct)
     {
+        var existing = _unsavedBans.GetValueOrDefault(normalized) ?? await SafeGetBanAsync(normalized, ct).ConfigureAwait(false);
         _unsavedBans.Remove(normalized);
         _fallbackCounts.Remove(normalized);
 
@@ -595,17 +599,28 @@ public sealed partial class BanEngine
             _logger.LogError(ex, "Unblock: failed to clear failed logins for {Ip}.", normalized);
         }
 
+        // Unbanning is idempotent and also runs for any address that gets whitelisted: only a ban
+        // that really ended is history, and worth a notification.
+        if (existing is null)
+        {
+            return;
+        }
+
         await AddBanHistoryCoreAsync(new BanHistoryEntry
         {
             TimestampUtc = NowUtc(),
             Action = BanHistoryAction.Unbanned,
             IpAddress = normalized,
+            Source = existing.Source,
+            OffenseCount = existing.OffenseCount,
+            IsPermanent = existing.IsPermanent,
         }, ct).ConfigureAwait(false);
 
         await TryAddEventAsync(new LogEvent
         {
             TimestampUtc = NowUtc(),
             Level = LogEventLevel.Warning,
+            Source = existing.Source,
             IpAddress = normalized,
             Message = eventMessage + ReportSuffix(),
         }, ct).ConfigureAwait(false);

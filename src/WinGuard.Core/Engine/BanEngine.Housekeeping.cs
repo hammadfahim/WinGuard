@@ -167,7 +167,9 @@ public sealed partial class BanEngine
             }
             catch (Exception ex)
             {
+                // Still due next pass: recording the expiry now would record it once per pass.
                 _logger.LogError(ex, "Housekeeping failed to remove expired ban {Ip}.", ban.IpAddress);
+                continue;
             }
 
             await AddBanHistoryCoreAsync(new BanHistoryEntry

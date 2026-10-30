@@ -854,6 +854,99 @@ public sealed class ReviewRound5Tests
         Assert.Equal(["3389", "21-22", "0", "65535"], settings.BlockedPorts);
     }
 
+    // ---------- smaller fixes ----------
+
+    [Fact]
+    public async Task The_server_stays_protected_from_itself_when_the_lists_cannot_be_read()
+    {
+        await using var h = await EngineHarness.StartAsync(
+            T0,
+            s => s.ProcessInternalIPs = true,
+            seed: store =>
+            {
+                store.FailListRead = true;
+                return Task.CompletedTask;
+            });
+
+        for (var i = 0; i < 5; i++)
+        {
+            await h.ProcessAsync(h.Fail("127.0.0.1", NonRdp));
+        }
+
+        Assert.Empty(h.Firewall.BlockCalls);
+    }
+
+    [Fact]
+    public async Task A_manual_ban_is_enforced_while_the_store_refuses_writes()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        h.Store.FailWrites = true;
+
+        await h.Engine.BanNowAsync(Attacker, null, permanent: true, null);
+        Assert.Contains(Attacker, h.Firewall.Blocked);
+
+        h.Store.FailWrites = false;
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.True((await h.Store.GetBanAsync(Attacker))!.IsPermanent);
+    }
+
+    [Fact]
+    public async Task Stopping_saves_a_ban_the_store_refused()
+    {
+        var h = await EngineHarness.StartAsync(T0);
+        h.Store.FailWrites = true;
+        await SendThresholdAsync(h);
+
+        h.Store.FailWrites = false;
+        await h.DisposeAsync();
+
+        Assert.NotNull(await h.Store.GetBanAsync(Attacker));
+    }
+
+    [Fact]
+    public async Task Unbanning_an_ip_with_no_ban_records_nothing()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+
+        await h.Engine.UnbanAsync(Attacker);
+
+        Assert.Empty(h.Store.BanHistory);
+        Assert.DoesNotContain(h.Store.Events, e => e.Message.StartsWith("MANUAL UNBLOCK", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task An_unban_history_row_describes_the_ban_it_ended()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        await SendThresholdAsync(h);
+
+        await h.Engine.UnbanAsync(Attacker);
+
+        var row = h.Store.BanHistory.Last();
+        Assert.Equal(BanHistoryAction.Unbanned, row.Action);
+        Assert.Equal(NonRdp, row.Source);
+        Assert.Equal(1, row.OffenseCount);
+    }
+
+    [Fact]
+    public async Task An_expired_ban_the_store_will_not_delete_is_recorded_once()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        await SendThresholdAsync(h);
+
+        h.Store.FailBanRemoval = true;
+        await ExpireAsync(h, TimeSpan.FromHours(25), expectRemoved: false);
+        await h.Engine.HousekeepOnceAsync();
+        Assert.DoesNotContain(h.Store.BanHistory, row => row.Action == BanHistoryAction.Expired);
+
+        h.Store.FailBanRemoval = false;
+        await h.Engine.HousekeepOnceAsync();
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Single(h.Store.BanHistory, row => row.Action == BanHistoryAction.Expired);
+    }
+
     // ---------- helpers ----------
 
     private static BanEntry ActiveBan(string ip, ProtocolSource source = NonRdp) => new()
