@@ -99,9 +99,9 @@ public sealed partial class CustomSourceRow : ObservableObject
         _ when recipe == CustomSourceRecipes.WindowsOpenSsh =>
             "sshd: Failed password for invalid user admin from 203.0.113.7 port 52144 ssh2",
         _ when recipe == CustomSourceRecipes.HMailServer =>
-            "2026-10-31 12:00:01\tFAILED\tadmin@example.com\t25\t203.0.113.7\t",
+            "\"SMTPD\"\t4728\t201\t\"2026-10-31 12:00:01.112\"\t\"203.0.113.7\"\t\"SENT: 535 Authentication failed. Restarting authentication process.\"",
         _ when recipe == CustomSourceRecipes.IisHttpAuth =>
-            "2026-10-31 12:00:01 203.0.113.7 - W3SVC1 WEB01 10.0.0.5 GET /admin - 401 0 0",
+            "2026-10-31 12:00:01 10.0.0.5 POST /login - 443 admin 203.0.113.7 Mozilla/5.0 - 401 1 1326 12",
         _ when recipe == CustomSourceRecipes.Vnc =>
             "<Warn> Connections: blacklisted: 203.0.113.7",
         _ => string.Empty,

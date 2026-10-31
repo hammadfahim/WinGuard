@@ -125,6 +125,8 @@ public sealed class PortProfilesField : SettingField
     private readonly TextField _global;
     private readonly TextField _passiveRange;
     private readonly CustomSourcesField _custom;
+    private IReadOnlyList<PortChoice>? _presets;
+    private string _presetsPassiveRange = string.Empty;
 
     /// <summary>Creates the editor.</summary>
     /// <param name="global">The global list, which an empty row follows.</param>
@@ -167,15 +169,20 @@ public sealed class PortProfilesField : SettingField
         var global = PortSet.Parse(SettingChecks.SplitPorts(_global.Text));
         var passive = _passiveRange.Value;
 
-        // Asked only for what the FTP preset needs: the rest comes from this machine.
-        var settings = new WinGuardSettings { Ftp = { PassivePortRange = passive } };
-        var presets = PortPresets.All(settings)
-            .Select(preset => new PortChoice($"{preset.Name} {string.Join(", ", preset.Ports)}", preset.Ports, preset.Note))
-            .ToList();
+        // This runs on every keystroke on the page. Only a new passive range changes the presets, and
+        // a new list would rebuild their buttons under the pointer.
+        if (_presets is null || passive != _presetsPassiveRange)
+        {
+            var settings = new WinGuardSettings { Ftp = { PassivePortRange = passive } };
+            _presets = PortPresets.All(settings)
+                .Select(preset => new PortChoice($"{preset.Name} {string.Join(", ", preset.Ports)}", preset.Ports, preset.Note))
+                .ToList();
+            _presetsPassiveRange = passive;
+        }
 
         foreach (var row in Rows)
         {
-            row.Refresh(global, presets, ReferenceEquals(row, Ftp) ? passive : null);
+            row.Refresh(global, _presets, ReferenceEquals(row, Ftp) ? passive : null);
         }
     }
 
