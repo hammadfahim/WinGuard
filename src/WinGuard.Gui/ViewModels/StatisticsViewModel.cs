@@ -70,6 +70,10 @@ public sealed partial class StatTile : ObservableObject
     /// <summary>A line of context.</summary>
     [ObservableProperty]
     private string _detail = string.Empty;
+
+    /// <summary>What the figure means, when it means more than a count.</summary>
+    [ObservableProperty]
+    private Tone _tone = Tone.Neutral;
 }
 
 /// <summary>
@@ -79,6 +83,9 @@ public sealed partial class StatTile : ObservableObject
 /// </summary>
 public sealed partial class StatisticsViewModel : ObservableObject
 {
+    /// <summary>A logon from an address with failures or a ban; a history row, not a ban.</summary>
+    public const string SuspiciousLogonAction = nameof(BanHistoryAction.SuspiciousLogon);
+
     private const int HistoryLimit = 500;
 
     private readonly PipeClient _client;
@@ -122,6 +129,9 @@ public sealed partial class StatisticsViewModel : ObservableObject
 
     /// <summary>Active bans tile.</summary>
     public StatTile ActiveTile { get; } = new("Active bans");
+
+    /// <summary>Suspicious logons tile. They are rare, so a table row alone would bury them.</summary>
+    public StatTile SuspiciousTile { get; } = new("Suspicious logons");
 
     /// <summary>Most-banned IPs.</summary>
     public ObservableCollection<TopOffenderRow> TopOffenders { get; } = [];
@@ -319,6 +329,14 @@ public sealed partial class StatisticsViewModel : ObservableObject
             row.Note ?? string.Empty)).ToList();
         ReplaceIfChanged(History, rows);
 
+        var since = _today.AddDays(-(_shownDays - 1));
+        var suspicious = rows.Where(row => row.Action == SuspiciousLogonAction && TimeText.ToLocal(row.TimeUtc).Date >= since).ToList();
+        SuspiciousTile.Value = suspicious.Count.ToString("N0", CultureInfo.CurrentCulture);
+        SuspiciousTile.Tone = suspicious.Count > 0 ? Tone.Attack : Tone.Neutral;
+        SuspiciousTile.Detail = suspicious.Count > 0
+            ? $"Latest {TimeText.Ago(suspicious[0].TimeUtc, DateTime.UtcNow)}"
+            : "None in this range";
+
         if (rows.Count > 0 && State == ViewState.Empty)
         {
             State = ViewState.Ready;
@@ -329,7 +347,7 @@ public sealed partial class StatisticsViewModel : ObservableObject
 
     private static Tone ActionTone(string action) => action switch
     {
-        "Banned" => Tone.Attack,
+        "Banned" or SuspiciousLogonAction => Tone.Attack,
         "Unbanned" => Tone.Protected,
         "Updated" => Tone.Accent,
         _ => Tone.Neutral,
@@ -430,4 +448,8 @@ public sealed record BanHistoryRow(
     int OffenseCount,
     long DurationTicks,
     string Duration,
-    string Note);
+    string Note)
+{
+    /// <summary>The action as shown.</summary>
+    public string ActionText => Action == StatisticsViewModel.SuspiciousLogonAction ? "Suspicious logon" : Action;
+}

@@ -849,10 +849,11 @@
     <Style x:Key="FeedRow" TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
         <Setter Property="Padding" Value="0" />
         <Setter Property="Height" Value="{StaticResource FeedRowHeight}" />
+        <Setter Property="Background" Value="Transparent" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ListBoxItem">
-                    <Border x:Name="Bd" Background="Transparent" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,0,0,1"
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,0,0,1"
                             SnapsToDevicePixels="True">
                         <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Center" />
                     </Border>
@@ -1043,7 +1044,10 @@
                 <ControlTemplate TargetType="DataGridRow">
                     <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{DynamicResource LineBrush}"
                             BorderThickness="0,0,0,1" SnapsToDevicePixels="True">
-                        <DataGridCellsPresenter ItemsPanel="{TemplateBinding ItemsPanel}" SnapsToDevicePixels="True" />
+                        <StackPanel>
+                            <DataGridCellsPresenter ItemsPanel="{TemplateBinding ItemsPanel}" SnapsToDevicePixels="True" />
+                            <DataGridDetailsPresenter Visibility="{TemplateBinding DetailsVisibility}" />
+                        </StackPanel>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -1315,6 +1319,15 @@
                 <Setter Property="Background" Value="{DynamicResource WarnSoftBrush}" />
             </Trigger>
         </Style.Triggers>
+    </Style>
+
+    <!-- The one banner that is not a tint: nothing is enforced, and that must not read as a notice. -->
+    <Style x:Key="BannerCritical" TargetType="Border">
+        <Setter Property="Background" Value="{DynamicResource AttackBrush}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource AttackBrush}" />
+        <Setter Property="BorderThickness" Value="0,0,0,1" />
+        <Setter Property="Padding" Value="28,9,16,10" />
+        <Setter Property="TextElement.Foreground" Value="{DynamicResource OnAttackBrush}" />
     </Style>
 
     <!-- The brand shield, coloured by state. -->

@@ -46,6 +46,17 @@ public sealed partial class BanRowViewModel : ObservableObject
     /// <summary>Protocol that triggered the ban.</summary>
     public string SourceText => SourceLabels.For(_dto.Source);
 
+    /// <summary>True while the ban blocks every port, the default.</summary>
+    public bool IsAllPorts => string.IsNullOrEmpty(_dto.Ports);
+
+    /// <summary>The ports this ban blocks: "All ports", or the list.</summary>
+    public string PortsText => IsAllPorts ? "All ports" : _dto.Ports.Replace(",", ", ", StringComparison.Ordinal);
+
+    /// <summary>What the ban blocks and leaves open, in a sentence, for the row details.</summary>
+    public string PortsDetail => IsAllPorts
+        ? "All ports: this address reaches nothing on this server."
+        : $"Only {PortsText}, TCP and UDP. Every other service on this server stays reachable from this address.";
+
     /// <summary>When the ban started, in local time.</summary>
     public string BannedText => TimeText.Stamp(_dto.BannedAtUtc);
 
@@ -100,5 +111,5 @@ public sealed partial class BanRowViewModel : ObservableObject
     private static bool Same(BanDto a, BanDto b) =>
         a.IpAddress == b.IpAddress && a.Source == b.Source && a.BannedAtUtc == b.BannedAtUtc
         && a.ExpiresUtc == b.ExpiresUtc && a.OffenseCount == b.OffenseCount
-        && a.IsPermanent == b.IsPermanent && a.Note == b.Note;
+        && a.IsPermanent == b.IsPermanent && a.Note == b.Note && a.Ports == b.Ports;
 }

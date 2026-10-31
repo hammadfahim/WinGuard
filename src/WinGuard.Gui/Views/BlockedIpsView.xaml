@@ -25,7 +25,7 @@
                                 Visibility="{Binding IsReportOnly, Converter={StaticResource BoolToVis}}" />
             </StackPanel>
             <StackPanel Grid.Column="2" Orientation="Horizontal">
-                <TextBox Style="{StaticResource SearchBox}" Width="240" ui:Ui.Placeholder="Search address, engine, note"
+                <TextBox Style="{StaticResource SearchBox}" Width="240" ui:Ui.Placeholder="Search address, ports, note"
                          Text="{Binding FilterText, UpdateSourceTrigger=PropertyChanged}"
                          ToolTip="Filter as you type (Ctrl+F)" AutomationProperties.Name="Search blocked addresses" />
                 <Button Margin="8,0,0,0" Content="Export" ui:Ui.Icon="{StaticResource GlyphExport}" Command="{Binding ExportCsvCommand}"
@@ -107,7 +107,16 @@
                 <DataGrid x:Name="BansGrid" ItemsSource="{Binding Bans}" ClipboardCopyMode="None"
                           Sorting="OnSorting" SelectionChanged="OnSelectionChanged"
                           PreviewMouseRightButtonDown="OnPreviewMouseRightButtonDown"
+                          RowDetailsVisibilityMode="VisibleWhenSelected"
                           AutomationProperties.Name="Blocked addresses">
+                    <DataGrid.RowDetailsTemplate>
+                        <DataTemplate>
+                            <StackPanel Margin="12,0,12,8">
+                                <TextBlock Style="{StaticResource CellMuted}" Text="{Binding PortsDetail}" TextWrapping="Wrap" TextTrimming="None"
+                                           FontSize="{StaticResource FontSizeCaption}" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </DataGrid.RowDetailsTemplate>
                     <DataGrid.InputBindings>
                         <KeyBinding Key="Delete" Command="{Binding UnblockCommand}" />
                         <KeyBinding Key="C" Modifiers="Ctrl" Command="{Binding CopyIpCommand}" />
@@ -130,7 +139,7 @@
                         </ContextMenu>
                     </DataGrid.ContextMenu>
                     <DataGrid.Columns>
-                        <DataGridTemplateColumn Header="Address" Width="2.6*" MinWidth="200" SortMemberPath="IpSortKey">
+                        <DataGridTemplateColumn Header="Address" Width="2.6*" MinWidth="190" SortMemberPath="IpSortKey">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                     <Grid ToolTip="{Binding IpToolTip}">
@@ -145,11 +154,36 @@
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
-                        <DataGridTextColumn Header="Engine" Binding="{Binding SourceText}" Width="100" MinWidth="80"
+                        <DataGridTextColumn Header="Engine" Binding="{Binding SourceText}" Width="94" MinWidth="80"
                                             SortMemberPath="SourceText" ElementStyle="{StaticResource CellText}" />
+                        <DataGridTemplateColumn Header="Ports" Width="110" MinWidth="96" SortMemberPath="PortsText">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding PortsText}" ToolTip="{Binding PortsDetail}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock" BasedOn="{StaticResource CellMono}">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsAllPorts}" Value="True">
+                                                        <Setter Property="FontFamily" Value="{StaticResource FontUi}" />
+                                                        <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+                                                    </DataTrigger>
+                                                    <MultiDataTrigger>
+                                                        <MultiDataTrigger.Conditions>
+                                                            <Condition Binding="{Binding IsAllPorts}" Value="True" />
+                                                            <Condition Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=DataGridRow}}" Value="True" />
+                                                        </MultiDataTrigger.Conditions>
+                                                        <Setter Property="Foreground" Value="{DynamicResource TextOnSelectedBrush}" />
+                                                    </MultiDataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
                         <DataGridTextColumn Header="Banned" Binding="{Binding BannedText}" Width="150" MinWidth="120"
                                             SortMemberPath="BannedUtc" ElementStyle="{StaticResource CellMuted}" SortDirection="Descending" />
-                        <DataGridTemplateColumn Header="Expires in" Width="104" MinWidth="90" SortMemberPath="ExpiresSortKey">
+                        <DataGridTemplateColumn Header="Expires in" Width="96" MinWidth="90" SortMemberPath="ExpiresSortKey">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                     <TextBlock Text="{Binding CountdownText}" ToolTip="{Binding ExpiresToolTip}">
@@ -167,9 +201,9 @@
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
-                        <DataGridTextColumn Header="Offense" Binding="{Binding OffenseCount}" Width="74" MinWidth="64"
+                        <DataGridTextColumn Header="Offense" Binding="{Binding OffenseCount}" Width="70" MinWidth="64"
                                             SortMemberPath="OffenseCount" ElementStyle="{StaticResource CellText}" />
-                        <DataGridTextColumn Header="Note" Binding="{Binding NoteText}" Width="1.6*" MinWidth="90"
+                        <DataGridTextColumn Header="Note" Binding="{Binding NoteText}" Width="1.6*" MinWidth="70"
                                             SortMemberPath="NoteText" ElementStyle="{StaticResource CellMuted}" />
                         <DataGridTemplateColumn Width="104" MinWidth="104" CanUserSort="False" CanUserResize="False">
                             <DataGridTemplateColumn.CellTemplate>
