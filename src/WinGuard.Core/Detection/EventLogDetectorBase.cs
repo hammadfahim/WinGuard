@@ -110,8 +110,6 @@ public abstract class EventLogDetectorBase : IDetector
         var backlog = BacklogWindow();
         if (backlog > TimeSpan.Zero && BacklogEventXPath is not null)
         {
-            // Replay first, subscribe after: events between the replay read and the subscription
-            // are missed (a tiny window, same as pre-replay behavior), never double-counted.
             _ = Task.Run(() => StartWithBacklogAsync(backlog, ct), CancellationToken.None);
         }
         else
@@ -123,24 +121,29 @@ public abstract class EventLogDetectorBase : IDetector
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Subscribes first and replays up to the moment it did. A replay can take seconds, and in the
+    /// other order everything logged meanwhile would be in neither. The range ends where the
+    /// subscription begins, so an event is never seen by both; when the subscription could not be
+    /// opened, the same moment starts the gap that is replayed once it can.
+    /// </summary>
     private async Task StartWithBacklogAsync(TimeSpan backlog, CancellationToken ct)
     {
+        var subscribedUtc = TrySubscribe();
+        _ = Task.Run(() => MonitorAsync(ct), CancellationToken.None);
+
         try
         {
-            var now = DateTime.UtcNow;
-            await ReplayBacklogAsync(now - backlog, now, ct).ConfigureAwait(false);
+            await ReplayBacklogAsync(subscribedUtc - backlog, subscribedUtc, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            return;
+            // Shutting down.
         }
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "{Detector}: start-up backlog replay failed; live detection is unaffected.", Name);
         }
-
-        TrySubscribe();
-        _ = Task.Run(() => MonitorAsync(ct), CancellationToken.None);
     }
 
     /// <summary>
@@ -302,17 +305,19 @@ public abstract class EventLogDetectorBase : IDetector
         }
     }
 
-    internal void TrySubscribe()
+    /// <summary>Opens the subscription unless there is one.</summary>
+    /// <returns>The moment from which the subscription, or the gap until there is one, takes over.</returns>
+    internal DateTime TrySubscribe()
     {
         // Taken before subscribing: an event in the instant between the two is missed rather than
-        // counted twice, the same trade-off as the start-up replay.
+        // counted twice.
         var subscribedUtc = DateTime.UtcNow;
         DateTime? gapStartUtc;
         lock (_lock)
         {
             if (_stopped || _running || !WantsSubscription())
             {
-                return;
+                return subscribedUtc;
             }
 
             if (OpenSubscription(out var lastError))
@@ -338,6 +343,8 @@ public abstract class EventLogDetectorBase : IDetector
         {
             _ = Task.Run(() => ReplayGapAsync(gapStart, subscribedUtc, _stopping), CancellationToken.None);
         }
+
+        return subscribedUtc;
     }
 
     /// <summary>Opens the first query the channel accepts. Tests replace it to run without real event logs.</summary>
