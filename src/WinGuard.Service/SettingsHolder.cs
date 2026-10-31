@@ -118,20 +118,31 @@ public sealed class SettingsHolder
         _logger.LogInformation("Applied and persisted new engine settings.");
     }
 
-    private async Task PersistAsync(WinGuardSettings settings, CancellationToken ct)
+    private async Task PersistAsync(WinGuardSettings settings, CancellationToken ct, bool scrub = false)
     {
         var sealedSettings = _secrets.Seal(settings);
         var json = JsonSerializer.Serialize(sealedSettings.Settings, IpcJson.Options);
-        await _store.SetSettingAsync(SettingsKey, json, ct).ConfigureAwait(false);
+        if (scrub && _store is ISecretScrubbingStore scrubbing)
+        {
+            await scrubbing.SetSettingAndScrubAsync(SettingsKey, json, ct).ConfigureAwait(false);
+        }
+        else
+        {
+            await _store.SetSettingAsync(SettingsKey, json, ct).ConfigureAwait(false);
+        }
+
         sealedSettings.Commit();
     }
 
-    /// <summary>Best effort: the plaintext keeps working, and the next start or save tries again.</summary>
+    /// <summary>
+    /// Best effort: the plaintext keeps working, and the next start or save tries again. The old
+    /// value has to leave the database files as well, or the encryption protects nothing there.
+    /// </summary>
     private async Task EncryptStoredPlaintextAsync(WinGuardSettings settings, CancellationToken ct)
     {
         try
         {
-            await PersistAsync(settings, ct).ConfigureAwait(false);
+            await PersistAsync(settings, ct, scrub: true).ConfigureAwait(false);
             _logger.LogInformation("Encrypted the notification secrets stored in plain text.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)

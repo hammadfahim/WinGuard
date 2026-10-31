@@ -19,9 +19,16 @@ namespace WinGuard.Core.Store;
 /// WAL journaling and a busy timeout are enabled to keep readers/writers cooperating.
 /// </para>
 /// </summary>
-public sealed class SqliteStore : IStore, IAsyncDisposable
+public sealed class SqliteStore : IStore, ISecretScrubbingStore, IAsyncDisposable
 {
     private const int BusyTimeoutMs = 5_000;
+
+    // VACUUM rewrites the whole file while the service is still starting, and Windows gives a
+    // service 30 seconds for that. Pruning keeps a normal database well below this.
+    private const long MaxBytesToVacuumAtStartup = 64 * 1024 * 1024;
+
+    // A locked database is retried for 30 seconds by default, as long as that whole allowance.
+    private const int ScrubCommandTimeoutSeconds = 5;
 
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly string _databasePath;
@@ -807,6 +814,91 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
                 return true;
             },
             ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// In WAL mode an update leaves the old row in the main file until a checkpoint. secure_delete
+    /// zeroes what this write frees, and the checkpoint carries that into the main file; VACUUM
+    /// goes further and also drops the copies earlier saves left in free pages and page slack,
+    /// which no write can reach, as long as the file is small enough to rewrite during start-up.
+    /// </remarks>
+    public async Task SetSettingAndScrubAsync(string key, string value, CancellationToken ct = default)
+    {
+        await WithConnectionAsync(
+            async connection =>
+            {
+                var secureDelete = await ReadPragmaAsync(connection, "secure_delete", ct).ConfigureAwait(false);
+                await ExecuteNonQueryAsync(connection, "PRAGMA secure_delete=ON;", ct).ConfigureAwait(false);
+                try
+                {
+                    await using var cmd = connection.CreateCommand();
+                    cmd.CommandText =
+                        "INSERT INTO settings (key, value) VALUES ($key, $value) " +
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value;";
+                    cmd.Parameters.AddWithValue("$key", key);
+                    cmd.Parameters.AddWithValue("$value", value);
+                    await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                }
+                finally
+                {
+                    await ExecuteNonQueryAsync(connection, $"PRAGMA secure_delete={secureDelete};", ct).ConfigureAwait(false);
+                }
+
+                await TryScrubFilesAsync(connection, ct).ConfigureAwait(false);
+                return true;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Never throws but for a cancelled start: the new value is stored by now.</summary>
+    private async Task TryScrubFilesAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        try
+        {
+            var bytes = await ReadPragmaAsync(connection, "page_count", ct).ConfigureAwait(false)
+                * await ReadPragmaAsync(connection, "page_size", ct).ConfigureAwait(false);
+            if (bytes <= MaxBytesToVacuumAtStartup)
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText = "VACUUM;";
+                cmd.CommandTimeout = ScrubCommandTimeoutSeconds;
+                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "The database is {Bytes} bytes, too large to rewrite during start-up. Copies of old settings in free pages stay until SQLite reuses those pages.",
+                    bytes);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Could not compact the database; copies of old settings may stay in its free pages.");
+        }
+
+        try
+        {
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            cmd.CommandTimeout = ScrubCommandTimeoutSeconds;
+            await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            if (await reader.ReadAsync(ct).ConfigureAwait(false) && reader.GetInt32(0) != 0)
+            {
+                _logger.LogWarning("The database checkpoint was blocked; old settings stay in the main file until the next one.");
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Could not checkpoint the database; old settings stay in the main file until the next checkpoint.");
+        }
+    }
+
+    private static async Task<long> ReadPragmaAsync(SqliteConnection connection, string name, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"PRAGMA {name};";
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false), CultureInfo.InvariantCulture);
     }
 
     // ---- plumbing ----

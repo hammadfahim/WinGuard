@@ -2,11 +2,14 @@ using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using WinGuard.Core.Config;
 using WinGuard.Core.Engine;
 using WinGuard.Core.Ipc;
+using WinGuard.Core.Model;
+using WinGuard.Core.Store;
 using WinGuard.Core.Tests.Fakes;
 using WinGuard.Service;
 using WinGuard.Service.Ipc;
@@ -42,6 +45,135 @@ public sealed class SettingsSecretsTests
 
     private static async Task SeedAsync(FakeStore store, WinGuardSettings settings) =>
         await store.SetSettingAsync(SettingsHolder.SettingsKey, JsonSerializer.Serialize(settings, IpcJson.Options));
+
+    // ---------- the plaintext leaves the database files ----------
+
+    private const string Marker = "SECRETMARKER-7f3a9c";
+
+    private static bool FileHolds(string path, string marker)
+    {
+        if (!File.Exists(path))
+        {
+            return false;
+        }
+
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var memory = new MemoryStream();
+        stream.CopyTo(memory);
+        return Encoding.Latin1.GetString(memory.ToArray()).Contains(marker, StringComparison.Ordinal);
+    }
+
+    private static async Task WithDatabaseAsync(Func<string, Task> test)
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "wg-scrub-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            await test(Path.Combine(folder, "winguard.db"));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    private static async Task SaveWebhookAsync(string path, params string[] webhooks)
+    {
+        var store = new SqliteStore(path, NullLogger<SqliteStore>.Instance, TimeProvider.System);
+        await store.InitializeAsync();
+        foreach (var webhook in webhooks)
+        {
+            var settings = new WinGuardSettings();
+            settings.Notifications.WebhookUrl = webhook;
+            await store.SetSettingAsync(SettingsHolder.SettingsKey, JsonSerializer.Serialize(settings, IpcJson.Options));
+        }
+
+        // An upgrade: the old version stopped cleanly, so the plaintext is in the main file.
+        await store.DisposeAsync();
+    }
+
+    private static async Task AssertScrubbedWhileOpenAndAfterCloseAsync(string path)
+    {
+        var store = new SqliteStore(path, NullLogger<SqliteStore>.Instance, TimeProvider.System);
+        await store.InitializeAsync();
+
+        var holder = new SettingsHolder(store, NullLogger<SettingsHolder>.Instance, new FakeProtector());
+        await holder.LoadAsync();
+
+        var all = await store.GetAllSettingsAsync();
+        Assert.DoesNotContain(Marker, all[SettingsHolder.SettingsKey]);
+        Assert.False(FileHolds(path, Marker), "main file, while open");
+        Assert.False(FileHolds(path + "-wal", Marker), "wal, while open");
+
+        await store.DisposeAsync();
+        Assert.False(FileHolds(path, Marker), "main file, after close");
+        Assert.False(FileHolds(path + "-wal", Marker), "wal, after close");
+    }
+
+    [Fact]
+    public async Task Encrypting_old_plaintext_leaves_none_of_it_in_the_database_files() =>
+        await WithDatabaseAsync(async path =>
+        {
+            await SaveWebhookAsync(path, "https://hooks.example.invalid/" + Marker);
+            Assert.True(FileHolds(path, Marker));
+
+            await AssertScrubbedWhileOpenAndAfterCloseAsync(path);
+        });
+
+    [Fact]
+    public async Task Encrypting_also_removes_what_earlier_saves_left_in_free_space() =>
+        await WithDatabaseAsync(async path =>
+        {
+            // Different lengths move the row around, leaving old copies in the page and on the freelist.
+            await SaveWebhookAsync(
+                path,
+                "https://hooks.example.invalid/" + Marker,
+                "https://hooks.example.invalid/" + Marker + new string('x', 6000),
+                "https://hooks.example.invalid/short");
+
+            await AssertScrubbedWhileOpenAndAfterCloseAsync(path);
+        });
+
+    [Fact]
+    public async Task Scrubbing_keeps_the_settings_and_a_later_write_works() =>
+        await WithDatabaseAsync(async path =>
+        {
+            await SaveWebhookAsync(path, Webhook);
+            await using var store = new SqliteStore(path, NullLogger<SqliteStore>.Instance, TimeProvider.System);
+            await store.InitializeAsync();
+
+            var holder = new SettingsHolder(store, NullLogger<SettingsHolder>.Instance, new FakeProtector());
+            await holder.LoadAsync();
+
+            Assert.Equal(Webhook, holder.Current.Notifications.WebhookUrl);
+            await store.AddToListAsync(ListKind.Whitelist, "203.0.113.1");
+            Assert.Contains("203.0.113.1", await store.GetListAsync(ListKind.Whitelist));
+        });
+
+    [Fact]
+    public async Task A_blocked_checkpoint_does_not_stop_the_start_up() =>
+        await WithDatabaseAsync(async path =>
+        {
+            await SaveWebhookAsync(path, Webhook);
+            await using var store = new SqliteStore(path, NullLogger<SqliteStore>.Instance, TimeProvider.System);
+            await store.InitializeAsync();
+
+            // A reader in the middle of a transaction: the WAL cannot be reset under it.
+            await using var reader = new SqliteConnection($"Data Source={path};Pooling=False");
+            await reader.OpenAsync();
+            await using var transaction = reader.BeginTransaction(deferred: true);
+            await using var command = reader.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "SELECT COUNT(*) FROM settings;";
+            await command.ExecuteScalarAsync();
+
+            var holder = new SettingsHolder(store, NullLogger<SettingsHolder>.Instance, new FakeProtector());
+            await holder.LoadAsync();
+
+            Assert.Equal(Webhook, holder.Current.Notifications.WebhookUrl);
+            var stored = JsonSerializer.Deserialize<WinGuardSettings>((await store.GetAllSettingsAsync())[SettingsHolder.SettingsKey], IpcJson.Options)!;
+            Assert.StartsWith(SecretValue.Prefix, stored.Notifications.WebhookUrl);
+        });
 
     /// <summary>Encrypts into something visibly not the plaintext; can be told it is the wrong account.</summary>
     private sealed class FakeProtector : ISecretProtector
