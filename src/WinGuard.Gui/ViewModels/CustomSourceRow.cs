@@ -11,11 +11,21 @@ public sealed partial class CustomSourceRow : ObservableObject
     private const int TestDelayMilliseconds = 250;
 
     private readonly Action _changed;
+    private readonly CustomLogSource? _origin;
     private int _testVersion;
 
     /// <summary>Creates a row.</summary>
     /// <param name="changed">Called on every edit.</param>
-    public CustomSourceRow(Action changed) => _changed = changed;
+    /// <param name="origin">The source this row edits; null for a new one.</param>
+    public CustomSourceRow(Action changed, CustomLogSource? origin = null)
+    {
+        _changed = changed;
+        _origin = origin;
+        Ports = new PortProfileRow(Title, changed);
+    }
+
+    /// <summary>The ports a ban from this source blocks, edited in the Blocking section.</summary>
+    public PortProfileRow Ports { get; }
 
     /// <summary>Display name.</summary>
     [ObservableProperty]
@@ -100,7 +110,23 @@ public sealed partial class CustomSourceRow : ObservableObject
     /// <summary>Runs the tester now.</summary>
     public void TestNow() => Result = RegexProbe.Run(Regex, SampleLine);
 
-    partial void OnNameChanged(string value) => _changed();
+    /// <summary>The source to save: what was loaded, with this row's edits on top.</summary>
+    public CustomLogSource ToSource()
+    {
+        var source = _origin is null ? new CustomLogSource() : SettingChecks.Copy(_origin);
+        source.Name = Name.Trim();
+        source.Enabled = Enabled;
+        source.PathGlob = PathGlob.Trim();
+        source.Regex = Regex.Trim();
+        source.BlockedPorts = Ports.Values;
+        return source;
+    }
+
+    partial void OnNameChanged(string value)
+    {
+        Ports.Title = Title;
+        _changed();
+    }
 
     partial void OnEnabledChanged(bool value) => _changed();
 

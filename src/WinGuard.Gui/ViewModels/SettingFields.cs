@@ -1,9 +1,11 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
+using System.Text.Json;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using WinGuard.Core.Config;
 using WinGuard.Core.Detection;
+using WinGuard.Core.Model;
 using WinGuard.Gui.Services;
 
 namespace WinGuard.Gui.ViewModels;
@@ -115,6 +117,9 @@ public partial class TextField : SettingField
     /// <summary>The trimmed value.</summary>
     public string Value => Text.Trim();
 
+    /// <summary>Checks the value again, for a check that depends on another field.</summary>
+    public void Revalidate() => Error = Validate(Text) ?? string.Empty;
+
     partial void OnTextChanged(string value)
     {
         Error = Validate(value) ?? string.Empty;
@@ -147,6 +152,7 @@ public sealed class NumberField : TextField
     private readonly int _min;
     private readonly int _max;
     private readonly bool _optional;
+    private readonly Func<int, string?>? _check;
 
     /// <summary>Creates a number field.</summary>
     /// <param name="label">The name of the setting.</param>
@@ -155,12 +161,14 @@ public sealed class NumberField : TextField
     /// <param name="max">Highest accepted value.</param>
     /// <param name="optional">Whether empty is allowed, meaning "use the global value".</param>
     /// <param name="placeholder">Hint shown while empty.</param>
-    public NumberField(string label, string help, int min, int max, bool optional = false, string placeholder = "")
+    /// <param name="check">A further check on a number within the range.</param>
+    public NumberField(string label, string help, int min, int max, bool optional = false, string placeholder = "", Func<int, string?>? check = null)
         : base(label, help, placeholder)
     {
         _min = min;
         _max = max;
         _optional = optional;
+        _check = check;
     }
 
     /// <summary>The parsed value; null when empty or invalid.</summary>
@@ -178,7 +186,7 @@ public sealed class NumberField : TextField
         }
 
         return int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var number) && number >= _min && number <= _max
-            ? null
+            ? _check?.Invoke(number)
             : $"Enter a whole number from {_min:N0} to {_max:N0}.";
     }
 }
@@ -187,7 +195,13 @@ public sealed class NumberField : TextField
 public sealed partial class DurationField : TextField
 {
     private readonly TimeSpan _minimum;
+    private readonly TimeSpan? _maximum;
     private readonly bool _optional;
+
+    // What was loaded: the friendly text drops fractions of a second, which must not change a value
+    // nobody touched.
+    private TimeSpan? _loaded;
+    private string _loadedText = string.Empty;
 
     /// <summary>Creates a duration field.</summary>
     /// <param name="label">The name of the setting.</param>
@@ -195,10 +209,12 @@ public sealed partial class DurationField : TextField
     /// <param name="minimum">Shortest accepted value.</param>
     /// <param name="optional">Whether empty is allowed, meaning "use the global value".</param>
     /// <param name="placeholder">Hint shown while empty.</param>
-    public DurationField(string label, string help, TimeSpan minimum, bool optional = false, string placeholder = "e.g. 10m, 1h 30m, 7d")
+    /// <param name="maximum">Longest accepted value; the service would cut anything longer.</param>
+    public DurationField(string label, string help, TimeSpan minimum, bool optional = false, string placeholder = "e.g. 10m, 1h 30m, 7d", TimeSpan? maximum = null)
         : base(label, help, placeholder)
     {
         _minimum = minimum;
+        _maximum = maximum;
         _optional = optional;
     }
 
@@ -207,10 +223,17 @@ public sealed partial class DurationField : TextField
     private string _echo = string.Empty;
 
     /// <summary>The parsed value; null when empty or invalid.</summary>
-    public TimeSpan? Duration => DurationText.TryParse(Value, out var value) ? value : null;
+    public TimeSpan? Duration => _loaded is not null && Text == _loadedText
+        ? _loaded
+        : DurationText.TryParse(Value, out var value) ? value : null;
 
     /// <summary>Sets the value from a duration.</summary>
-    public void Set(TimeSpan? value) => Text = value is { } duration ? DurationText.Format(duration) : string.Empty;
+    public void Set(TimeSpan? value)
+    {
+        Text = value is { } duration ? DurationText.Format(duration) : string.Empty;
+        _loaded = value;
+        _loadedText = Text;
+    }
 
     /// <inheritdoc />
     protected override string? Validate(string value)
@@ -225,7 +248,12 @@ public sealed partial class DurationField : TextField
             return "Try 10m, 1h 30m, 2 days or 00:10:00.";
         }
 
-        return duration < _minimum ? $"Must be at least {DurationText.Describe(_minimum)}." : null;
+        if (duration < _minimum)
+        {
+            return $"Must be at least {DurationText.Describe(_minimum)}.";
+        }
+
+        return duration > _maximum ? $"Must be at most {DurationText.Describe(_maximum.Value)}." : null;
     }
 
     /// <inheritdoc />
@@ -384,15 +412,23 @@ public sealed partial class TextRow : ObservableObject
     partial void OnValueChanged(string value) => _changed();
 }
 
-/// <summary>An editable list of strings (exclusion rules, ignore patterns).</summary>
+/// <summary>An editable list of strings (exclusion rules, ignore patterns, honeypot names).</summary>
 public sealed partial class StringListField : SettingField
 {
+    private readonly Func<string, string?>? _validate;
+
     /// <summary>Creates the list.</summary>
-    public StringListField(string label, string help, string addLabel, string placeholder)
+    /// <param name="label">The name of the setting.</param>
+    /// <param name="help">What it does.</param>
+    /// <param name="addLabel">Caption of the add button.</param>
+    /// <param name="placeholder">Hint shown in an empty row.</param>
+    /// <param name="validate">Checks one entry; returns the message, or null when it is fine.</param>
+    public StringListField(string label, string help, string addLabel, string placeholder, Func<string, string?>? validate = null)
         : base(label, help)
     {
         AddLabel = addLabel;
         Placeholder = placeholder;
+        _validate = validate;
     }
 
     /// <summary>Caption of the add button.</summary>
@@ -416,14 +452,16 @@ public sealed partial class StringListField : SettingField
         Rows.Clear();
         foreach (var value in values)
         {
-            Rows.Add(new TextRow(value, RaiseChanged));
+            Rows.Add(new TextRow(value, OnRowChanged));
         }
+
+        Check();
     }
 
     [RelayCommand]
     private void AddRow()
     {
-        Rows.Add(new TextRow(string.Empty, RaiseChanged));
+        Rows.Add(new TextRow(string.Empty, OnRowChanged));
         RaiseChanged();
     }
 
@@ -433,9 +471,94 @@ public sealed partial class StringListField : SettingField
         if (row is not null)
         {
             Rows.Remove(row);
-            RaiseChanged();
+            OnRowChanged();
         }
     }
+
+    private void OnRowChanged()
+    {
+        Check();
+        RaiseChanged();
+    }
+
+    private void Check() =>
+        Error = _validate is null ? string.Empty : Values.Select(_validate).FirstOrDefault(problem => problem is not null) ?? string.Empty;
+}
+
+/// <summary>Something the reader needs to know at this point of a section. Nothing to edit, so it is never dirty.</summary>
+public sealed partial class NoticeField : SettingField
+{
+    /// <summary>Creates a notice.</summary>
+    /// <param name="tone">What it means.</param>
+    /// <param name="title">Short headline.</param>
+    /// <param name="message">What to know.</param>
+    public NoticeField(Tone tone, string title, string message)
+        : base(title, message)
+    {
+        _tone = tone;
+        _message = message;
+    }
+
+    /// <summary>What it means. Changes when the service reports that the problem is real.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(Glyph))]
+    private Tone _tone;
+
+    /// <summary>The text.</summary>
+    [ObservableProperty]
+    private string _message;
+
+    /// <summary>Whether it applies right now.</summary>
+    [ObservableProperty]
+    private bool _isActive = true;
+
+    /// <summary>Icon, so the meaning never rests on colour alone.</summary>
+    public string Glyph => Tone is Tone.Warn or Tone.Attack ? "" : "";
+
+    /// <inheritdoc />
+    public override string Snapshot => string.Empty;
+}
+
+/// <summary>A heading that splits a long section into groups.</summary>
+public sealed class GroupField : SettingField
+{
+    /// <summary>Creates a heading.</summary>
+    public GroupField(string title, string help = "")
+        : base(title, help)
+    {
+    }
+
+    /// <inheritdoc />
+    public override string Snapshot => string.Empty;
+}
+
+/// <summary>One choice in a <see cref="ChoiceField"/>.</summary>
+/// <param name="Value">The stored value.</param>
+/// <param name="Label">The name shown.</param>
+public sealed record ChoiceOption(object Value, string Label);
+
+/// <summary>A dropdown over a fixed set of values.</summary>
+public sealed partial class ChoiceField : SettingField
+{
+    /// <summary>Creates a dropdown.</summary>
+    public ChoiceField(string label, string help, params ChoiceOption[] options)
+        : base(label, help)
+    {
+        Options = options;
+        _selected = options[0].Value;
+    }
+
+    /// <summary>The choices.</summary>
+    public IReadOnlyList<ChoiceOption> Options { get; }
+
+    /// <summary>The value.</summary>
+    [ObservableProperty]
+    private object _selected;
+
+    /// <inheritdoc />
+    public override string Snapshot => Selected.ToString() ?? string.Empty;
+
+    partial void OnSelectedChanged(object value) => RaiseChanged();
 }
 
 /// <summary>One choice in the FTP server dropdown.</summary>
@@ -477,7 +600,7 @@ public sealed partial class FtpSourcesField : SettingField
         Rows.Clear();
         foreach (var source in sources)
         {
-            Rows.Add(new FtpSourceRow(OnRowChanged) { Name = source.Name, Kind = source.Kind, Path = source.Path });
+            Rows.Add(new FtpSourceRow(OnRowChanged, source) { Name = source.Name, Kind = source.Kind, Path = source.Path });
         }
     }
 
@@ -576,13 +699,15 @@ public sealed partial class CustomSourcesField : SettingField
         Rows.Clear();
         foreach (var source in sources)
         {
-            Rows.Add(new CustomSourceRow(OnRowChanged)
+            var row = new CustomSourceRow(OnRowChanged, source)
             {
                 Name = source.Name,
                 Enabled = source.Enabled,
                 PathGlob = source.PathGlob,
                 Regex = source.Regex,
-            });
+            };
+            row.Ports.Text = string.Join(", ", source.BlockedPorts);
+            Rows.Add(row);
         }
     }
 
@@ -657,6 +782,12 @@ public static class SettingChecks
         return null;
     }
 
+    /// <summary>Validates one port or range, which is all a passive port setting takes.</summary>
+    public static string? RangeError(string text) =>
+        text.Length == 0 || PortSet.TryParseRange(text, out _, out _)
+            ? null
+            : "Enter one port, or one range such as 50000-50100.";
+
     /// <summary>Splits a typed port list.</summary>
     public static string[] SplitPorts(string text) =>
         text.Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -667,6 +798,16 @@ public static class SettingChecks
         || (Uri.TryCreate(text, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https")
             ? null
             : "Enter a full address starting with https://.";
+
+    /// <summary>
+    /// A deep copy of part of the settings. A row edits a few properties of the object it was loaded
+    /// from and saves this copy with those few changed: rebuilding it would wipe the rest.
+    /// </summary>
+    public static T Copy<T>(T value) => JsonSerializer.Deserialize<T>(JsonSerializer.Serialize(value))!;
+
+    /// <summary>A message from the service, started as a sentence for showing on its own.</summary>
+    public static string? Sentence(string? text) =>
+        string.IsNullOrEmpty(text) ? text : char.ToUpperInvariant(text[0]) + text[1..];
 
     private static bool IsPort(string text) =>
         int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var port) && port is >= 1 and <= 65535;

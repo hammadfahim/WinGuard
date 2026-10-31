@@ -449,7 +449,11 @@ public sealed partial class SettingsViewModel : ObservableObject
         RefreshState();
     }
 
-    /// <summary>Turns the fields into the settings to push. Only call while there are no errors.</summary>
+    /// <summary>
+    /// Turns the fields into the settings to push. Only call while there are no errors. This starts
+    /// from a copy of what was loaded and only overwrites what a field edits, and rows do the same,
+    /// so a setting this page has no field for survives every save.
+    /// </summary>
     public WinGuardSettings BuildSettings()
     {
         var settings = _baseSettings.Clone();
@@ -483,39 +487,30 @@ public sealed partial class SettingsViewModel : ObservableObject
         settings.Ftp.PollInterval = FtpPoll.Duration ?? settings.Ftp.PollInterval;
         settings.Ftp.Sources = FtpSources.Rows
             .Where(row => !string.IsNullOrWhiteSpace(row.Name) || !string.IsNullOrWhiteSpace(row.Path))
-            .Select(row => new FtpLogSource { Name = row.Name.Trim(), Kind = row.Kind, Path = row.Path.Trim() })
+            .Select(row => row.ToSource())
             .ToList();
 
         settings.CustomSources = CustomSources.Rows
             .Where(row => !string.IsNullOrWhiteSpace(row.Name) || !string.IsNullOrWhiteSpace(row.PathGlob) || !string.IsNullOrWhiteSpace(row.Regex))
-            .Select(row => new CustomLogSource
-            {
-                Name = row.Name.Trim(),
-                Enabled = row.Enabled,
-                PathGlob = row.PathGlob.Trim(),
-                Regex = row.Regex.Trim(),
-            })
+            .Select(row => row.ToSource())
             .ToList();
 
-        settings.Notifications = new NotificationSettings
-        {
-            Enabled = NotificationsEnabled.IsOn,
-            WebhookUrl = WebhookUrl.Value,
-            TelegramBotToken = TelegramToken.Value,
-            TelegramChatId = TelegramChat.Value,
-            RateLimitPerMinute = RateLimit.Number ?? settings.Notifications.RateLimitPerMinute,
-            WriteToWindowsEventLog = WindowsEventLog.IsOn,
-            Smtp = new SmtpSettings
-            {
-                Host = SmtpHost.Value,
-                Port = SmtpPort.Number ?? 25,
-                EnableSsl = SmtpTls.IsOn,
-                Username = SmtpUser.Text,
-                Password = SmtpPassword.Text,
-                From = SmtpFrom.Value,
-                To = SmtpTo.Value,
-            },
-        };
+        var notifications = settings.Notifications;
+        notifications.Enabled = NotificationsEnabled.IsOn;
+        notifications.WebhookUrl = WebhookUrl.Value;
+        notifications.TelegramBotToken = TelegramToken.Value;
+        notifications.TelegramChatId = TelegramChat.Value;
+        notifications.RateLimitPerMinute = RateLimit.Number ?? notifications.RateLimitPerMinute;
+        notifications.WriteToWindowsEventLog = WindowsEventLog.IsOn;
+
+        var smtp = notifications.Smtp ??= new SmtpSettings();
+        smtp.Host = SmtpHost.Value;
+        smtp.Port = SmtpPort.Number ?? 25;
+        smtp.EnableSsl = SmtpTls.IsOn;
+        smtp.Username = SmtpUser.Text;
+        smtp.Password = SmtpPassword.Text;
+        smtp.From = SmtpFrom.Value;
+        smtp.To = SmtpTo.Value;
 
         settings.HousekeepingInterval = Housekeeping.Duration ?? settings.HousekeepingInterval;
         settings.EventRetentionDays = EventRetention.Number ?? settings.EventRetentionDays;
