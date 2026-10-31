@@ -17,7 +17,7 @@ public static class PipeConstants
     /// Bumped whenever a request, response or DTO changes shape. The service reports it in
     /// <see cref="ServiceStatusDto.ProtocolVersion"/> so a GUI from another release can say so
     /// instead of misbehaving. v3: statistics + ban history + report-only. v4: BlockNow answers
-    /// with the ban it recorded. v5: bans report their ports.
+    /// with the ban it recorded. v5: bans report their ports, status reports blocklist files.
     /// </summary>
     public const int ProtocolVersion = 5;
 }
@@ -89,6 +89,57 @@ public sealed class ServiceStatusDto
 
     /// <summary>True when the engine runs in monitoring mode: bans are recorded but not enforced.</summary>
     public bool ReportOnly { get; set; }
+
+    /// <summary>What the local blocklist files contributed.</summary>
+    public BlocklistStatusDto Blocklists { get; set; } = new();
+}
+
+/// <summary>The blocklist files as a whole. All counts are zero when none is configured.</summary>
+public sealed class BlocklistStatusDto
+{
+    /// <summary>Firewall entries taken from the files, after collapsing and the cap.</summary>
+    public int Loaded { get; set; }
+
+    /// <summary>Lines refused: not an IP or CIDR, or a prefix too broad to block.</summary>
+    public int Skipped { get; set; }
+
+    /// <summary>Entries left out because of the cap of <see cref="Defaults.MaxBlocklistEntries"/>.</summary>
+    public int Capped { get; set; }
+
+    public List<BlocklistFileStatusDto> Files { get; set; } = [];
+
+    public static BlocklistStatusDto From(BlocklistSnapshot snapshot) => new()
+    {
+        Loaded = snapshot.Entries.Count,
+        Skipped = snapshot.Skipped,
+        Capped = snapshot.Capped,
+        Files = snapshot.Files.Select(file => new BlocklistFileStatusDto
+        {
+            Path = file.Path,
+            Loaded = file.Loaded,
+            Skipped = file.Skipped,
+            LastLoadedUtc = file.LastLoadedUtc,
+            Problem = file.Problem,
+        }).ToList(),
+    };
+}
+
+/// <summary>One blocklist file.</summary>
+public sealed class BlocklistFileStatusDto
+{
+    public string Path { get; set; } = string.Empty;
+
+    /// <summary>Valid entries in the file when it was last read.</summary>
+    public int Loaded { get; set; }
+
+    /// <summary>Lines refused when it was last read.</summary>
+    public int Skipped { get; set; }
+
+    /// <summary>When it was last read successfully; null if it never was.</summary>
+    public DateTime? LastLoadedUtc { get; set; }
+
+    /// <summary>Why the file is not being read, in which case its last good entries stay in force.</summary>
+    public string? Problem { get; set; }
 }
 
 public sealed class EngineStatusDto

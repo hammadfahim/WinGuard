@@ -141,6 +141,7 @@ public sealed partial class IpcRequestHandler
             ActiveBans = bans.Count,
             Engines = engines,
             ReportOnly = settings.ReportOnly,
+            Blocklists = BlocklistStatusDto.From(_engine.GetBlocklistStatus()),
         };
     }
 

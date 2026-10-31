@@ -70,6 +70,12 @@ public sealed class WinGuardSettings
     public FtpSettings Ftp { get; set; } = new();
     public List<CustomLogSource> CustomSources { get; set; } = [];
 
+    /// <summary>
+    /// Local blocklist files (one IP or CIDR per line) blocked on all ports without waiting for a
+    /// failed login. Empty = off. WinGuard never fetches a list: the administrator downloads it.
+    /// </summary>
+    public string[] BlocklistFiles { get; set; } = [];
+
     /// <summary>Effective threshold for a protocol (per-protocol override wins).</summary>
     public int ThresholdFor(ProtocolSource source) => source switch
     {
@@ -193,6 +199,12 @@ public sealed class WinGuardSettings
         {
             source.BlockedPorts = NormalizePorts(source.BlockedPorts);
         }
+
+        BlocklistFiles = (BlocklistFiles ?? [])
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => path.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
         // Notification rate limit: 0 would mean "drop everything", negative is nonsense.
         Notifications.RateLimitPerMinute = Math.Clamp(

@@ -117,6 +117,7 @@ public sealed partial class BanEngine
     /// </summary>
     public async Task StartAsync(CancellationToken ct)
     {
+        await RefreshBlocklistsAsync(ct).ConfigureAwait(false);
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -300,6 +301,7 @@ public sealed partial class BanEngine
     /// </summary>
     public async Task HousekeepOnceAsync(CancellationToken ct = default)
     {
+        await RefreshBlocklistsAsync(ct).ConfigureAwait(false);
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -1115,6 +1117,8 @@ public sealed partial class BanEngine
             .SelectMany(canonical => _matcher.SubtractWhitelist(canonical!))
             .Distinct(StringComparer.Ordinal)
             .ToList();
+
+        ApplyBlocklist(whitelist);
     }
 
     private async Task<BanEntry?> SafeGetBanAsync(string ip, CancellationToken ct)
@@ -1305,6 +1309,7 @@ public sealed partial class BanEngine
 
             try
             {
+                await RefreshBlocklistsAsync(ct).ConfigureAwait(false);
                 await _gate.WaitAsync(ct).ConfigureAwait(false);
                 try
                 {

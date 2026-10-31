@@ -94,7 +94,7 @@ public sealed partial class BanEngine
 
     /// <summary>True for a target that is blacklisted or on a blocklist exactly as written.</summary>
     private bool IsListTarget(string ipOrRange) =>
-        _blacklistedRanges.Contains(ipOrRange, StringComparer.Ordinal);
+        _blocklistTargets.Contains(ipOrRange) || _blacklistedRanges.Contains(ipOrRange, StringComparer.Ordinal);
 
     /// <summary>
     /// What the firewall should hold: these bans, the ones the store has not taken yet, the
@@ -119,7 +119,7 @@ public sealed partial class BanEngine
             targets[ban.IpAddress] = ports;
         }
 
-        foreach (var entry in _blacklistedRanges)
+        foreach (var entry in _blacklistedRanges.Concat(_blocklistTargets))
         {
             targets[entry] = PortSet.All;
         }

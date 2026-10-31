@@ -98,6 +98,18 @@ public sealed class IpMatcherTests
         Assert.False(IpMatcher.TryParseCidr("not-a-cidr", out _));
     }
 
+    [Theory]
+    [InlineData("203.0.113.7/32", "203.0.113.7")]
+    [InlineData("2001:db8::1/128", "2001:db8::1")]
+    [InlineData("203.0.113.0/24", "203.0.113.0/24")]
+    [InlineData("2001:db8::/32", "2001:db8::/32")] // 2^96 addresses, whatever the number looks like
+    [InlineData("2001:db8:1:2::/64", "2001:db8:1:2::/64")]
+    public void Only_a_true_single_host_cidr_folds_to_a_bare_address(string value, string expected)
+    {
+        Assert.True(IpMatcher.TryNormalizeBanTarget(value, out var target));
+        Assert.Equal(expected, target);
+    }
+
     // ---------- Instance list matching ----------
 
     [Fact]

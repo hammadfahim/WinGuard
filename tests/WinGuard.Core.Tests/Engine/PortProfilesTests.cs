@@ -247,6 +247,7 @@ public sealed class PortProfilesTests
         Assert.Empty(settings.Rdp.BlockedPorts);
         Assert.Empty(settings.CustomSources[0].BlockedPorts);
         Assert.Empty(settings.Ftp.PassivePortRange);
+        Assert.Empty(settings.BlocklistFiles);
     }
 
     [Fact]
@@ -274,12 +275,13 @@ public sealed class PortProfilesTests
     public void Explicit_nulls_in_stored_settings_do_not_crash_normalization()
     {
         var settings = JsonSerializer.Deserialize<WinGuardSettings>(
-            """{"rdp":{"blockedPorts":null},"ftp":{"passivePortRange":null},"customSources":[null,{"name":"x","blockedPorts":null}]}""",
+            """{"blocklistFiles":null,"rdp":{"blockedPorts":null},"ftp":{"passivePortRange":null},"customSources":[null,{"name":"x","blockedPorts":null}]}""",
             IpcJson.Options)!;
 
         settings.Normalize();
 
         Assert.Empty(settings.Rdp.BlockedPorts);
+        Assert.Empty(settings.BlocklistFiles);
         Assert.Empty(settings.Ftp.PassivePortRange);
         Assert.Empty(settings.CustomSources[1].BlockedPorts);
     }
@@ -299,6 +301,16 @@ public sealed class PortProfilesTests
     }
 
     [Fact]
+    public void Blocklist_paths_are_trimmed_and_listed_once()
+    {
+        var settings = new WinGuardSettings { BlocklistFiles = [@" C:\lists\drop.txt ", @"c:\LISTS\drop.txt", "  ", @"C:\lists\mine.txt"] };
+
+        settings.Normalize();
+
+        Assert.Equal([@"C:\lists\drop.txt", @"C:\lists\mine.txt"], settings.BlocklistFiles);
+    }
+
+    [Fact]
     public void Profiles_survive_cloning()
     {
         var settings = new WinGuardSettings
@@ -306,6 +318,7 @@ public sealed class PortProfilesTests
             Rdp = { BlockedPorts = ["3389"] },
             Ftp = { PassivePortRange = "50000-50100" },
             CustomSources = [new CustomLogSource { Name = "x", BlockedPorts = ["8443"] }],
+            BlocklistFiles = [@"C:\lists\drop.txt"],
         };
 
         var clone = settings.Clone();
@@ -313,6 +326,25 @@ public sealed class PortProfilesTests
         Assert.Equal(["3389"], clone.Rdp.BlockedPorts);
         Assert.Equal("50000-50100", clone.Ftp.PassivePortRange);
         Assert.Equal(["8443"], clone.CustomSources[0].BlockedPorts);
+        Assert.Equal([@"C:\lists\drop.txt"], clone.BlocklistFiles);
+    }
+
+    [Theory]
+    [InlineData(@"\\server\share\drop.txt")]
+    [InlineData(@"\\?\C:\lists\drop.txt")]
+    [InlineData(@"\\.\pipe\drop")]
+    [InlineData("//server/share/drop.txt")]
+    public void A_blocklist_on_the_network_is_refused(string path)
+    {
+        var problems = SettingsValidator.Validate(new WinGuardSettings { BlocklistFiles = [path] });
+
+        Assert.Contains(path, Assert.Single(problems));
+    }
+
+    [Fact]
+    public void A_blocklist_on_a_local_drive_is_accepted()
+    {
+        Assert.Empty(SettingsValidator.Validate(new WinGuardSettings { BlocklistFiles = [@"C:\lists\drop.txt"] }));
     }
 
     // ---------- presets ----------
