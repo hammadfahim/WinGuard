@@ -132,6 +132,12 @@ public sealed class SettingsHolder
         }
 
         sealedSettings.Commit();
+        if (sealedSettings.TiedToThisAccount.Count > 0)
+        {
+            _logger.LogWarning(
+                "The new {Secrets} can only be read by this account: the Windows service will not be able to decrypt it. If the service will run with this database, enter it again through the console connected to the service.",
+                string.Join(", ", sealedSettings.TiedToThisAccount));
+        }
     }
 
     /// <summary>

@@ -298,6 +298,45 @@ public sealed class SettingsSecretsTests
     }
 
     [Fact]
+    public async Task A_new_secret_saved_by_a_console_run_warns_that_the_service_cannot_read_it()
+    {
+        var logger = new CountingLogger();
+        var console = new SettingsHolder(new FakeStore(), logger, new FakeProtector { RunsAsServiceAccount = false });
+        await console.LoadAsync();
+
+        await console.ApplyAsync(WithSecrets());
+
+        var warning = Assert.Single(logger.Messages, message => message.Contains("Windows service will not be able to decrypt", StringComparison.Ordinal));
+        Assert.Contains("Telegram bot token", warning);
+    }
+
+    [Fact]
+    public async Task A_console_save_that_changes_no_secret_says_nothing_about_them()
+    {
+        var logger = new CountingLogger();
+        var console = new SettingsHolder(new FakeStore(), logger, new FakeProtector { RunsAsServiceAccount = false });
+        await console.LoadAsync();
+        await console.ApplyAsync(WithSecrets());
+        var warnings = logger.Warnings;
+
+        await console.ApplyAsync(console.Current.Clone());
+
+        Assert.Equal(warnings, logger.Warnings);
+    }
+
+    [Fact]
+    public async Task The_service_saving_a_new_secret_has_nothing_to_warn_about()
+    {
+        var logger = new CountingLogger();
+        var service = new SettingsHolder(new FakeStore(), logger, new FakeProtector());
+        await service.LoadAsync();
+
+        await service.ApplyAsync(WithSecrets());
+
+        Assert.Equal(0, logger.Warnings);
+    }
+
+    [Fact]
     public async Task Secrets_survive_a_restart()
     {
         var store = new FakeStore();

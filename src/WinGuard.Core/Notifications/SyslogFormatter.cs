@@ -69,7 +69,9 @@ internal static class SyslogFormatter
         var headerBytes = Encoding.ASCII.GetBytes(header + " ");
 
         // RFC 5424 §6.4: text that needs Unicode must start with a BOM, and pure ASCII needs none.
-        var unicode = text.Any(c => c > 0x7F);
+        // CEF goes as MSG-ANY without one: collectors look for "CEF:" at the start of the message,
+        // and a user name an attacker picks must not be able to move it from there.
+        var unicode = settings.Format != SyslogFormat.Cef && text.Any(c => c > 0x7F);
         var bodyLimit = MaxMessageBytes - headerBytes.Length - (unicode ? Bom.Length : 0);
         var body = Truncate(text, bodyLimit);
 
@@ -167,6 +169,7 @@ internal static class SyslogFormatter
         WinGuardEventIds.ManualUnblock => "Address unblocked by an administrator",
         WinGuardEventIds.RangeUnblocked => "Range ban lifted",
         WinGuardEventIds.NotificationsSuppressed => "Notifications suppressed",
+        WinGuardEventIds.PossibleCompromise => "Possible compromise",
         WinGuardEventIds.Disarmed => "Enforcement disarmed",
         WinGuardEventIds.Rearmed => "Enforcement rearmed",
         WinGuardEventIds.DisarmRefused => "Disarm file ignored",

@@ -180,6 +180,24 @@ public sealed class SyslogTests
     }
 
     [Fact]
+    public void Cef_starts_with_its_marker_even_when_a_user_name_needs_unicode()
+    {
+        var logEvent = new LogEvent
+        {
+            TimestampUtc = When,
+            Level = LogEventLevel.Warning,
+            Message = "POSSIBLE COMPROMISE: Müller logged on from 203.0.113.7 after 5 failed attempt(s)",
+        };
+
+        var bytes = Bytes(logEvent, Syslog(SyslogFormat.Cef));
+
+        Assert.Equal(-1, IndexOf(bytes, [0xEF, 0xBB, 0xBF]));
+        var message = Parse(Encoding.UTF8.GetString(bytes)).Groups["msg"].Value;
+        Assert.StartsWith("CEF:0|WinGuard|WinGuard|0.2.0|1007|Possible compromise|6|", message);
+        Assert.Contains("Müller", message);
+    }
+
+    [Fact]
     public void A_long_message_is_cut_to_the_limit()
     {
         var bytes = Bytes(new LogEvent { TimestampUtc = When, Level = LogEventLevel.Error, Message = new string('x', 10_000) });
@@ -650,6 +668,37 @@ public sealed class SyslogTests
             {
                 using var reader = new StreamReader(first.GetStream(), Encoding.ASCII);
                 Assert.Equal("before", await reader.ReadLineAsync(FiveSeconds()));
+            }
+
+            await Task.Delay(100); // long enough for the close to reach the sender
+
+            await transport.SendAsync(Message(port, SyslogProtocol.Tcp, "after"), FiveSeconds());
+            using var second = await listener.AcceptTcpClientAsync(FiveSeconds());
+            using var again = new StreamReader(second.GetStream(), Encoding.ASCII);
+            Assert.Equal("after", await again.ReadLineAsync(FiveSeconds()));
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    [Fact]
+    public async Task A_receiver_that_spoke_before_it_went_away_is_noticed_too()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            using var transport = new SocketSyslogTransport();
+
+            await transport.SendAsync(Message(port, SyslogProtocol.Tcp, "before"), FiveSeconds());
+            using (var first = await listener.AcceptTcpClientAsync(FiveSeconds()))
+            {
+                using var reader = new StreamReader(first.GetStream(), Encoding.ASCII);
+                Assert.Equal("before", await reader.ReadLineAsync(FiveSeconds()));
+                await first.GetStream().WriteAsync(Encoding.ASCII.GetBytes("ok\n"), FiveSeconds());
             }
 
             await Task.Delay(100); // long enough for the close to reach the sender

@@ -9,12 +9,31 @@ All notable changes to WinGuard are documented here. The format follows
 
 - **An application icon**: a shield with a keyhole, on the program files, shortcuts, taskbar, window
   and Setup, with images for the installer wizard. Small sizes have their own simpler drawing.
+- `POSSIBLE COMPROMISE` alerts have their own stable event ID, 1007, instead of the generic 1900.
+  Update any SIEM rule that matched them under 1900.
 
 ### Changed
 
 - The tray icon is sharp at any display scaling and shows its state by shape as well as colour:
   solid while protecting, hollow while offline, red with an exclamation mark while bans have no
   effect.
+- A blocklist file that shrinks to under half of a list of 100 entries or more is treated as cut
+  off: the last good entries stay in force and a warning says so. To accept a shorter list, take the
+  file off the list and add it back.
+- Setup exits with code 20 and shows an error when the service does not start, where it used to
+  report success.
+
+### Fixed
+
+- One failed write no longer ends the Windows Event Log output for the rest of the run.
+- CEF messages no longer start with a BOM when the text holds non-ASCII characters, which could stop
+  a collector recognising them. RFC 5424 text keeps its BOM.
+- A failed save of the blocklist entries is tried again on the next pass.
+- When Setup cannot secure the data folder, it no longer starts a service an administrator had
+  stopped.
+- A TCP syslog receiver that sends something and then disconnects is now noticed before the next
+  message is lost.
+- A secret saved during a `--console` run now logs a warning that the Windows service cannot read it.
 
 ## [0.3.0] — 2026-10-31
 

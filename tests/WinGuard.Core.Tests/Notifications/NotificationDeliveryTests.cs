@@ -477,6 +477,31 @@ public sealed class NotificationDeliveryTests
         Assert.Contains("1 notification(s) were suppressed", log.Text);
     }
 
+    // ---- the Windows event log ----
+
+    [Fact]
+    public void One_failed_write_does_not_end_the_event_log_output()
+    {
+        // A full log is a moment, and a SIEM behind this output would otherwise go dark until a restart.
+        var written = new List<string>();
+        var logFull = true;
+        var writer = new WindowsEventLogWriter(NullLogger.Instance, (message, _, _) =>
+        {
+            if (logFull)
+            {
+                throw new InvalidOperationException("The event log file is full.");
+            }
+
+            written.Add(message);
+        });
+
+        writer.Write(Blocked("203.0.113.1"), null);
+        logFull = false;
+        writer.Write(Blocked("203.0.113.2"), null);
+
+        Assert.Contains("203.0.113.2", Assert.Single(written));
+    }
+
     // ---- a receiver that hangs ----
 
     [Fact]

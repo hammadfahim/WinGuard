@@ -18,6 +18,9 @@ public sealed partial class BanEngine
     private readonly BlocklistLoader _blocklists = new(Defaults.MaxBlocklistEntries);
     private bool _blocklistCacheLoaded;
 
+    // Entries changed and the store has not taken them yet; each pass tries again.
+    private bool _blocklistCacheStale;
+
     // The entries minus what must stay reachable, recomputed only when either side changes.
     private HashSet<string> _blocklistTargets = new(StringComparer.Ordinal);
     private IReadOnlyList<string> _appliedBlocklistEntries = [];
@@ -33,7 +36,7 @@ public sealed partial class BanEngine
     private async Task RefreshBlocklistsAsync(CancellationToken ct)
     {
         var paths = _settingsAccessor().BlocklistFiles;
-        if (paths.Length == 0 && _blocklists.Current.Files.Count == 0)
+        if (paths.Length == 0 && _blocklists.Current.Files.Count == 0 && !_blocklistCacheStale)
         {
             return;
         }
@@ -53,7 +56,8 @@ public sealed partial class BanEngine
                 }, ct).ConfigureAwait(false);
             }
 
-            if (refresh.EntriesChanged)
+            _blocklistCacheStale |= refresh.EntriesChanged;
+            if (_blocklistCacheStale)
             {
                 await SaveBlocklistCacheAsync(ct).ConfigureAwait(false);
             }
@@ -109,10 +113,11 @@ public sealed partial class BanEngine
         try
         {
             await _store.SetSettingAsync(BlocklistCacheSettingKey, JsonSerializer.Serialize(_blocklists.ExportLastGood()), ct).ConfigureAwait(false);
+            _blocklistCacheStale = false;
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            _logger.LogWarning(ex, "Could not save the blocklist entries; a file missing at the next start would lose its rules.");
+            _logger.LogWarning(ex, "Could not save the blocklist entries; trying again next pass. A file missing at the next start would lose its rules.");
         }
     }
 

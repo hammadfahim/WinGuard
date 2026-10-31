@@ -16,6 +16,10 @@
 #define MyAppServiceDescription "WinGuard - blocks brute-force attackers in the firewall"
 ; Longer than the service host's own 30 s shutdown timeout, so a slow stop is not called a failure.
 #define MyAppStopTimeoutSeconds 60
+; Windows gives a service 30 seconds to start, and the failure actions restart it after 5.
+#define MyAppStartTimeoutSeconds 60
+; Setup's own exit codes end at 8. Silent installs have no message box, so this is what they get.
+#define MyAppExitServiceNotStarted 20
 
 #define IconFile SourcePath + "\assets\icon.ico"
 
@@ -94,7 +98,7 @@ Filename: "{sys}\sc.exe"; Parameters: "create {#MyAppServiceName} binPath= ""\""
 Filename: "{sys}\sc.exe"; Parameters: "config {#MyAppServiceName} binPath= ""\""{app}\{#MyAppServiceExe}\"""""; Flags: runhidden
 Filename: "{sys}\sc.exe"; Parameters: "description {#MyAppServiceName} ""{#MyAppServiceDescription}"""; Flags: runhidden
 Filename: "{sys}\sc.exe"; Parameters: "failure {#MyAppServiceName} reset= 86400 actions= restart/5000/restart/5000/restart/5000"; Flags: runhidden
-Filename: "{sys}\sc.exe"; Parameters: "start {#MyAppServiceName}"; Flags: runhidden; StatusMsg: "Starting {#MyAppServiceDisplayName}..."
+Filename: "{sys}\sc.exe"; Parameters: "start {#MyAppServiceName}"; Flags: runhidden; StatusMsg: "Starting {#MyAppServiceDisplayName}..."; AfterInstall: CheckServiceStarted
 ; Optional prerequisites. The subcategory GUID is locale-independent (the English name
 ; "Logon" silently fails on non-English Windows).
 Filename: "{sys}\auditpol.exe"; Parameters: "/set /subcategory:""{{0CCE9215-69AE-11D9-BED3-505054503030}"" /success:enable /failure:enable"; Flags: runhidden; Tasks: auditpolicy; StatusMsg: "Enabling logon failure auditing..."
@@ -111,6 +115,8 @@ var
   { User's answer to the uninstall data-folder prompt; DelTree happens in
     usPostUninstall, after the service is stopped/deleted and the DB is unlocked. }
   DeleteDataOnUninstall: Boolean;
+  { Set by CheckServiceStarted; GetCustomSetupExitCode reports it. }
+  ServiceNotStarted: Boolean;
 
 { --- Service helpers ------------------------------------------------------- }
 
@@ -179,6 +185,35 @@ begin
   Log('WinGuard: the service did not stop within {#MyAppStopTimeoutSeconds} seconds. Last state: ' + State);
 end;
 
+{ Runs after the [Run] entry that starts the service. sc.exe only asks: the service can still fail
+  on its way up, and an upgrade has already stopped the old one, so without this the server would
+  be left unprotected behind a "Setup has finished" page. }
+procedure CheckServiceStarted();
+var
+  Attempts: Integer;
+begin
+  for Attempts := 1 to {#MyAppStartTimeoutSeconds} do
+  begin
+    if Pos('RUNNING', Uppercase(QueryServiceState())) > 0 then
+      Exit;
+    Sleep(1000);
+  end;
+
+  ServiceNotStarted := True;
+  Log('WinGuard: the service did not start within {#MyAppStartTimeoutSeconds} seconds.');
+  SuppressibleMsgBox('The {#MyAppServiceDisplayName} did not start, so this server is NOT protected ' +
+    'right now.'#13#10#13#10 + 'Look in ' + ExpandConstant('{commonappdata}\WinGuard\Logs') +
+    ' for the reason, then start it with "sc start {#MyAppServiceName}".',
+    mbCriticalError, MB_OK, IDOK);
+end;
+
+function GetCustomSetupExitCode(): Integer;
+begin
+  Result := 0;
+  if ServiceNotStarted then
+    Result := {#MyAppExitServiceNotStarted};
+end;
+
 { --- Data folder ----------------------------------------------------------- }
 
 { Leave the data folder to SYSTEM + Administrators alone, whoever created it, so no
@@ -236,10 +271,12 @@ end;
   (exit code 7 in silent mode). The data folder is secured once the service has
   stopped: a running service keeps its database and log open, and what is open
   cannot be moved aside, so a bad file there would stop every upgrade. If it fails,
-  the service is started again, so protection stays as it was. }
+  a service that was running is started again, so protection stays as it was, and
+  one an administrator had stopped stays stopped. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
+  ServiceWasActive: Boolean;
 begin
   { Close a running console first. It lives in the tray and turns a normal close
     request into "hide", so without this an upgrade can leave the OLD console
@@ -248,6 +285,8 @@ begin
     running, which is fine. }
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyAppExeName}', '',
     SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  ServiceWasActive := ServiceExistsFlag() and (Pos('STOPPED', Uppercase(QueryServiceState())) = 0);
 
   { Stop any existing service before [Files] overwrites the running EXE. A service
     that will not stop keeps that EXE locked, so go no further and say so. }
@@ -259,7 +298,7 @@ begin
   end;
 
   Result := SecureDataFolder();
-  if (Result <> '') and ServiceExistsFlag() then
+  if (Result <> '') and ServiceWasActive then
     Exec(ExpandConstant('{sys}\sc.exe'), 'start {#MyAppServiceName}', '',
       SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
