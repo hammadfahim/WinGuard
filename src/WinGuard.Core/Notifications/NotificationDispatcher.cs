@@ -140,11 +140,17 @@ public static class WinGuardEventIds
 /// e-mail, behind a shared rate limit. Opt-in (see <see cref="NotificationSettings"/>): nothing is
 /// sent unless the administrator configured a destination. WinGuard never contacts anything else.
 /// <para>
-/// <see cref="Publish"/> enqueues into a bounded channel and returns immediately, so the engine's
+/// <see cref="Publish"/> enqueues into bounded channels and returns immediately, so the engine's
 /// hot path is never blocked by a slow receiver; overflow events are dropped (a notification is
-/// best-effort — the events table remains the source of truth). Delivery runs on one background
-/// loop started by the service host. Whatever the rate limit or the queue dropped is counted and
-/// reported as one summary per <see cref="SuppressionSummaryInterval"/>.
+/// best-effort — the events table remains the source of truth). Whatever the rate limit or a queue
+/// dropped is counted and reported as one summary per <see cref="SuppressionSummaryInterval"/>.
+/// </para>
+/// <para>
+/// Delivery runs on two background loops started by the service host, each with its own queue. The
+/// Windows Application log and syslog are the record a SIEM relies on, and neither waits for the
+/// network here; webhook, Telegram and SMTP can each take many seconds to fail. With one loop a
+/// dead receiver held every later event back from the SIEM and filled the shared queue, so a
+/// webhook that hangs now costs chat notifications and nothing else.
 /// </para>
 /// <para>
 /// A webhook URL and a Telegram token are secrets (whoever holds one can post to the channel), so
@@ -169,29 +175,34 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
     private readonly WindowsEventLogWriter? _windowsEventLog;
     private readonly SyslogSender _syslog;
     private readonly TimeProvider _timeProvider;
-    private readonly Channel<LogEvent> _queue;
+    private readonly Channel<LogEvent> _siemQueue;
+    private readonly Channel<LogEvent> _channelQueue;
     private readonly object _rateLock = new();
     private readonly Queue<DateTime> _recentSends = new();
 
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
     private CancellationTokenSource? _cts;
-    private Task? _loop;
+    private Task? _loops;
     private bool _disposed;
 
     // Guarded by _rateLock.
     private long _suppressed;
     private DateTime _suppressedSinceUtc;
 
-    // The delivery loop's only writer; a change of URL warns again.
+    // The summary on its way to the channels. It waits here rather than in the queue, so a full
+    // queue cannot swallow the news of its own overflow.
+    private LogEvent? _pendingSummary;
+
+    // The channel loop is the only writer; a change of URL warns again.
     private string? _warnedPlainHttpUrl;
 
     /// <summary>Creates the dispatcher.</summary>
     /// <param name="settingsAccessor">Live settings (channels are re-read per event).</param>
     /// <param name="logger">Diagnostic logger.</param>
     /// <param name="windowsEventLog">
-    /// Optional Windows Application-log writer, delivered on the dispatcher's background loop so
-    /// the engine's hot path never performs event-log I/O. Honors its own settings toggle,
+    /// Optional Windows Application-log writer, delivered on the dispatcher's SIEM loop so the
+    /// engine's hot path never performs event-log I/O. Honors its own settings toggle,
     /// independent of the notification master switch.
     /// </param>
     /// <param name="httpClient">Optional HTTP client (tests inject one and keep ownership); created when null.</param>
@@ -223,17 +234,11 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         _httpClient = httpClient ?? new HttpClient();
         _timeProvider = timeProvider ?? TimeProvider.System;
 
-        // TryWrite reports success even when DropWrite discards the item; only this callback knows.
-        _queue = Channel.CreateBounded<LogEvent>(
-            new BoundedChannelOptions(500)
-            {
-                SingleReader = true,
-                FullMode = BoundedChannelFullMode.DropWrite,
-            },
-            _ => NoteSuppressed());
+        _siemQueue = CreateQueue();
+        _channelQueue = CreateQueue();
     }
 
-    /// <summary>How often the idle loop checks for a summary that is due.</summary>
+    /// <summary>How often an idle loop checks for a summary that is due.</summary>
     internal TimeSpan SummaryPollInterval { get; init; } = TimeSpan.FromSeconds(15);
 
     /// <summary>Notifications dropped since the last summary.</summary>
@@ -250,10 +255,19 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
 
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
 
-    /// <summary>Starts the delivery loop.</summary>
+    // TryWrite reports success even when DropWrite discards the item; only the callback knows.
+    private Channel<LogEvent> CreateQueue() => Channel.CreateBounded<LogEvent>(
+        new BoundedChannelOptions(500)
+        {
+            SingleReader = true,
+            FullMode = BoundedChannelFullMode.DropWrite,
+        },
+        _ => NoteSuppressed());
+
+    /// <summary>Starts the delivery loops.</summary>
     public void Start()
     {
-        if (_loop is not null)
+        if (_loops is not null)
         {
             return;
         }
@@ -261,19 +275,21 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
         _syslog.Start();
-        _loop = Task.Run(() => DeliverLoopAsync(token), CancellationToken.None);
+        _loops = Task.WhenAll(
+            Task.Run(() => SiemLoopAsync(token), CancellationToken.None),
+            Task.Run(() => ChannelLoopAsync(token), CancellationToken.None));
         _logger.LogInformation("Notification dispatcher started.");
     }
 
-    /// <summary>Stops the delivery loop and waits for it to finish (drops pending events).</summary>
+    /// <summary>Stops the delivery loops and waits for them to finish (drops pending events).</summary>
     public async Task StopAsync()
     {
         _cts?.Cancel();
-        if (_loop is not null)
+        if (_loops is not null)
         {
             try
             {
-                await _loop.ConfigureAwait(false);
+                await _loops.ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -284,7 +300,7 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
             }
         }
 
-        _loop = null;
+        _loops = null;
         await _syslog.StopAsync().ConfigureAwait(false);
 
         // The summary that was not due yet, so the count is not lost with the process.
@@ -308,7 +324,13 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
 
         try
         {
-            _queue.Writer.TryWrite(logEvent);
+            _siemQueue.Writer.TryWrite(logEvent);
+
+            // Read here, not at delivery: with the channels off the queue would only fill up.
+            if (_settingsAccessor()?.Notifications is { Enabled: true })
+            {
+                _channelQueue.Writer.TryWrite(logEvent);
+            }
         }
         catch (Exception)
         {
@@ -316,9 +338,10 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         }
     }
 
-    private async Task DeliverLoopAsync(CancellationToken ct)
+    /// <summary>The Windows Application log and syslog. Nothing here waits for a remote receiver.</summary>
+    private async Task SiemLoopAsync(CancellationToken ct)
     {
-        var reader = _queue.Reader;
+        var reader = _siemQueue.Reader;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -329,11 +352,7 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
                 {
                     try
                     {
-                        await DeliverOnceAsync(logEvent, ct).ConfigureAwait(false);
-                    }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                    {
-                        throw;
+                        DeliverToSiem(logEvent);
                     }
                     catch (Exception ex)
                     {
@@ -345,15 +364,47 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
                 // nothing else would ever wake this up.
                 try
                 {
-                    await FlushSuppressedAsync(ct).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                {
-                    throw;
+                    FlushSuppressed();
                 }
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "Could not report suppressed notifications.");
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Normal stop.
+        }
+    }
+
+    /// <summary>Webhook, Telegram and SMTP, one event at a time, however long each takes.</summary>
+    private async Task ChannelLoopAsync(CancellationToken ct)
+    {
+        var reader = _channelQueue.Reader;
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await WaitForWorkAsync(reader, ct).ConfigureAwait(false);
+                await SendPendingSummaryAsync(ct).ConfigureAwait(false);
+
+                while (reader.TryRead(out var logEvent))
+                {
+                    try
+                    {
+                        await DeliverToChannelsAsync(logEvent, ct).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Notification delivery failed for '{Message}'.", logEvent.Message);
+                    }
+
+                    await SendPendingSummaryAsync(ct).ConfigureAwait(false);
                 }
             }
         }
@@ -378,21 +429,24 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         }
     }
 
-    private async Task DeliverOnceAsync(LogEvent logEvent, CancellationToken ct)
+    /// <summary>
+    /// The Windows Application log and syslog are delivered regardless of the notification master
+    /// switch (they have their own toggles) and are not rate limited: SIEM consumers want full
+    /// fidelity. Syslog only queues here, so a hanging receiver holds nothing back.
+    /// </summary>
+    private void DeliverToSiem(LogEvent logEvent)
     {
         var settings = _settingsAccessor();
-        var notifications = settings?.Notifications;
-
-        // The Windows Application log and syslog are delivered regardless of the notification master
-        // switch (they have their own toggles) and are not rate limited: SIEM consumers want full
-        // fidelity. Syslog only queues here, so a hanging receiver holds nothing back.
         if (settings is not null)
         {
             _windowsEventLog?.Write(logEvent, settings.Notifications);
-            _syslog.Enqueue(logEvent, notifications?.Syslog);
+            _syslog.Enqueue(logEvent, settings.Notifications?.Syslog);
         }
+    }
 
-        if (notifications is not { Enabled: true })
+    private async Task DeliverToChannelsAsync(LogEvent logEvent, CancellationToken ct)
+    {
+        if (_settingsAccessor()?.Notifications is not { Enabled: true } notifications)
         {
             return;
         }
@@ -449,11 +503,12 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
     }
 
     /// <summary>
-    /// Reports what was dropped once the summary is due. The summary skips the rate limit, or a
-    /// sustained storm would suppress the news of its own suppression; at one per
+    /// Reports what was dropped once the summary is due: to the SIEM outputs here and now, and to the
+    /// channels through their loop, so a dead receiver cannot delay it. The summary skips the rate
+    /// limit, or a sustained storm would suppress the news of its own suppression; at one per
     /// <see cref="SuppressionSummaryInterval"/> it cannot flood anything.
     /// </summary>
-    internal async Task FlushSuppressedAsync(CancellationToken ct)
+    internal void FlushSuppressed()
     {
         long count;
         TimeSpan period;
@@ -478,16 +533,32 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         };
         _logger.LogWarning("{Message}", summary.Message);
 
-        var settings = _settingsAccessor();
-        if (settings is not null)
+        DeliverToSiem(summary);
+        Volatile.Write(ref _pendingSummary, summary);
+    }
+
+    private async Task SendPendingSummaryAsync(CancellationToken ct)
+    {
+        var summary = Interlocked.Exchange(ref _pendingSummary, null);
+        if (summary is null)
         {
-            _windowsEventLog?.Write(summary, settings.Notifications);
-            _syslog.Enqueue(summary, settings.Notifications?.Syslog);
+            return;
         }
 
-        if (settings?.Notifications is { Enabled: true } notifications)
+        try
         {
-            await SendToChannelsAsync(notifications, summary, ct).ConfigureAwait(false);
+            if (_settingsAccessor()?.Notifications is { Enabled: true } notifications)
+            {
+                await SendToChannelsAsync(notifications, summary, ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not report suppressed notifications.");
         }
     }
 
@@ -672,7 +743,7 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
 /// <see cref="NotificationSettings.WriteToWindowsEventLog"/> (default on).
 /// <para>
 /// <see cref="Publish"/> stays on the calling (engine) path only to enqueue; the actual event-log
-/// I/O is expected to run on the notification dispatcher's background loop via <see cref="Write"/>,
+/// I/O is expected to run on the notification dispatcher's SIEM loop via <see cref="Write"/>,
 /// which is also safe to call directly.
 /// </para>
 /// </summary>

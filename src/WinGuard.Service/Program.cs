@@ -177,8 +177,9 @@ internal static class Program
                 () => sp.GetRequiredService<SettingsHolder>().Current));
 
         // Event fan-out: warning/error engine events are enqueued (never blocking the engine path)
-        // and delivered by one background loop — to the Windows Application event log (SIEM
-        // friendly, opt-out via settings) and to the configured notification channels.
+        // and delivered by two background loops: one to the Windows Application event log (SIEM
+        // friendly, opt-out via settings) and syslog, one to the configured notification channels,
+        // so a receiver that hangs cannot hold the SIEM outputs back.
         builder.Services.AddSingleton(sp => new NotificationDispatcher(
             () => sp.GetRequiredService<SettingsHolder>().Current,
             sp.GetRequiredService<ILogger<NotificationDispatcher>>(),

@@ -422,7 +422,7 @@ public sealed class NotificationDeliveryTests
     }
 
     [Fact]
-    public async Task A_quiet_period_sends_no_summary()
+    public void A_quiet_period_sends_no_summary()
     {
         var time = new FakeTimeProvider(T0);
         var http = new RecordingHandler();
@@ -430,13 +430,13 @@ public sealed class NotificationDeliveryTests
         using var dispatcher = new NotificationDispatcher(() => Settings(rateLimit: 1), NullLogger<NotificationDispatcher>.Instance, null, client, time);
 
         time.Advance(TimeSpan.FromHours(1));
-        await dispatcher.FlushSuppressedAsync(CancellationToken.None);
+        dispatcher.FlushSuppressed();
 
         Assert.Empty(http.Requests);
     }
 
     [Fact]
-    public async Task A_summary_goes_to_the_event_log_with_its_id_even_with_the_channels_off()
+    public void A_summary_goes_to_the_event_log_with_its_id_even_with_the_channels_off()
     {
         var time = new FakeTimeProvider(T0);
         var written = new List<(string Message, EventLogEntryType Type, int Id)>();
@@ -453,7 +453,7 @@ public sealed class NotificationDeliveryTests
         Assert.Equal(3, dispatcher.SuppressedCount);
 
         time.Advance(NotificationDispatcher.SuppressionSummaryInterval);
-        await dispatcher.FlushSuppressedAsync(CancellationToken.None);
+        dispatcher.FlushSuppressed();
 
         var entry = Assert.Single(written);
         Assert.Equal(WinGuardEventIds.NotificationsSuppressed, entry.Id);
@@ -475,6 +475,119 @@ public sealed class NotificationDeliveryTests
         await dispatcher.StopAsync();
 
         Assert.Contains("1 notification(s) were suppressed", log.Text);
+    }
+
+    // ---- a receiver that hangs ----
+
+    [Fact]
+    public async Task A_webhook_that_hangs_does_not_hold_back_the_event_log()
+    {
+        var written = new List<string>();
+        var writer = new WindowsEventLogWriter(NullLogger.Instance, (message, _, _) =>
+        {
+            lock (written)
+            {
+                written.Add(message);
+            }
+        });
+        using var client = new HttpClient(new HangingHandler());
+        using var dispatcher = new NotificationDispatcher(() => Settings(), NullLogger<NotificationDispatcher>.Instance, writer, client);
+        dispatcher.Start();
+
+        for (var i = 0; i < 3; i++)
+        {
+            dispatcher.Publish(Blocked($"203.0.113.{i + 1}"));
+        }
+
+        await WaitUntilAsync(
+            () =>
+            {
+                lock (written)
+                {
+                    return written.Count == 3;
+                }
+            },
+            "all three events in the event log");
+        await dispatcher.StopAsync();
+    }
+
+    [Fact]
+    public async Task A_full_channel_queue_costs_chat_notifications_and_no_siem_event()
+    {
+        var written = 0;
+        var writer = new WindowsEventLogWriter(NullLogger.Instance, (_, _, _) => Interlocked.Increment(ref written));
+        var settings = Settings(rateLimit: 100_000);
+        using var client = new HttpClient(new HangingHandler());
+        using var dispatcher = new NotificationDispatcher(() => settings, NullLogger<NotificationDispatcher>.Instance, writer, client);
+        dispatcher.Start();
+
+        // In steps the SIEM queue can take, so that only the queue behind the hung webhook overflows.
+        const int Step = 100;
+        const int Events = 700;
+        for (var sent = Step; sent <= Events; sent += Step)
+        {
+            for (var i = 0; i < Step; i++)
+            {
+                dispatcher.Publish(Blocked());
+            }
+
+            await WaitUntilAsync(() => Volatile.Read(ref written) == sent, "every event in the event log");
+        }
+
+        // The one in flight plus the 500 waiting survive; the rest are counted.
+        Assert.True(dispatcher.SuppressedCount >= Events - 501, $"{dispatcher.SuppressedCount} dropped");
+        await dispatcher.StopAsync();
+    }
+
+    [Fact]
+    public async Task A_summary_reaches_the_event_log_while_the_webhook_hangs()
+    {
+        var time = new FakeTimeProvider(T0);
+        var written = new List<int>();
+        var writer = new WindowsEventLogWriter(NullLogger.Instance, (_, _, id) =>
+        {
+            lock (written)
+            {
+                written.Add(id);
+            }
+        });
+        using var client = new HttpClient(new HangingHandler());
+        using var dispatcher = new NotificationDispatcher(() => Settings(rateLimit: 1), NullLogger<NotificationDispatcher>.Instance, writer, client, time)
+        {
+            SummaryPollInterval = TimeSpan.FromMilliseconds(10),
+        };
+        dispatcher.Start();
+
+        // The first event takes the webhook down with it; the second waits behind it, unsent.
+        dispatcher.Publish(Blocked("203.0.113.1"));
+        dispatcher.Publish(Blocked("203.0.113.2"));
+        for (var i = 0; i < 600; i++)
+        {
+            dispatcher.Publish(Blocked("203.0.113.3"));
+        }
+
+        await WaitUntilAsync(() => dispatcher.SuppressedCount > 0, "the overflow");
+        time.Advance(NotificationDispatcher.SuppressionSummaryInterval);
+
+        await WaitUntilAsync(
+            () =>
+            {
+                lock (written)
+                {
+                    return written.Contains(WinGuardEventIds.NotificationsSuppressed);
+                }
+            },
+            "the summary");
+        await dispatcher.StopAsync();
+    }
+
+    private sealed class HangingHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        }
     }
 
     // ---- shutdown ----
