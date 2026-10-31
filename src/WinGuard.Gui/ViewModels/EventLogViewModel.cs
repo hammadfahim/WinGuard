@@ -188,10 +188,12 @@ public sealed partial class EventLogViewModel : ObservableObject
         if (IsPaused)
         {
             _pending.AddRange(events);
-            if (_pending.Count > MaxEntries)
+            // One short of the feed's capacity: the notice of what was dropped has to fit in it.
+            if (_pending.Count >= MaxEntries)
             {
-                _pendingDropped += _pending.Count - MaxEntries;
-                _pending.RemoveRange(0, _pending.Count - MaxEntries);
+                var dropped = _pending.Count - MaxEntries + 1;
+                _pendingDropped += dropped;
+                _pending.RemoveRange(0, dropped);
             }
 
             UnseenCount = _pending.Count;
@@ -249,6 +251,19 @@ public sealed partial class EventLogViewModel : ObservableObject
         }
 
         SearchText = string.Empty;
+        Rebuild();
+        ScrollToEndRequested?.Invoke();
+    }
+
+    /// <summary>Shows one address across every level and engine: used by the dashboard's alerts.</summary>
+    public void ShowAddress(string ip)
+    {
+        foreach (var chip in LevelChips.Concat(SourceChips))
+        {
+            chip.Set(true);
+        }
+
+        SearchText = ip;
         Rebuild();
         ScrollToEndRequested?.Invoke();
     }

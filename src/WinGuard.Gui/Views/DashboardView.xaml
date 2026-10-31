@@ -45,6 +45,71 @@
                 </StackPanel>
             </DockPanel>
 
+            <!-- A possible compromise: the one event that outranks everything else on this page. -->
+            <Border Style="{StaticResource Callout}" ui:Ui.Tone="Attack" BorderBrush="{DynamicResource AttackBrush}" Padding="14,10"
+                    Margin="{StaticResource GapBottom12}" AutomationProperties.LiveSetting="Assertive"
+                    AutomationProperties.Name="{Binding CompromiseTitle}"
+                    Visibility="{Binding HasCompromiseAlerts, Converter={StaticResource BoolToVis}}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Style="{StaticResource ToneIcon}" ui:Ui.Tone="Attack" Text="{StaticResource GlyphWarning}" FontSize="17"
+                               VerticalAlignment="Top" Margin="0,1,12,0" />
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Style="{StaticResource TextStrong}" FontSize="{StaticResource FontSizeHeading}" Text="{Binding CompromiseTitle}" TextWrapping="Wrap" />
+                        <TextBlock Style="{StaticResource TextBody}" FontSize="{StaticResource FontSizeCaption}" TextWrapping="Wrap" Margin="0,2,0,6"
+                                   Text="Check that each logon was really that person. If not, change the password and block the address." />
+                        <ItemsControl ItemsSource="{Binding CompromiseAlerts}" Focusable="False">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Margin="0,2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Style="{StaticResource TextBody}" Text="{Binding Text}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Text}" />
+                                        <TextBlock Grid.Column="1" Style="{StaticResource TextCaption}" Text="{Binding AgoText}" VerticalAlignment="Center" Margin="12,0,0,0" />
+                                        <Button Grid.Column="2" Height="{StaticResource ControlHeightSmall}" Margin="12,0,0,0" Content="Show events"
+                                                Command="{Binding DataContext.OpenAlertCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                CommandParameter="{Binding}" ToolTip="See everything from this address in the Event Log" />
+                                        <Button Grid.Column="3" Style="{StaticResource IconButtonSmall}" ui:Ui.Icon="{StaticResource GlyphClose}" FontSize="10" Margin="4,0,0,0"
+                                                Command="{Binding DataContext.DismissAlertCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                CommandParameter="{Binding}" ToolTip="Dismiss. The event stays in the log" AutomationProperties.Name="Dismiss this alert" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- The firewall policy: when it applies, nothing else on this page is worth much. -->
+            <Border Style="{StaticResource Callout}" ui:Ui.Tone="{Binding FirewallPolicyTone}" Padding="14,10" Margin="{StaticResource GapBottom12}"
+                    Visibility="{Binding HasFirewallPolicyWarnings, Converter={StaticResource BoolToVis}}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Style="{StaticResource ToneIcon}" ui:Ui.Tone="{Binding FirewallPolicyTone}" Text="{StaticResource GlyphWarning}" FontSize="17"
+                               VerticalAlignment="Top" Margin="0,1,12,0" />
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Style="{StaticResource TextStrong}" FontSize="{StaticResource FontSizeHeading}" Text="{Binding FirewallPolicyTitle}" TextWrapping="Wrap" />
+                        <ItemsControl ItemsSource="{Binding FirewallPolicyWarnings}" Focusable="False" Margin="0,2,0,0">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <TextBlock Style="{StaticResource TextBody}" Text="{Binding}" TextWrapping="Wrap" Margin="0,1" />
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
             <!-- Hero: where things stand, and what is happening right now. -->
             <Border Style="{StaticResource Card}" Padding="0" Margin="{StaticResource GapBottom12}">
                 <Grid>

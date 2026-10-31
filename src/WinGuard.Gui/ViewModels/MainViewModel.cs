@@ -77,6 +77,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             EventLog.ShowEngine(source);
             SelectedNavigation = NavigationItems[2];
         };
+        Dashboard.ShowAddressRequested += ip =>
+        {
+            EventLog.ShowAddress(ip);
+            SelectedNavigation = NavigationItems[2];
+        };
         Dashboard.ShowStatisticsRequested += () => SelectedNavigation = NavigationItems[3];
         Dashboard.ShowSettingsRequested += section =>
         {
@@ -369,6 +374,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private void OnClockTick(object? sender, EventArgs e)
     {
         Toasts.Prune(DateTime.UtcNow);
+        Dashboard.Tick();
         if (ReferenceEquals(CurrentViewModel, BlockedIps))
         {
             BlockedIps.Tick();

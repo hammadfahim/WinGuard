@@ -7,12 +7,21 @@ namespace WinGuard.Gui.ViewModels;
 /// <summary>Presentation wrapper for one <see cref="EventDto"/> in the live event feed.</summary>
 public sealed class EventRowViewModel
 {
+    private const string CompromisePrefix = "POSSIBLE COMPROMISE:";
+
     /// <summary>Creates a row from the DTO.</summary>
     /// <param name="dto">Event received from the service.</param>
-    public EventRowViewModel(EventDto dto) => Dto = dto;
+    public EventRowViewModel(EventDto dto)
+    {
+        Dto = dto;
+        IsCompromise = IsCompromiseEvent(dto);
+    }
 
     /// <summary>The underlying DTO.</summary>
     public EventDto Dto { get; }
+
+    /// <summary>A logon that may mean an attacker got in: the most prominent row in the feed.</summary>
+    public bool IsCompromise { get; }
 
     /// <summary>Local timestamp text.</summary>
     public string TimeText => Services.TimeText.Stamp(Dto.TimestampUtc);
@@ -28,8 +37,11 @@ public sealed class EventRowViewModel
         _ => "Info",
     };
 
+    /// <summary>What the level column shows. The filters keep going by <see cref="LevelText"/>.</summary>
+    public string LevelLabel => IsCompromise ? "Alert" : LevelText;
+
     /// <summary>Severity as a meaning, so colour and icon stay consistent with the rest of the console.</summary>
-    public Tone Tone => Dto.Level switch
+    public Tone Tone => IsCompromise ? Tone.Attack : Dto.Level switch
     {
         LogEventLevel.Error => Tone.Attack,
         LogEventLevel.Warning => Tone.Warn,
@@ -63,4 +75,15 @@ public sealed class EventRowViewModel
     public static bool IsBlock(EventDto dto) =>
         dto.Message.StartsWith("BLOCKED ", StringComparison.Ordinal)
         || dto.Message.StartsWith("MANUAL BLOCK ", StringComparison.Ordinal);
+
+    /// <summary>
+    /// True for a logon the engine found suspicious. Like <see cref="IsBlock"/> this follows the
+    /// engine's message prefix. It starts the message, so an attacker's chosen user name cannot fake it.
+    /// </summary>
+    public static bool IsCompromiseEvent(EventDto dto) =>
+        dto.Message.StartsWith(CompromisePrefix, StringComparison.Ordinal);
+
+    /// <summary>The message of a compromise event without its prefix, as a sentence of its own.</summary>
+    public static string CompromiseText(EventDto dto) =>
+        IsCompromiseEvent(dto) ? dto.Message[CompromisePrefix.Length..].Trim() : dto.Message;
 }
