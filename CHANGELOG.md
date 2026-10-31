@@ -5,6 +5,49 @@ All notable changes to WinGuard are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Per-engine port profiles**: ban an attacker on the attacked service's ports only, with presets
+  for RDP, MS SQL, FTP and SSH. The default stays all ports, and a port-scoped ban widens when the
+  same address attacks another engine.
+- **Local blocklist files**: block lists the administrator downloaded (Spamhaus DROP format works),
+  capped at 50,000 entries, with whitelisted and internal ranges cut out. WinGuard fetches nothing.
+- **Detection rules** (all off by default): honeypot usernames, password spraying from one IP, slow
+  brute force across engines, `POSSIBLE COMPROMISE` alerts on a successful logon after failures, and
+  optional short-lived trust of an administrator's address.
+- **Break-glass recovery**: `--disarm [--minutes N]` and `--rearm` work with the service down, are
+  bounded to 24 hours and end by themselves. `--doctor` warns when Group Policy makes Windows ignore
+  local firewall rules.
+- **Encrypted secrets**: the SMTP password, Telegram token and webhook URL are stored with DPAPI.
+- **Monitoring**: a Prometheus textfile for windows_exporter and a syslog notification channel (RFC
+  5424 or CEF). No listening port.
+- **New console**: redesigned shell, dashboard, Blocked IPs, Event log, Statistics, Lists and
+  Settings, with in-app toasts, confirmation dialogs, keyboard shortcuts, bulk actions, live
+  countdowns, interactive charts and a regex tester for custom sources.
+- `OffenseMemory` (default 90 days) and `BanHistoryRetentionDays` (default 365).
+- CI fails on vulnerable packages; release builds are signed when `WINGUARD_SIGNING_PFX_BASE64` and
+  `WINGUARD_SIGNING_PFX_PASSWORD` are configured.
+
+### Changed
+
+- **Protocol version 5**: use a matching console and service. An older console saving settings could
+  reset the new options, so the two are versioned together.
+- **Database schema 5**: offense counts move to their own table and bans record their port scope.
+  Existing data is migrated in place; downgrading loses escalation counts.
+- With `BlockedPorts` set, new manual bans, blacklist bans and blacklisted ranges now block **all**
+  ports.
+- `ban_history` is pruned after `BanHistoryRetentionDays` instead of growing forever.
+- Report-only mode now never touches the firewall: rules that already exist stay until it is
+  switched off, even if their ban is lifted.
+- CGNAT (100.64.0.0/10) and benchmarking (198.18.0.0/15) addresses count as internal; a NAT64 address
+  is judged by the IPv4 address inside it.
+- Manual bans are labelled Manual instead of Custom.
+- The console now verifies that the service's pipe is owned by SYSTEM or an elevated administrator,
+  and refuses it otherwise.
+- Setup now stops with an error if it cannot secure the data folder or stop the service.
+- Webhook payloads changed so Slack, Discord, Mattermost and Teams-style receivers accept them.
+  Windows events have stable IDs per event type, listed in `SECURITY.md`.
+
 ### Fixed
 
 - **The whitelist now wins over range blocks.** Windows block rules beat allow rules, so a
@@ -24,6 +67,16 @@ All notable changes to WinGuard are documented here. The format follows
 - **A database failure no longer stops blocking.** The firewall block now comes first. While the
   store refuses writes, failures are counted in memory and unsaved bans stay enforced until
   housekeeping can save them.
+- Blacklisted ranges stay enforced across a restart; an unreadable database at start-up no longer
+  wipes the firewall rules.
+- Escalation no longer resets 4 days after a ban ends.
+- `--doctor` can now actually fail its firewall check.
+- The IIS HTTP recipe matches real W3C logs and counts real logon failures only; the hMailServer
+  and VNC recipes were rewritten against their real log formats, and saved sources upgrade on load.
+- Two custom sources can share a file; UTF-16 logs are read; rotated logs are not lost; a crafted
+  line can no longer hide later attempts through a regex timeout.
+- Log forging through newlines in attacker-controlled text, and URLs leaking into logs.
+- Expired bans now notify; a suppressed-notification summary shows what the rate limit dropped.
 
 ## [0.2.0] — 2026-10-07
 
