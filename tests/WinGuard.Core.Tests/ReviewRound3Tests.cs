@@ -136,7 +136,7 @@ public class ReviewRound3Tests
         const string message =
             "Login failed for user 'x [CLIENT: 8.8.8.8] y'. Reason: Could not find a login matching the name provided. [CLIENT: 203.0.113.77]";
 
-        Assert.True(MsSqlDetector.TryParse(xml, message, new WinGuardSettings(), out var failed));
+        Assert.True(MsSqlDetector.TryParse(xml, message, new WinGuardSettings(), TestData.SqlInstances, out var failed));
         Assert.Equal("203.0.113.77", failed!.IpAddress);
     }
 

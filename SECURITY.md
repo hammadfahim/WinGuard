@@ -70,6 +70,12 @@ Public disclosure is coordinated with you after a fix is released.
 - Old plaintext values keep working. The service encrypts them at its next start; a `--console`
   run leaves them alone, because whatever it encrypts only that administrator can read. A value
   that cannot be encrypted is refused, never stored in the clear.
+- The old plaintext then has to leave the database files as well. That one write runs with SQLite's
+  `secure_delete`, a `VACUUM` drops the copies earlier saves left in free pages and page slack, and
+  a checkpoint carries the result into the main file. Windows gives a service 30 seconds to start,
+  so the `VACUUM` is skipped above 64 MB, and such a file can keep old copies until SQLite reuses
+  those pages. A clean-up that fails is logged and does not stop the start. Backups and copies made
+  earlier are out of reach: if that matters, replace a secret that was ever stored in the clear.
 - A secret that cannot be decrypted (the database moved to another machine, or `--console` reading
   what the service stored) acts as empty and is reported once, and the channel stays off. Its
   ciphertext stays in the database through every later save, so a console run cannot destroy it;
@@ -95,6 +101,14 @@ Public disclosure is coordinated with you after a fix is released.
 - WinGuard reads Windows event logs and local log files; log *content* is treated as untrusted
   input everywhere (regex timeouts, bounded reads, SQL parameters, no DNS resolution). Line breaks
   and control characters are escaped in the log file, so a user name cannot forge a log entry.
+- **SQL Server events can be forged on a SQL host.** Interactive users, services and batch jobs may
+  write to the Application log under any source name, so event 18456 counts only when its provider
+  is a SQL Server instance installed on this machine (`MSSQLSERVER` or `MSSQL$NAME`, read from the
+  registry and read again every few minutes). Where no SQL Server is installed these events are
+  ignored. On a real SQL host, a local user can still write such events and get a chosen address
+  banned: nothing in the event tells a forgery apart, and its `Security UserID` is supplied by the
+  caller of `ReportEvent`, with no check Microsoft documents. If untrusted users can log on to a
+  SQL host, whitelist the addresses that must stay reachable, or turn the MS SQL engine off.
 - Traffic sniffing, kernel drivers and remote management are out of scope by design.
 
 ## Windows Event Log ids

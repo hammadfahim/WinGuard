@@ -50,7 +50,7 @@ public sealed class DetectorEdgeCaseTests
         var xml = TestData.ReadText("mssql-18456.xml").Replace("<Data>sa</Data>", "<Data>Failed to open the explicitly specified database</Data>");
         const string message = "Login failed for user 'Failed to open the explicitly specified database'. Reason: Password did not match that for the login provided. [CLIENT: 203.0.113.77]";
 
-        Assert.True(MsSqlDetector.TryParse(xml, message, TestData.NewSettings(), out var failed));
+        Assert.True(MsSqlDetector.TryParse(xml, message, TestData.NewSettings(), TestData.SqlInstances, out var failed));
         Assert.Equal("203.0.113.77", failed!.IpAddress);
     }
 
@@ -62,7 +62,7 @@ public sealed class DetectorEdgeCaseTests
         settings.MsSql.IgnoreMessagePatterns = ["Password did not match"];
         const string message = "Login failed for user 'sa'. Reason: Password did not match that for the login provided. [CLIENT: 203.0.113.77]";
 
-        Assert.False(MsSqlDetector.TryParse(xml, message, settings, out _));
+        Assert.False(MsSqlDetector.TryParse(xml, message, settings, TestData.SqlInstances, out _));
     }
 
     // ---------- exclusion wildcards ----------
