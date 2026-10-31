@@ -5,6 +5,8 @@ All notable changes to WinGuard are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-11-01
+
 ### Added
 
 - **An application icon**: a shield with a keyhole, on the program files, shortcuts, taskbar, window
