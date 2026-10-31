@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection;
 using Microsoft.Extensions.Logging;
 using WinGuard.Core.Config;
@@ -419,6 +420,115 @@ public sealed class BanEngineResilienceTests
 
         Assert.DoesNotContain(Attacker, h.Firewall.Blocked);
         Assert.Null(await h.Store.GetBanAsync(Attacker));
+    }
+
+    // ---------- replay is older than the count window ----------
+
+    private static Task<EngineHarness> AfterDowntimeAsync(TimeSpan downtime, Func<FakeStore, Task>? seed = null) =>
+        EngineHarness.StartAsync(T0, seed: async store =>
+        {
+            await store.SetSettingAsync("engine_last_alive_utc", (T0 - downtime).UtcDateTime.ToString("o", CultureInfo.InvariantCulture));
+            if (seed is not null)
+            {
+                await seed(store);
+            }
+        });
+
+    private static FailedLogin Replayed(EngineHarness h, DateTimeOffset at)
+    {
+        var failed = h.Fail(Attacker, ProtocolSource.MsSql, at: at.UtcDateTime);
+        failed.IsReplayed = true;
+        return failed;
+    }
+
+    [Theory]
+    [InlineData(5, false)]
+    [InlineData(15, false)]
+    [InlineData(5, true)]
+    [InlineData(15, true)]
+    public async Task A_burst_during_downtime_bans_after_replay(int minutesAgo, bool newestFirst)
+    {
+        await using var h = await AfterDowntimeAsync(TimeSpan.FromMinutes(20));
+        var attempts = Enumerable.Range(0, 20).Select(i => T0.AddMinutes(-minutesAgo).AddSeconds(i));
+
+        foreach (var at in newestFirst ? attempts.Reverse() : attempts)
+        {
+            await h.ProcessAsync(Replayed(h, at));
+        }
+
+        Assert.Contains(Attacker, h.Firewall.Blocked);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Replayed_failures_too_far_apart_for_one_window_ban_nobody(bool newestFirst)
+    {
+        await using var h = await AfterDowntimeAsync(TimeSpan.FromMinutes(30));
+        var attempts = Enumerable.Range(0, 7).Select(i => T0.AddMinutes(-25 + (i * 3)));
+
+        foreach (var at in newestFirst ? attempts.Reverse() : attempts)
+        {
+            await h.ProcessAsync(Replayed(h, at));
+        }
+
+        Assert.Empty(h.Firewall.Blocked);
+        Assert.Equal(7, h.Store.FailedLogins.Count);
+    }
+
+    [Fact]
+    public async Task A_burst_older_than_the_replay_window_bans_nobody()
+    {
+        await using var h = await AfterDowntimeAsync(TimeSpan.FromHours(3));
+
+        for (var i = 0; i < 20; i++)
+        {
+            await h.ProcessAsync(Replayed(h, T0.AddHours(-2).AddSeconds(i)));
+        }
+
+        Assert.Empty(h.Firewall.Blocked);
+    }
+
+    [Fact]
+    public async Task Replay_counts_together_with_what_the_last_run_stored_before_it_stopped()
+    {
+        await using var h = await AfterDowntimeAsync(TimeSpan.FromMinutes(15), async store =>
+        {
+            for (var i = 0; i < 3; i++)
+            {
+                await store.AddFailedLoginAsync(new FailedLogin
+                {
+                    IpAddress = Attacker,
+                    Source = ProtocolSource.MsSql,
+                    TimestampUtc = T0.AddMinutes(-16).AddSeconds(i).UtcDateTime,
+                });
+            }
+        });
+
+        await h.ProcessAsync(Replayed(h, T0.AddMinutes(-14)));
+        Assert.Empty(h.Firewall.Blocked);
+
+        await h.ProcessAsync(Replayed(h, T0.AddMinutes(-13)));
+
+        Assert.Contains(Attacker, h.Firewall.Blocked);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_replayed_burst_bans_while_the_store_refuses_it(bool newestFirst)
+    {
+        await using var h = await AfterDowntimeAsync(TimeSpan.FromMinutes(20));
+        h.Store.FailWrites = true;
+        h.Store.FailFailureReads = true;
+        var attempts = Enumerable.Range(0, 5).Select(i => T0.AddMinutes(-15).AddSeconds(i));
+
+        foreach (var at in newestFirst ? attempts.Reverse() : attempts)
+        {
+            await h.ProcessAsync(Replayed(h, at));
+        }
+
+        Assert.Contains(Attacker, h.Firewall.Blocked);
     }
 
     // ---------- shutdown between the block and the save ----------

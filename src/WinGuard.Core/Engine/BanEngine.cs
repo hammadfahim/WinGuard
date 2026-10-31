@@ -895,10 +895,19 @@ public sealed partial class BanEngine
             window = settings.CountWindow;
         }
 
-        var since = now - window;
-        var count = alreadyCounted
-            ? await NameCountedAttemptAsync(failed, ct).ConfigureAwait(false)
-            : await CountFailureAsync(failed, since, ct).ConfigureAwait(false);
+        int count;
+        if (alreadyCounted)
+        {
+            count = await NameCountedAttemptAsync(failed, ct).ConfigureAwait(false);
+        }
+        else if (IsWithinReplayWindow(failed, settings, now))
+        {
+            count = await CountReplayedFailureAsync(failed, window, ct).ConfigureAwait(false);
+        }
+        else
+        {
+            count = await CountFailureAsync(failed, now - window, ct).ConfigureAwait(false);
+        }
 
         // 7. Threshold crossed or a detection rule fired -> escalate and ban.
         var threshold = Math.Max(1, settings.ThresholdFor(failed.Source));
@@ -1029,6 +1038,44 @@ public sealed partial class BanEngine
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             _logger.LogDebug(ex, "Could not read the stored failures of {Ip} either.", ip);
+            return inMemory;
+        }
+    }
+
+    /// <summary>Whether this replayed failure gets counted against its own time, see <see cref="CountReplayedFailureAsync"/>.</summary>
+    private static bool IsWithinReplayWindow(FailedLogin failed, WinGuardSettings settings, DateTime now) =>
+        failed.IsReplayed && now - failed.TimestampUtc <= TimeSpan.FromMinutes(settings.EventBacklogReplayMinutes);
+
+    /// <summary>
+    /// Records a replayed failure and returns the most failures in one count window it is at either
+    /// end of. Measured from now, a burst older than the window would ban nobody however heavy it
+    /// was, while the same burst minutes later would. Replay delivers a channel newest first, and
+    /// live events get in between, so the others can be on either side of this one: the window
+    /// reaching forward finds a burst arriving newest first, the one reaching back a burst arriving
+    /// oldest first, and neither takes in failures further apart than a live ban would.
+    /// </summary>
+    private async Task<int> CountReplayedFailureAsync(FailedLogin failed, TimeSpan window, CancellationToken ct)
+    {
+        var at = failed.TimestampUtc;
+        await CountFailureAsync(failed, at, ct).ConfigureAwait(false);
+        var reachingBack = await CountFailuresBetweenAsync(failed, at - window, at, ct).ConfigureAwait(false);
+        var reachingForward = await CountFailuresBetweenAsync(failed, at, at + window, ct).ConfigureAwait(false);
+        return Math.Max(reachingBack, reachingForward);
+    }
+
+    /// <summary>Failures of this IP and source between two moments, both included. What the store cannot say counts as none.</summary>
+    private async Task<int> CountFailuresBetweenAsync(FailedLogin failed, DateTime fromUtc, DateTime toUtc, CancellationToken ct)
+    {
+        var inMemory = _fallbackCounts.Count(failed.IpAddress, failed.Source, fromUtc, toUtc);
+        try
+        {
+            var fromThen = await _store.CountFailedLoginsAsync(failed.IpAddress, fromUtc, failed.Source, ct).ConfigureAwait(false);
+            var afterwards = await _store.CountFailedLoginsAsync(failed.IpAddress, toUtc.AddTicks(1), failed.Source, ct).ConfigureAwait(false);
+            return inMemory + fromThen - afterwards;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogDebug(ex, "Could not read the stored failures of {Ip}.", failed.IpAddress);
             return inMemory;
         }
     }
