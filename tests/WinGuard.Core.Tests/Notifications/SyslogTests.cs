@@ -477,7 +477,7 @@ public sealed class SyslogTests
         await WaitUntilAsync(() => dispatcher.SuppressedCount == 1, "the suppression");
 
         time.Advance(NotificationDispatcher.SuppressionSummaryInterval);
-        await dispatcher.FlushSuppressedAsync(CancellationToken.None);
+        dispatcher.FlushSuppressed();
         await WaitUntilAsync(() => transport.Sent.Count == 3, "the summary");
         await dispatcher.StopAsync();
 

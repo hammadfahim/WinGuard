@@ -41,9 +41,21 @@ Public disclosure is coordinated with you after a fix is released.
 - Over-broad list entries (`0.0.0.0/0`-style) are rejected by the IPC layer; the machine's own
   addresses are auto-whitelisted to prevent self-lockout.
 - The data directory under `%ProgramData%\WinGuard` is ACL-hardened to SYSTEM + Administrators by
-  the setup and by `--install`. A folder a standard user created first loses that user as owner, so
-  they cannot grant themselves access again, and setup stops if the folder cannot be secured or
-  turns out to be a link. A portable `--console` run does not touch the folder's ACL.
+  the setup and by `--install`, which run the same tested routine. It walks the folder without
+  following a link, through handles, so nothing can be swapped under it. A standard user cannot
+  make the Administrators group an owner, so the owner is what tells planted content from WinGuard's
+  own, and it is read before anything changes: whatever is a link, has more than one hard link, or
+  is not owned by SYSTEM or Administrators is **moved aside, never deleted and never made
+  trustworthy**, into a `Quarantine-*` folder inside the data folder, with a `quarantine.txt` saying
+  what came from where. A data folder that is itself foreign moves as a whole to a
+  `WinGuard.quarantine-*` folder next to it, and a new one takes its place. What stays gets
+  Administrators as owner and a protected DACL, each item on its own. Setup reports what it moved
+  and carries on, because setup that stops at a stray file leaves a machine unprotected. It stops
+  only if the folder is a link, or if something cannot be secured or moved; the service is then
+  started again as it was. A portable `--console` run does not touch the folder's ACL.
+- That check cannot look back. Content an older setup already made Administrators-owned stays
+  trusted. Files an administrator's own account created, as opposed to the group, count as foreign;
+  to keep one, give it to the group (`icacls <file> /setowner *S-1-5-32-544`) and move it back.
 - **Break-glass** (`--disarm [--minutes N]`, `--rearm`) needs no service: it is a drop file,
   `disarm.json` in the data folder, plus an immediate clear of the firewall rules by the command
   itself. Both verbs refuse a prompt that is not elevated. While a window is open the service holds
@@ -70,6 +82,12 @@ Public disclosure is coordinated with you after a fix is released.
 - Old plaintext values keep working. The service encrypts them at its next start; a `--console`
   run leaves them alone, because whatever it encrypts only that administrator can read. A value
   that cannot be encrypted is refused, never stored in the clear.
+- The old plaintext then has to leave the database files as well. That one write runs with SQLite's
+  `secure_delete`, a `VACUUM` drops the copies earlier saves left in free pages and page slack, and
+  a checkpoint carries the result into the main file. Windows gives a service 30 seconds to start,
+  so the `VACUUM` is skipped above 64 MB, and such a file can keep old copies until SQLite reuses
+  those pages. A clean-up that fails is logged and does not stop the start. Backups and copies made
+  earlier are out of reach: if that matters, replace a secret that was ever stored in the clear.
 - A secret that cannot be decrypted (the database moved to another machine, or `--console` reading
   what the service stored) acts as empty and is reported once, and the channel stays off. Its
   ciphertext stays in the database through every later save, so a console run cannot destroy it;
@@ -95,6 +113,14 @@ Public disclosure is coordinated with you after a fix is released.
 - WinGuard reads Windows event logs and local log files; log *content* is treated as untrusted
   input everywhere (regex timeouts, bounded reads, SQL parameters, no DNS resolution). Line breaks
   and control characters are escaped in the log file, so a user name cannot forge a log entry.
+- **SQL Server events can be forged on a SQL host.** Interactive users, services and batch jobs may
+  write to the Application log under any source name, so event 18456 counts only when its provider
+  is a SQL Server instance installed on this machine (`MSSQLSERVER` or `MSSQL$NAME`, read from the
+  registry and read again every few minutes). Where no SQL Server is installed these events are
+  ignored. On a real SQL host, a local user can still write such events and get a chosen address
+  banned: nothing in the event tells a forgery apart, and its `Security UserID` is supplied by the
+  caller of `ReportEvent`, with no check Microsoft documents. If untrusted users can log on to a
+  SQL host, whitelist the addresses that must stay reachable, or turn the MS SQL engine off.
 - Traffic sniffing, kernel drivers and remote management are out of scope by design.
 
 ## Windows Event Log ids

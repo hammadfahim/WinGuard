@@ -71,8 +71,8 @@ Source: "{#IconFile}"; DestDir: "{app}"; DestName: "icon.ico"; Flags: ignorevers
 #endif
 
 [Dirs]
-; The data folder itself is created and locked down in PrepareToInstall, before anything else
-; happens; Logs is created here and inherits from it.
+; The data folder and Logs are created and locked down in PrepareToInstall, before anything else
+; happens. These entries find them there and change nothing.
 Name: "{commonappdata}\WinGuard"
 Name: "{commonappdata}\WinGuard\Logs"
 
@@ -179,98 +179,66 @@ end;
 
 { --- Data folder ----------------------------------------------------------- }
 
-{ True when the path is a junction or symbolic link ($400 is
-  FILE_ATTRIBUTE_REPARSE_POINT). }
-function IsReparsePoint(Path: String): Boolean;
-var
-  FindRec: TFindRec;
-begin
-  Result := False;
-  if FindFirst(Path, FindRec) then
-  begin
-    Result := (FindRec.Attributes and $400) <> 0;
-    FindClose(FindRec);
-  end;
-end;
-
-function RunIcacls(Arguments: String): Boolean;
-var
-  ResultCode: Integer;
-begin
-  Result := Exec(ExpandConstant('{sys}\icacls.exe'), Arguments, '', SW_HIDE,
-    ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
-  if not Result then
-    Log('WinGuard: icacls ' + Arguments + ' failed (code ' + IntToStr(ResultCode) + ').');
-end;
-
 { Leave the data folder to SYSTEM + Administrators alone, whoever created it, so no
-  local standard user can pre-create it and poison the database. The service's
-  --install runs the same steps (Program.DataFolderHardeningSteps).
-  - The owner goes first: an owner can always grant itself access again, whatever
-    the ACL says.
-  - /reset then removes explicit entries, which /grant:r would leave in place for
-    every account it does not name. The accounts are given as SIDs (S-1-5-18 =
-    SYSTEM, S-1-5-32-544 = Administrators) because their names are localized.
-  - The second ownership pass also covers everything inside, including whatever
-    was created until the ACL closed, and the last step makes all of it inherit.
-  No /C: with it icacls exits 0 even when it failed.
+  local standard user can pre-create it and poison the database. All the logic is in
+  one tested place, the hidden verb "winguard-svc --harden-data", which --install
+  runs as well (DataFolderHardener). It walks the folder without following a link,
+  and moves aside what is a link or not owned by SYSTEM or Administrators before
+  anything takes ownership of it.
+  The installed program may be an older one, or not there yet, so the new one is
+  unpacked to run it: it is the first file in [Files], and with solid compression
+  that takes no time. Its output comes back through a file, as Exec cannot capture
+  it. Exit codes: 0 secured, 3 secured with content moved aside, anything else not
+  secured.
   Returns the reason it could not, or an empty string. }
 function SecureDataFolder(): String;
 var
   Dir: String;
-  Failure: String;
-  Steps: array[0..4] of String;
-  I: Integer;
+  Tool: String;
+  OutputFile: String;
+  Contents: AnsiString;
+  Details: String;
+  ResultCode: Integer;
 begin
   Result := '';
   Dir := ExpandConstant('{commonappdata}\WinGuard');
-  Failure := 'Setup could not secure the data folder ' + Dir + '. Nothing was installed. ' +
-    'See the setup log for details.';
+  Tool := ExpandConstant('{tmp}\{#MyAppServiceExe}');
+  OutputFile := ExpandConstant('{tmp}\winguard-harden-data.txt');
 
-  { Hardening a link would change its target, and the service would write through it. }
-  if DirExists(Dir) then
+  ExtractTemporaryFile('{#MyAppServiceExe}');
+  if not Exec(ExpandConstant('{cmd}'), '/c ""' + Tool + '" --harden-data > "' + OutputFile + '" 2>&1"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
-    if IsReparsePoint(Dir) then
-    begin
-      Result := Dir + ' is a link, not a folder, which may mean another user prepared it. ' +
-        'Nothing was installed. Remove it and run Setup again.';
-      Exit;
-    end;
-  end
-  else if not ForceDirectories(Dir) then
-  begin
-    Result := Failure;
+    Result := 'Setup could not run ' + Tool + ' to secure the data folder ' + Dir +
+      '. Nothing was installed.';
     Exit;
   end;
 
-  Steps[0] := '"' + Dir + '" /setowner *S-1-5-32-544';
-  Steps[1] := '"' + Dir + '" /reset';
-  Steps[2] := '"' + Dir + '" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"';
-  Steps[3] := '"' + Dir + '" /setowner *S-1-5-32-544 /T /L';
-  Steps[4] := '"' + Dir + '\*" /reset /T /L';
-  for I := 0 to 4 do
-  begin
-    if not RunIcacls(Steps[I]) then
-    begin
-      Result := Failure;
-      Exit;
-    end;
-  end;
+  Details := '';
+  if LoadStringFromFile(OutputFile, Contents) then
+    Details := Contents;
+  Log('WinGuard: --harden-data exited with code ' + IntToStr(ResultCode) + ': ' + Details);
+
+  if ResultCode = 3 then
+    SuppressibleMsgBox('Setup found content in ' + Dir + ' that it could not trust, and moved it ' +
+      'aside. Nothing was deleted. If it is yours, check it before you put it back:'#13#10#13#10 +
+      Details, mbInformation, MB_OK, IDOK)
+  else if ResultCode <> 0 then
+    Result := 'Setup could not secure the data folder ' + Dir + '. Nothing was installed.'#13#10#13#10 +
+      Details;
 end;
 
 { --- Install --------------------------------------------------------------- }
 
-{ A non-empty result stops Setup with that message before anything is changed
-  (exit code 7 in silent mode). The data folder comes first, while a service that
-  is being upgraded is still running: if this fails, protection stays as it was. }
+{ A non-empty result stops Setup with that message before anything is installed
+  (exit code 7 in silent mode). The data folder is secured once the service has
+  stopped: a running service keeps its database and log open, and what is open
+  cannot be moved aside, so a bad file there would stop every upgrade. If it fails,
+  the service is started again, so protection stays as it was. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
 begin
-  Result := SecureDataFolder();
-  if Result <> '' then
-    Exit;
-
   { Close a running console first. It lives in the tray and turns a normal close
     request into "hide", so without this an upgrade can leave the OLD console
     running: its EXE cannot be replaced, and starting WinGuard afterwards only
@@ -282,8 +250,16 @@ begin
   { Stop any existing service before [Files] overwrites the running EXE. A service
     that will not stop keeps that EXE locked, so go no further and say so. }
   if ServiceExistsFlag() and not StopServiceAndWait() then
+  begin
     Result := 'The {#MyAppServiceDisplayName} could not be stopped, so its files cannot be replaced. ' +
       'Nothing was installed. Stop it with "sc stop {#MyAppServiceName}" and run Setup again.';
+    Exit;
+  end;
+
+  Result := SecureDataFolder();
+  if (Result <> '') and ServiceExistsFlag() then
+    Exec(ExpandConstant('{sys}\sc.exe'), 'start {#MyAppServiceName}', '',
+      SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 { --- Uninstall ------------------------------------------------------------- }

@@ -50,6 +50,67 @@ public sealed class EventLogDetectorBaseTests
     }
 
     [Fact]
+    public async Task The_startup_replay_ends_where_the_subscription_begins()
+    {
+        // A replay of 5000 records through ToXml and FormatDescription takes this long and more.
+        var detector = new FakeDetector { ReadDelay = TimeSpan.FromMilliseconds(500) };
+        var sink = Channel.CreateUnbounded<FailedLogin>();
+        using var cts = new CancellationTokenSource();
+
+        await detector.StartAsync(sink, cts.Token);
+        await detector.Opened.WaitAsync(WaitLimit);
+        await detector.ReadStarted.WaitAsync(WaitLimit);
+        await cts.CancelAsync();
+
+        var (_, to) = Assert.Single(detector.Ranges);
+
+        // Taken just before the subscription opens: nothing falls between them, and nothing the
+        // subscription can see is replayed as well.
+        Assert.True(to <= detector.OpenedAtUtc, $"replayed until {to:O}, subscribed at {detector.OpenedAtUtc:O}");
+        Assert.True(detector.OpenedAtUtc - to < TimeSpan.FromMilliseconds(250), $"{(detector.OpenedAtUtc - to).TotalMilliseconds:0} ms uncovered");
+    }
+
+    [Fact]
+    public async Task A_startup_replay_does_not_keep_the_subscription_waiting()
+    {
+        using var release = new ManualResetEventSlim();
+        var detector = new FakeDetector { ReadGate = release };
+        var sink = Channel.CreateUnbounded<FailedLogin>();
+        using var cts = new CancellationTokenSource();
+
+        await detector.StartAsync(sink, cts.Token);
+        await detector.Opened.WaitAsync(WaitLimit);
+        await detector.ReadStarted.WaitAsync(WaitLimit);
+        var runningDuringTheReplay = detector.IsRunning;
+        release.Set();
+        await cts.CancelAsync();
+
+        Assert.True(runningDuringTheReplay);
+    }
+
+    [Fact]
+    public async Task A_startup_whose_subscription_fails_replays_once_and_leaves_a_gap_from_there()
+    {
+        var detector = new FakeDetector { CanOpen = false, Window = TimeSpan.FromMinutes(30) };
+        var sink = Channel.CreateUnbounded<FailedLogin>();
+        using var cts = new CancellationTokenSource();
+
+        await detector.StartAsync(sink, cts.Token);
+        await detector.Attempted.WaitAsync(WaitLimit);
+        await detector.ReadStarted.WaitAsync(WaitLimit);
+        var (_, startupTo) = Assert.Single(detector.Ranges);
+
+        detector.CanOpen = true;
+        detector.TrySubscribe();
+        await detector.SecondReadStarted.WaitAsync(WaitLimit);
+        await cts.CancelAsync();
+
+        var (gapFrom, gapTo) = detector.Ranges[^1];
+        Assert.Equal(startupTo, gapFrom);
+        Assert.True(gapTo >= gapFrom);
+    }
+
+    [Fact]
     public async Task A_detector_without_a_backlog_window_does_not_replay_at_startup()
     {
         var detector = new FakeDetector { Window = TimeSpan.Zero };
@@ -71,6 +132,7 @@ public sealed class EventLogDetectorBaseTests
         using var cts = new CancellationTokenSource();
         await detector.StartAsync(sink, cts.Token);
         await detector.Opened.WaitAsync(WaitLimit);
+        await detector.ReadStarted.WaitAsync(WaitLimit);
         Assert.True(detector.IsRunning);
         var faulted = DateTime.UtcNow;
         detector.Backlog = [Failure("203.0.113.5")];
@@ -99,6 +161,7 @@ public sealed class EventLogDetectorBaseTests
         var started = DateTime.UtcNow;
         await detector.StartAsync(sink, cts.Token);
         await detector.Attempted.WaitAsync(WaitLimit);
+        await detector.ReadStarted.WaitAsync(WaitLimit);
         Assert.False(detector.IsRunning);
 
         detector.CanOpen = true;
@@ -238,6 +301,8 @@ public sealed class EventLogDetectorBaseTests
     {
         private readonly TaskCompletionSource _opened = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _attempted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _readStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _secondReadStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public FakeDetector()
             : base(NullLogger.Instance)
@@ -262,6 +327,16 @@ public sealed class EventLogDetectorBaseTests
 
         public Task Attempted => _attempted.Task;
 
+        public Task ReadStarted => _readStarted.Task;
+
+        public Task SecondReadStarted => _secondReadStarted.Task;
+
+        public TimeSpan ReadDelay { get; init; }
+
+        public ManualResetEventSlim? ReadGate { get; init; }
+
+        public DateTime OpenedAtUtc { get; private set; }
+
         public override ProtocolSource Source => ProtocolSource.Rdp;
 
         public override string Name => "fake";
@@ -285,7 +360,11 @@ public sealed class EventLogDetectorBaseTests
             lock (Ranges)
             {
                 Ranges.Add((fromUtc, toUtc));
+                (Ranges.Count == 1 ? _readStarted : _secondReadStarted).TrySetResult();
             }
+
+            Thread.Sleep(ReadDelay);
+            ReadGate?.Wait(WaitLimit);
 
             if (ThrowOnRead)
             {
@@ -303,6 +382,7 @@ public sealed class EventLogDetectorBaseTests
             lastError = CanOpen ? null : new InvalidOperationException("channel not enabled");
             if (CanOpen)
             {
+                OpenedAtUtc = DateTime.UtcNow;
                 _opened.TrySetResult();
             }
 

@@ -170,69 +170,6 @@ public sealed class CliCommandsTests
     }
 
     [Fact]
-    public void Hardening_takes_ownership_before_touching_the_acl_and_keeps_failures_visible()
-    {
-        var folder = @"C:\ProgramData\WinGuard";
-
-        var steps = ServiceProgram.DataFolderHardeningSteps(folder);
-
-        // Ownership first: an owner can always re-grant itself access.
-        Assert.Equal([folder, "/setowner", "*S-1-5-32-544"], steps[0]);
-
-        // /grant:r leaves other accounts' entries alone, so they must be reset away first.
-        Assert.Equal([folder, "/reset"], steps[1]);
-        Assert.Equal([folder, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"], steps[2]);
-
-        // What is already inside gets the same treatment, for ownership as well as ACLs.
-        Assert.Equal([folder, "/setowner", "*S-1-5-32-544", "/T", "/L"], steps[3]);
-        Assert.Equal([Path.Combine(folder, "*"), "/reset", "/T", "/L"], steps[4]);
-
-        // /C turns a failure into exit code 0.
-        Assert.DoesNotContain(steps, step => step.Contains("/C"));
-    }
-
-    [Fact]
-    public void A_folder_that_cannot_be_hardened_is_reported()
-    {
-        var folder = Path.Combine(Path.GetTempPath(), "winguard-acl-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(folder);
-        try
-        {
-            // Only an elevated process may give a folder away to Administrators.
-            var problem = ServiceProgram.SecureDataFolder(folder);
-
-            Assert.Equal(IsElevatedAdministrator(), problem is null);
-        }
-        finally
-        {
-            Directory.Delete(folder, recursive: true);
-        }
-    }
-
-    [Fact]
-    public void A_link_planted_as_the_data_folder_is_refused()
-    {
-        var root = Path.Combine(Path.GetTempPath(), "winguard-link-" + Guid.NewGuid().ToString("N"));
-        var target = Path.Combine(root, "target");
-        var link = Path.Combine(root, "WinGuard");
-        Directory.CreateDirectory(target);
-        try
-        {
-            var (exitCode, output) = ServiceProgram.RunProcess("cmd.exe", "/c", "mklink", "/J", link, target);
-            Assert.True(exitCode == 0, output);
-
-            var problem = ServiceProgram.SecureDataFolder(link);
-
-            Assert.Contains("is a link", problem);
-        }
-        finally
-        {
-            Directory.Delete(link);
-            Directory.Delete(root, recursive: true);
-        }
-    }
-
-    [Fact]
     public async Task A_chatty_child_process_cannot_deadlock_the_cli()
     {
         // More than the pipe buffer on stderr: reading stdout to its end first used to hang here.

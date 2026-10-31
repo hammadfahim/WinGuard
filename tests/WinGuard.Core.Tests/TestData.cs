@@ -1,4 +1,5 @@
 using WinGuard.Core.Config;
+using WinGuard.Core.Detection;
 
 namespace WinGuard.Core.Tests;
 
@@ -16,4 +17,7 @@ internal static class TestData
     public static string[] ReadLines(string fileName) => File.ReadAllLines(PathOf(fileName));
 
     public static WinGuardSettings NewSettings() => new();
+
+    /// <summary>A machine running the default SQL Server instance, which is what the 18456 fixture comes from.</summary>
+    public static IReadOnlySet<string> SqlInstances { get; } = SqlServerInstances.ToProviderNames(["MSSQLSERVER"]);
 }
