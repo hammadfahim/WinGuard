@@ -1143,7 +1143,8 @@ public sealed class SqliteStore : IStore, ISecretScrubbingStore, IAsyncDisposabl
     /// Administrators keep access, so a local standard user cannot pre-create or tamper
     /// with the database (e.g. seeding a whitelist) while it is absent. Only applied to
     /// the production location under %ProgramData%; failures are logged and never block
-    /// startup. The installer applies the same ACL via icacls.
+    /// startup. The installer applies the same ACL, and checks the folder's content, through
+    /// <c>winguard-svc --harden-data</c>.
     /// </summary>
     private void TryHardenDirectoryAcl(string directoryPath)
     {
@@ -1157,15 +1158,15 @@ public sealed class SqliteStore : IStore, ISecretScrubbingStore, IAsyncDisposabl
                 return;
             }
 
-            // "P" = protected DACL (no inheritance, mirrors the installer's
-            // icacls /inheritance:r); SYSTEM + Administrators full control only.
+            // "P" = protected DACL (no inheritance, mirrors the installer's hardening);
+            // SYSTEM + Administrators full control only.
             if (!AclInterop.ConvertStringSecurityDescriptorToSecurityDescriptor(
                     "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", 1, out var securityDescriptor, IntPtr.Zero)
                 || securityDescriptor == IntPtr.Zero)
             {
                 _logger.LogWarning(
                     "Could not build the data-directory security descriptor (Win32 error {Error}); " +
-                    "ACL hardening skipped — the installer's icacls step is the fallback.",
+                    "ACL hardening skipped — the installer's hardening step is the fallback.",
                     Marshal.GetLastWin32Error());
                 return;
             }

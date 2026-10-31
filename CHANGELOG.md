@@ -36,6 +36,11 @@ All notable changes to WinGuard are documented here. The format follows
   Existing data is migrated in place; downgrading loses escalation counts.
 - With `BlockedPorts` set, new manual bans, blacklist bans and blacklisted ranges now block **all**
   ports.
+- **Setup now checks the data folder before trusting it.** `--harden-data` walks it without following
+  links; links, hard links and items not owned by SYSTEM or Administrators are moved to a
+  `Quarantine-*` folder with a `quarantine.txt`, never deleted, and it exits with code 3 when that
+  happens. It runs with the service stopped.
+- MS SQL events are ignored unless their provider is an installed SQL Server instance.
 - `ban_history` is pruned after `BanHistoryRetentionDays` instead of growing forever.
 - Report-only mode now never touches the firewall: rules that already exist stay until it is
   switched off, even if their ban is lifted.
@@ -77,6 +82,16 @@ All notable changes to WinGuard are documented here. The format follows
   line can no longer hide later attempts through a regex timeout.
 - Log forging through newlines in attacker-controlled text, and URLs leaking into logs.
 - Expired bans now notify; a suppressed-notification summary shows what the rate limit dropped.
+- **Review of the combined work.** A failed ban read is no longer taken for "no ban", which could
+  overwrite a ban or demote a permanent one; bans made during a database outage survive expiry
+  passes and cancellation; a whitelisted address banned while the lists were unreadable is lifted;
+  NAT64 addresses are judged by the IPv4 address inside them and never aggregated, and bans of the
+  NAT64 prefix left by older versions are lifted; a manual re-ban keeps a longer existing ban;
+  `ClearBansOnStartup` no longer wipes range rules when the lists are unreadable.
+- A hanging webhook or mail server no longer holds back the Windows Event Log and syslog outputs.
+- Failures logged during the start-up replay are no longer lost.
+- Old plaintext secrets are scrubbed from the database files, not only overwritten.
+- Saving settings in the console no longer loses the syslog settings or a custom source's ports.
 
 ## [0.2.0] — 2026-10-07
 

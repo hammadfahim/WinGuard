@@ -161,8 +161,10 @@ to their own table, so downgrading loses them.
 - **Backlog replay** re-reads the last N minutes (default 30) of the event logs at startup, so
   failures logged during a service restart or patch reboot still count. Only what happened after
   the previous run stopped is counted, so a restart never re-counts failures or undoes a manual
-  unban. The very first start replays nothing; after a crash, up to one `HousekeepingInterval` of
-  failures can be counted twice.
+  unban. A replayed failure is counted against its own time, so a burst just before the service
+  went down is judged as it happened. The very first start replays nothing; after a crash, up to
+  one `HousekeepingInterval` of failures can be counted twice. The same replay closes the gap after
+  an event-log subscription fails, within `EventBacklogReplayMinutes`.
 - **Ban history and daily statistics**: every ban, expiry and manual unban is kept in
   `ban_history` for `BanHistoryRetentionDays` (default 365), and per-day counters survive restarts
   and event pruning — visible in the GUI's Statistics view.
@@ -286,6 +288,17 @@ The server's own addresses and loopback are auto-whitelisted at startup to preve
 - **The "RDP / logon" engine counts every failed Windows logon that carries a client
   address.** Security event 4625 also covers failed SMB and other network logons, not only
   Remote Desktop, and they all count towards a ban.
+- **MS SQL events are only trusted from an installed instance, and can still be forged locally.**
+  Event 18456 counts only when its provider is a SQL Server instance listed in the registry, so a
+  machine without SQL Server ignores it. On a real SQL host, a local interactive user can write such
+  an event and get a chosen address banned. Whitelist addresses that must stay reachable, or turn
+  the engine off, if local users are not trusted.
+- **During a database outage WinGuard stays strict.** Failures are counted in memory and bans stay
+  enforced until they can be saved. If bans cannot be read, a new ban covers all ports until it is
+  merged with the stored one. If the lists cannot be read, automatic bans wait, because the whitelist
+  is unknown; failures are still counted, and the attacker's next failure bans them.
+- **Unblocking an address held by an aggregate ban lifts the whole prefix**, since the firewall
+  cannot exempt one address from it.
 - **FileZilla Server 1.x support is unverified.** The parser accepts the legacy 0.9.x log
   layout and any line with a `530 Login…` response whose prefix contains the session
   address, but it has only been tested against 0.9.x sample logs.
