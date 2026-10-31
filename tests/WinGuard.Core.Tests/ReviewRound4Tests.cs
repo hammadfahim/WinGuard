@@ -325,6 +325,51 @@ public sealed class ReviewRound4Tests
         Assert.Empty(h.Firewall.Blocked);
     }
 
+    [Fact]
+    public async Task An_address_still_held_by_a_range_ban_is_reported_as_not_unblocked()
+    {
+        await using var h = await IpcHarness.StartAsync();
+        await BanAggregateAsync(h.Engine, h);
+        h.Store.FailBanRemoval = true;
+
+        var response = await h.CallAsync(IpcMethods.Unblock, new UnblockParams { Ip = "2001:db8:1:2::101" });
+
+        Assert.False(response.Ok);
+        Assert.Contains("2001:db8:1:2::101", response.Error);
+    }
+
+    [Fact]
+    public async Task Removing_a_blacklist_entry_leaves_the_aggregate_ban_around_it_alone()
+    {
+        await using var h = await IpcHarness.StartAsync();
+        await BanAggregateAsync(h.Engine, h);
+        await h.SendAsync(IpcMethods.BlacklistAdd, new ListValueParams { Value = "2001:db8:1:2::abcd" });
+
+        await h.SendAsync(IpcMethods.ListRemove, new ListRemoveParams { Kind = ListKind.Blacklist, Value = "2001:db8:1:2::abcd" });
+
+        Assert.Null(await h.Store.GetBanAsync("2001:db8:1:2::abcd"));
+        Assert.NotNull(await h.Store.GetBanAsync("2001:db8:1:2::/64"));
+    }
+
+    [Fact]
+    public async Task A_nat64_prefix_ban_left_by_an_older_version_is_lifted()
+    {
+        await using var h = await EngineHarness.StartAsync(
+            T0,
+            seed: async store => await store.UpsertBanAsync(new BanEntry
+            {
+                IpAddress = "64:ff9b::/64",
+                Source = NonRdp,
+                BannedAtUtc = T0.UtcDateTime,
+                ExpiresUtc = T0.UtcDateTime.AddDays(1),
+                OffenseCount = 1,
+            }));
+
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Empty(await h.Store.GetActiveBansAsync());
+    }
+
     [Theory]
     [InlineData("203.0.113.9", "203.0.113.9")]
     [InlineData("203.0.113.9/32", "203.0.113.9")]

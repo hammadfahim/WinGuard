@@ -522,7 +522,15 @@ public sealed partial class BanEngine
     /// way to free one address of a block rule, and a success that left it blocked would be a lie.
     /// The event and the history name the range.
     /// </summary>
-    public async Task UnbanAsync(string ip, CancellationToken ct = default)
+    public Task UnbanAsync(string ip, CancellationToken ct = default) => UnbanAsync(ip, liftCoveringRanges: true, ct);
+
+    /// <summary>
+    /// Lifts exactly this ban and leaves a range that holds the address alone, for cleaning up a ban
+    /// that something else created rather than for getting an address unblocked.
+    /// </summary>
+    public Task UnbanExactAsync(string ip, CancellationToken ct = default) => UnbanAsync(ip, liftCoveringRanges: false, ct);
+
+    private async Task UnbanAsync(string ip, bool liftCoveringRanges, CancellationToken ct)
     {
         if (!IpMatcher.TryNormalizeBanTarget(ip, out var normalized))
         {
@@ -532,7 +540,8 @@ public sealed partial class BanEngine
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            foreach (var range in await FindRangeBansHoldingAsync(normalized, ct).ConfigureAwait(false))
+            var ranges = liftCoveringRanges ? await FindRangeBansHoldingAsync(normalized, ct).ConfigureAwait(false) : [];
+            foreach (var range in ranges)
             {
                 _logger.LogWarning("Lifting range ban {Range}: unblocking {Ip} was asked for, and the range holds it.", range, normalized);
                 await UnbanCoreAsync(range, $"MANUAL UNBLOCK {range} (it held {normalized})", ct).ConfigureAwait(false);

@@ -241,6 +241,11 @@ public sealed class IpMatcher
         return true;
     }
 
+    /// <summary>True when a range takes in any of NAT64, which <see cref="TryAggregateIpv6"/> never produces.</summary>
+    /// <param name="normalizedRange">A CIDR range.</param>
+    public static bool OverlapsNat64(string normalizedRange) =>
+        TryParseCidr(normalizedRange, out var range) && Overlap(range, Nat64Prefix);
+
     /// <summary>
     /// Returns <see langword="true"/> for addresses the public internet cannot be the source of:
     /// loopback (127.0.0.0/8, ::1), RFC1918 (10/8, 172.16/12, 192.168/16), link-local (169.254/16,

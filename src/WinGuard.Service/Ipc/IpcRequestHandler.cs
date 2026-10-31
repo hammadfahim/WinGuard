@@ -336,7 +336,9 @@ public sealed partial class IpcRequestHandler
                     && !remaining.IsBlacklisted(ban.IpAddress))
                 .Select(ban => ban.IpAddress)
                 .ToList();
-            return await LiftBansAsync(request, created, ct).ConfigureAwait(false);
+
+            // Only what the entry created: an aggregate ban around one of these has its own reason.
+            return await LiftBansAsync(request, created, ct, exact: true).ConfigureAwait(false);
         }
 
         return IpcResponse.Success(request.Id, null);
@@ -403,13 +405,13 @@ public sealed partial class IpcRequestHandler
     /// exactly which remain: the store is asked, because the engine logs a removal the store refused
     /// and carries on, and the firewall would block that address again at the next reconcile.
     /// </summary>
-    private async Task<IpcResponse> LiftBansAsync(IpcRequest request, IReadOnlyList<string> ips, CancellationToken ct)
+    private async Task<IpcResponse> LiftBansAsync(IpcRequest request, IReadOnlyList<string> ips, CancellationToken ct, bool exact = false)
     {
         foreach (var ip in ips)
         {
             try
             {
-                await _engine.UnbanAsync(ip, ct).ConfigureAwait(false);
+                await (exact ? _engine.UnbanExactAsync(ip, ct) : _engine.UnbanAsync(ip, ct)).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -422,7 +424,12 @@ public sealed partial class IpcRequestHandler
         }
 
         var active = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
-        var remaining = ips.Where(ip => active.Any(ban => string.Equals(ban.IpAddress, ip, StringComparison.OrdinalIgnoreCase))).ToList();
+
+        // An address is not free while a range ban that should have gone with it still holds it.
+        var remaining = ips
+            .Where(ip => active.Any(ban => string.Equals(ban.IpAddress, ip, StringComparison.OrdinalIgnoreCase)
+                || (!exact && ban.IpAddress.Contains('/') && new IpMatcher([ban.IpAddress], []).IsWhitelisted(ip))))
+            .ToList();
         if (remaining.Count == 0)
         {
             return IpcResponse.Success(request.Id, null);

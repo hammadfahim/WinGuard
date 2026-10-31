@@ -164,6 +164,13 @@ public sealed partial class BanEngine
                 _logger.LogWarning("Lifting ban {Target}: it overlaps the whitelist.", ban.IpAddress);
                 await UnbanCoreAsync(ban.IpAddress, $"UNBLOCKED {ban.IpAddress} (overlaps the whitelist)", ct).ConfigureAwait(false);
             }
+            else if (ban.IpAddress.Contains('/') && IpMatcher.OverlapsNat64(ban.IpAddress))
+            {
+                // Left by a version that aggregated NAT64 addresses: it blocks every IPv4 client
+                // of the translator, however little the one attacker it was meant for did.
+                _logger.LogWarning("Lifting range ban {Target}: it takes in NAT64.", ban.IpAddress);
+                await UnbanCoreAsync(ban.IpAddress, $"UNBLOCKED {ban.IpAddress} (takes in NAT64)", ct).ConfigureAwait(false);
+            }
         }
     }
 
