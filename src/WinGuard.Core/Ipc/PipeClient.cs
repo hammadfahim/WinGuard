@@ -31,6 +31,12 @@ public sealed class PipeClient : IDisposable
 
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
 
+    // The most the service returns per request.
+    private const int EventPageSize = 1000;
+
+    // One read stays short enough to leave the pipe to everything else; what is left waits for the next.
+    private const int MaxEventPagesPerRead = 5;
+
     // How long one attempt waits for a free instance of the service's pipe.
     private const int ConnectTimeoutMs = 2000;
 
@@ -222,6 +228,40 @@ public sealed class PipeClient : IDisposable
             IpcMethods.ListEvents,
             new ListEventsParams { Limit = limit, SinceUtc = sinceUtc, AfterId = afterId },
             ct);
+
+    /// <summary>
+    /// Reads what the cursor has not seen yet, walking forward a page at a time, so a burst larger than
+    /// a page is recovered whole. A very long backlog takes several reads: the cursor stays put between
+    /// them, so nothing is lost. A request that fails ends the read with what it has so far.
+    /// </summary>
+    /// <param name="cursor">How far the caller has read; moved past what is returned.</param>
+    /// <param name="ct">Cancellation token.</param>
+    public async Task<EventBatch> ReadNewEventsAsync(EventCursor cursor, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(cursor);
+
+        var events = new List<EventDto>();
+        long skipped = 0;
+        for (var page = 0; page < MaxEventPagesPerRead; page++)
+        {
+            var parameters = new ListEventsParams { Limit = EventPageSize, AfterId = cursor.LastId, OldestFirst = cursor.LastId is not null };
+            var rows = await GetAsync<List<EventDto>>(IpcMethods.ListEvents, parameters, ct).ConfigureAwait(false);
+            if (rows is not { Count: > 0 })
+            {
+                break;
+            }
+
+            var batch = cursor.Accept(rows, EventPageSize);
+            events.AddRange(batch.Events);
+            skipped += batch.Skipped;
+            if (rows.Count < EventPageSize)
+            {
+                break;
+            }
+        }
+
+        return events.Count == 0 ? EventBatch.None : new EventBatch(events, skipped);
+    }
 
     /// <summary>Lists whitelist and blacklist entries, or null when the request failed.</summary>
     public Task<List<ListEntryDto>?> ListListsAsync(CancellationToken ct = default) =>

@@ -163,7 +163,9 @@ public sealed partial class IpcRequestHandler
     private async Task<List<EventDto>> ListEventsAsync(ListEventsParams parameters, CancellationToken ct)
     {
         var limit = Math.Clamp(parameters.Limit <= 0 ? 200 : parameters.Limit, 1, 1000);
-        var events = await _store.GetEventsAsync(limit, parameters.SinceUtc, parameters.AfterId, ct).ConfigureAwait(false);
+        var events = parameters.OldestFirst
+            ? await _store.GetEventsAfterAsync(parameters.AfterId ?? 0, limit, ct).ConfigureAwait(false)
+            : await _store.GetEventsAsync(limit, parameters.SinceUtc, parameters.AfterId, ct).ConfigureAwait(false);
         return events.Select(EventDto.From).ToList();
     }
 

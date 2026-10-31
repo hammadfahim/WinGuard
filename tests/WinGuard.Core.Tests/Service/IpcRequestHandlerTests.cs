@@ -496,6 +496,64 @@ public sealed class IpcRequestHandlerTests
     }
 
     [Fact]
+    public async Task Events_past_one_response_are_recovered_by_walking_forward_from_the_cursor()
+    {
+        await using var h = await Harness.StartAsync();
+        await h.SendAsync(IpcMethods.BlockNow, new BlockNowParams { Ip = "203.0.113.43" });
+        var cursor = (await h.GetAsync<List<EventDto>>(IpcMethods.ListEvents, new ListEventsParams { Limit = 1 })).Single().Id;
+
+        for (var i = 0; i < 2500; i++)
+        {
+            await h.Store.AddEventAsync(new LogEvent { TimestampUtc = DateTime.UtcNow, Message = "burst " + i });
+        }
+
+        // The newest-first answer cannot reach the older part of this burst.
+        var newest = await h.GetAsync<List<EventDto>>(IpcMethods.ListEvents, new ListEventsParams { Limit = 1000, AfterId = cursor });
+        Assert.Equal(1000, newest.Count);
+        Assert.DoesNotContain(newest, e => e.Message == "burst 0");
+
+        var seen = new List<string>();
+        var pages = 0;
+        while (true)
+        {
+            var page = await h.GetAsync<List<EventDto>>(IpcMethods.ListEvents, new ListEventsParams { Limit = 1000, AfterId = cursor, OldestFirst = true });
+            if (page.Count == 0)
+            {
+                break;
+            }
+
+            pages++;
+            seen.AddRange(page.Select(e => e.Message));
+            cursor = page[^1].Id;
+        }
+
+        Assert.Equal(3, pages);
+        Assert.Equal(Enumerable.Range(0, 2500).Select(i => "burst " + i), seen);
+    }
+
+    [Fact]
+    public void A_cursor_counts_only_what_a_service_without_paging_left_out()
+    {
+        static EventDto Row(long id) => new() { Id = id, Message = "x" };
+
+        var cursor = new EventCursor();
+        Assert.Equal(0, cursor.Accept([Row(12), Row(11), Row(10)], 3).Skipped);
+        Assert.Equal(12, cursor.LastId);
+
+        // A full page walking forward starts right after the cursor. A gap in it is pruned rows.
+        var forward = cursor.Accept([Row(13), Row(20), Row(21)], 3);
+        Assert.Equal(0, forward.Skipped);
+        Assert.Equal([13, 20, 21], forward.Events.Select(e => e.Id));
+        Assert.Equal(21, cursor.LastId);
+
+        // A service that ignores OldestFirst answers newest-first, so this page really lost rows.
+        var cutOff = cursor.Accept([Row(102), Row(101), Row(100)], 3);
+        Assert.Equal(78, cutOff.Skipped);
+        Assert.Equal([100, 101, 102], cutOff.Events.Select(e => e.Id));
+        Assert.Equal(102, cursor.LastId);
+    }
+
+    [Fact]
     public async Task Bad_requests_get_an_error_answer_instead_of_breaking_the_session()
     {
         await using var h = await Harness.StartAsync();

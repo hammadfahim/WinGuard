@@ -19,7 +19,8 @@ public static class PipeConstants
     /// instead of misbehaving. v3: statistics + ban history + report-only. v4: BlockNow answers
     /// with the ban it recorded. v5: settings carry the detection rules, which a client that does
     /// not know them would reset on save; disarm status, firewall policy prerequisites; bans report
-    /// their ports, status reports blocklist files.
+    /// their ports, status reports blocklist files, and ListEvents can walk forward, which a service
+    /// without it ignores and <see cref="EventCursor"/> copes with.
     /// </summary>
     public const int ProtocolVersion = 5;
 }
@@ -274,6 +275,13 @@ public sealed class ListEventsParams
 
     /// <summary>When set, only events with a larger <see cref="EventDto.Id"/> are returned.</summary>
     public long? AfterId { get; set; }
+
+    /// <summary>
+    /// Walks forward: the OLDEST events after <see cref="AfterId"/>, oldest first, so a caller asks
+    /// again from the last id it got and misses nothing however large a burst was. Otherwise the
+    /// newest come back, newest first. <see cref="SinceUtc"/> does not apply here.
+    /// </summary>
+    public bool OldestFirst { get; set; }
 }
 
 public sealed class UnblockParams

@@ -283,6 +283,33 @@ public sealed class SqliteStoreTests
         });
     }
 
+    [Fact]
+    public async Task Events_can_be_walked_forward_a_page_at_a_time_without_missing_any()
+    {
+        await WithStoreAsync(async store =>
+        {
+            var now = DateTime.UtcNow;
+
+            // Timestamps run backwards: the walk follows ids, which is the order they were written.
+            for (var i = 0; i < 7; i++)
+            {
+                await store.AddEventAsync(Event(now.AddMinutes(-i), "event " + i));
+            }
+
+            var seen = new List<LogEvent>();
+            long after = 0;
+            while (await store.GetEventsAfterAsync(after, 3) is { Count: > 0 } page)
+            {
+                seen.AddRange(page);
+                after = page[^1].Id;
+            }
+
+            Assert.Equal(Enumerable.Range(0, 7).Select(i => "event " + i), seen.Select(e => e.Message));
+            Assert.Equal(seen.Select(e => e.Id).Order(), seen.Select(e => e.Id));
+            Assert.Empty(await store.GetEventsAfterAsync(after, 3));
+        });
+    }
+
     // ---------- settings ----------
 
     [Fact]

@@ -128,6 +128,13 @@ public interface IStore
     /// <summary>Newest-first, capped at <paramref name="limit"/>. When <paramref name="afterId"/> is set only events with a larger <see cref="LogEvent.Id"/> are returned (cursor polling).</summary>
     Task<IReadOnlyList<LogEvent>> GetEventsAsync(int limit, DateTime? sinceUtc = null, long? afterId = null, CancellationToken ct = default);
 
+    /// <summary>
+    /// Oldest-first from just after <paramref name="afterId"/>, capped at <paramref name="limit"/>. A
+    /// reader passes the last id it got and walks forward through a burst of any size, which
+    /// <see cref="GetEventsAsync"/> cannot do: it returns the newest rows and leaves the older ones out.
+    /// </summary>
+    Task<IReadOnlyList<LogEvent>> GetEventsAfterAsync(long afterId, int limit, CancellationToken ct = default);
+
     /// <summary>Forget events older than the given UTC time (retention housekeeping; the events table must not grow unbounded).</summary>
     Task PruneEventsAsync(DateTime olderThanUtc, CancellationToken ct = default);
 

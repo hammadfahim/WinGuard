@@ -12,10 +12,6 @@ namespace WinGuard.Gui.Services;
 /// </summary>
 public sealed class StatusPoller : IDisposable
 {
-    // The most the service returns per request. Asking for less loses the older part of a burst:
-    // ListEvents hands back the newest rows after the cursor, so what does not fit is never returned.
-    private const int EventBatchLimit = 1000;
-
     private const int PausedHeartbeatTicks = 5; // x 2 s timer = one status call every 10 s
     private const int SlowTicks = 15; // x 2 s timer = every 30 s
 
@@ -100,7 +96,13 @@ public sealed class StatusPoller : IDisposable
             _busy = true;
             try
             {
-                await _client.GetStatusAsync().ConfigureAwait(true);
+                // The tray answers for the server while the window is hidden, so a disarm or any
+                // other change of state has to reach it from here too.
+                var status = await _client.GetStatusAsync().ConfigureAwait(true);
+                if (status is not null)
+                {
+                    StatusUpdated?.Invoke(status);
+                }
             }
             catch
             {
@@ -139,10 +141,10 @@ public sealed class StatusPoller : IDisposable
                 await VerifyCursorAsync().ConfigureAwait(true);
             }
 
-            var events = await _client.ListEventsAsync(EventBatchLimit, null, _cursor.LastId).ConfigureAwait(true);
-            if (events is { Count: > 0 })
+            var events = await _client.ReadNewEventsAsync(_cursor).ConfigureAwait(true);
+            if (events.Events.Count > 0)
             {
-                EventsReceived?.Invoke(_cursor.Accept(events, EventBatchLimit));
+                EventsReceived?.Invoke(events);
             }
 
             if (forceBans || BansViewActive || _tick % 4 == 0)
