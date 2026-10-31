@@ -368,7 +368,9 @@ public sealed partial class BanEngine
 
     /// <summary>
     /// Manually blocks an IP or a range such as an IPv6 aggregate ban being promoted (IPC
-    /// <c>BlockNow</c>). Throws for invalid or whitelisted targets.
+    /// <c>BlockNow</c>). Throws for invalid or whitelisted targets. Without
+    /// <paramref name="permanent"/> or a <paramref name="duration"/> a ban already running keeps
+    /// whatever is longer: only an explicit choice can shorten it.
     /// </summary>
     public async Task BanNowAsync(string ip, TimeSpan? duration, bool permanent, string? note, CancellationToken ct = default)
     {
@@ -395,6 +397,16 @@ public sealed partial class BanEngine
             ForgetLogonState(normalized);
             var settings = _settingsAccessor();
             var now = NowUtc();
+            var existing = _unsavedBans.GetValueOrDefault(normalized) ?? await SafeGetBanAsync(normalized, ct).ConfigureAwait(false);
+
+            // Re-banning an IP that is still banned (e.g. "promote to permanent") is not a new
+            // offense; only a fresh ban moves the escalation tier.
+            var stillBanned = existing is not null && (existing.IsPermanent || existing.ExpiresUtc > now);
+            var offense = stillBanned
+                ? Math.Max(Math.Max(1, existing!.OffenseCount), _offenses.GetCount(normalized))
+                : ComputeOffense(normalized, existing);
+
+            var requested = duration is { } value && value > TimeSpan.Zero ? value : (TimeSpan?)null;
             var isPermanent = permanent;
             DateTime expiresUtc;
             TimeSpan? effectiveDuration = null;
@@ -405,9 +417,7 @@ public sealed partial class BanEngine
             }
             else
             {
-                var chosen = duration is { } requested && requested > TimeSpan.Zero
-                    ? requested
-                    : settings.TierForOffense(1);
+                var chosen = requested ?? settings.TierForOffense(1);
                 if (chosen > settings.MaxBanDuration)
                 {
                     chosen = settings.MaxBanDuration;
@@ -415,16 +425,15 @@ public sealed partial class BanEngine
 
                 effectiveDuration = chosen;
                 expiresUtc = now + chosen;
+
+                // Nothing was asked for, so nothing the running ban already gives is taken away.
+                if (requested is null && stillBanned && (existing!.IsPermanent || existing.ExpiresUtc > expiresUtc))
+                {
+                    isPermanent = existing.IsPermanent;
+                    expiresUtc = isPermanent ? DateTime.MaxValue : existing.ExpiresUtc;
+                    effectiveDuration = isPermanent ? null : expiresUtc - now;
+                }
             }
-
-            var existing = _unsavedBans.GetValueOrDefault(normalized) ?? await SafeGetBanAsync(normalized, ct).ConfigureAwait(false);
-
-            // Re-banning an IP that is still banned (e.g. "promote to permanent") is not a new
-            // offense; only a fresh ban moves the escalation tier.
-            var stillBanned = existing is not null && (existing.IsPermanent || existing.ExpiresUtc > now);
-            var offense = stillBanned
-                ? Math.Max(Math.Max(1, existing!.OffenseCount), _offenses.GetCount(normalized))
-                : ComputeOffense(normalized, existing);
 
             var ban = new BanEntry
             {
@@ -434,7 +443,7 @@ public sealed partial class BanEngine
                 ExpiresUtc = expiresUtc,
                 OffenseCount = offense,
                 IsPermanent = isPermanent,
-                Note = string.IsNullOrWhiteSpace(note) ? null : note.Trim(),
+                Note = string.IsNullOrWhiteSpace(note) ? (stillBanned ? existing!.Note : null) : note.Trim(),
                 PortScope = PortProfiles.AllPorts,
             };
 
@@ -457,7 +466,7 @@ public sealed partial class BanEngine
                 OffenseCount = offense,
                 IsPermanent = isPermanent,
                 Duration = effectiveDuration,
-                Note = string.IsNullOrWhiteSpace(note) ? null : note.Trim(),
+                Note = ban.Note,
             }, ct).ConfigureAwait(false);
 
             var message = isPermanent
