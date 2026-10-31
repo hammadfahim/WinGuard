@@ -247,6 +247,98 @@ public sealed class BanEngineResilienceTests
         Assert.DoesNotContain(h.Store.Events, e => e.Message.StartsWith("TEMPORARILY TRUSTED", StringComparison.Ordinal));
     }
 
+    // ---------- expiry goes by the newest ban ----------
+
+    /// <summary>The row of a first ban that ran out and cannot be deleted, and a second ban the store refused.</summary>
+    private static async Task ReBanOverAnExpiredRowAsync(EngineHarness h)
+    {
+        h.Store.ActiveClock = () => h.Time.UtcNow.UtcDateTime;
+        await Threshold(h, Attacker, ProtocolSource.MsSql);
+
+        h.Store.FailWrites = true;
+        h.Store.FailBanRemoval = true;
+        h.Time.Advance(TimeSpan.FromHours(24) + TimeSpan.FromSeconds(1));
+        await h.Engine.HousekeepOnceAsync();
+        Assert.DoesNotContain(Attacker, h.Firewall.Blocked);
+
+        // The attacker returns; the ban is enforced and held in memory.
+        await Threshold(h, Attacker, ProtocolSource.MsSql);
+        Assert.Contains(Attacker, h.Firewall.Blocked);
+    }
+
+    [Fact]
+    public async Task An_unsaved_reban_stays_blocked_across_timer_passes_while_the_expired_row_cannot_be_deleted()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        await ReBanOverAnExpiredRowAsync(h);
+
+        // HousekeepOnceAsync just reconciled, so the next timer passes do not.
+        var open = 0;
+        for (var pass = 0; pass < 3; pass++)
+        {
+            h.Time.Advance(TimeSpan.FromSeconds(15));
+            await PassLikeTheTimer(h);
+            open += h.Firewall.Blocked.Contains(Attacker) ? 0 : 1;
+        }
+
+        Assert.True(open == 0, $"attacker unblocked after {open} of 3 timer passes");
+    }
+
+    [Fact]
+    public async Task A_widened_unsaved_ban_outlives_the_old_row()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, Profiles);
+        await Threshold(h, Attacker, ProtocolSource.Rdp, "4625");
+
+        h.Store.FailWrites = true;
+        h.Store.FailBanRemoval = true;
+        h.Time.Advance(TimeSpan.FromHours(23) + TimeSpan.FromMinutes(59) + TimeSpan.FromSeconds(30));
+        await Threshold(h, Attacker, ProtocolSource.MsSql); // widened for 7 days, unsaved
+        await h.Engine.HousekeepOnceAsync();
+
+        h.Time.Advance(TimeSpan.FromSeconds(40)); // past the old row's expiry, inside the 60 s reconcile interval
+        h.Firewall.UnblockCalls.Clear();
+        await PassLikeTheTimer(h);
+
+        Assert.DoesNotContain(Attacker, h.Firewall.UnblockCalls);
+        Assert.Contains(Attacker, h.Firewall.Blocked);
+    }
+
+    [Fact]
+    public async Task The_unsaved_ban_replaces_the_expired_row_when_the_store_recovers()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        await ReBanOverAnExpiredRowAsync(h);
+
+        h.Store.FailWrites = false;
+        h.Store.FailBanRemoval = false;
+        await h.Engine.HousekeepOnceAsync();
+
+        var row = (await h.Store.GetBanAsync(Attacker))!;
+        Assert.Equal(2, row.OffenseCount);
+        Assert.True(row.ExpiresUtc > h.Time.UtcNow.UtcDateTime);
+        Assert.Contains(Attacker, h.Firewall.Blocked);
+    }
+
+    [Fact]
+    public async Task The_expired_row_expires_once_when_the_unsaved_ban_runs_out_first()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        await ReBanOverAnExpiredRowAsync(h);
+
+        h.Time.Advance(TimeSpan.FromDays(8));
+        await h.Engine.HousekeepOnceAsync();
+        Assert.DoesNotContain(Attacker, h.Firewall.Blocked);
+
+        h.Store.FailWrites = false;
+        h.Store.FailBanRemoval = false;
+        await h.Engine.HousekeepOnceAsync();
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Null(await h.Store.GetBanAsync(Attacker));
+        Assert.Single(h.Store.BanHistory, row => row.Action == BanHistoryAction.Expired);
+    }
+
     // ---------- a re-ban without a duration ----------
 
     [Fact]

@@ -186,6 +186,14 @@ public sealed partial class BanEngine
                 continue;
             }
 
+            // A newer ban the store has not taken yet is what counts for this address. It replaces
+            // the row when the store recovers; should it run out first, the retry above drops it
+            // and this row expires normally on that same pass.
+            if (_unsavedBans.ContainsKey(ban.IpAddress))
+            {
+                continue;
+            }
+
             TryUnblock(ban.IpAddress);
 
             try
