@@ -1016,7 +1016,13 @@ public sealed partial class BanEngine
             // An older unsaved version of this ban must not overwrite this one on the next retry.
             _unsavedBans.Remove(ban.IpAddress);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The service is stopping with the block in place: the stop pass saves it.
+            _unsavedBans[ban.IpAddress] = ban;
+            throw;
+        }
+        catch (Exception ex)
         {
             _unsavedBans[ban.IpAddress] = ban;
             _logger.LogError(ex, "Could not save the ban of {Ip}; it stays enforced and will be saved when the store recovers.", ban.IpAddress);

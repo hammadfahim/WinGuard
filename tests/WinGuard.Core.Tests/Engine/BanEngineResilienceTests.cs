@@ -339,6 +339,37 @@ public sealed class BanEngineResilienceTests
         Assert.Single(h.Store.BanHistory, row => row.Action == BanHistoryAction.Expired);
     }
 
+    // ---------- shutdown between the block and the save ----------
+
+    [Fact]
+    public async Task A_ban_cancelled_between_block_and_save_is_saved_on_stop()
+    {
+        using var cts = new CancellationTokenSource();
+        await using var h = await EngineHarness.StartAsync(T0);
+        h.Store.BeforeUpsert = ct =>
+        {
+            if (cts.Token == ct && !cts.IsCancellationRequested)
+            {
+                cts.Cancel();
+            }
+
+            ct.ThrowIfCancellationRequested();
+        };
+
+        for (var i = 0; i < 4; i++)
+        {
+            await h.Engine.ProcessAsync(h.Fail(Attacker, ProtocolSource.MsSql), cts.Token);
+        }
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => h.Engine.ProcessAsync(h.Fail(Attacker, ProtocolSource.MsSql), cts.Token));
+        Assert.Contains(Attacker, h.Firewall.Blocked);
+
+        h.Store.BeforeUpsert = null;
+        await h.Engine.StopAsync();
+        Assert.NotNull(await h.Store.GetBanAsync(Attacker));
+    }
+
     // ---------- a re-ban without a duration ----------
 
     [Fact]
