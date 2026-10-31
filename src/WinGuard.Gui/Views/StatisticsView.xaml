@@ -11,6 +11,16 @@
                 <TextBlock Style="{StaticResource TextCaption}" Text="{Binding Detail}" TextTrimming="CharacterEllipsis" />
             </StackPanel>
         </DataTemplate>
+
+        <!-- The same tile for a figure that means more than a count. -->
+        <DataTemplate x:Key="ToneTileTemplate">
+            <StackPanel>
+                <TextBlock Style="{StaticResource TextCaption}" Text="{Binding Title}" />
+                <TextBlock Style="{StaticResource TextMetric}" FontSize="24" Text="{Binding Value}" />
+                <TextBlock Style="{StaticResource ToneText}" ui:Ui.Tone="{Binding Tone}" FontSize="{StaticResource FontSizeCaption}" Text="{Binding Detail}"
+                           TextTrimming="CharacterEllipsis" ToolTip="{Binding Detail}" />
+            </StackPanel>
+        </DataTemplate>
     </UserControl.Resources>
 
     <Grid Margin="{StaticResource PagePadding}">
@@ -54,7 +64,7 @@
                 </Grid.RowDefinitions>
 
                 <!-- Headline figures -->
-                <UniformGrid Columns="4" Margin="{StaticResource GapBottom12}">
+                <UniformGrid Columns="5" Margin="{StaticResource GapBottom12}">
                     <Border Style="{StaticResource Card}" Padding="14,8" Margin="0,0,6,0">
                         <ContentPresenter Content="{Binding DetectionsTile}" ContentTemplate="{StaticResource StatTileTemplate}" />
                     </Border>
@@ -64,8 +74,11 @@
                     <Border Style="{StaticResource Card}" Padding="14,8" Margin="6,0">
                         <ContentPresenter Content="{Binding PeakTile}" ContentTemplate="{StaticResource StatTileTemplate}" />
                     </Border>
-                    <Border Style="{StaticResource Card}" Padding="14,8" Margin="6,0,0,0">
+                    <Border Style="{StaticResource Card}" Padding="14,8" Margin="6,0">
                         <ContentPresenter Content="{Binding ActiveTile}" ContentTemplate="{StaticResource StatTileTemplate}" />
+                    </Border>
+                    <Border Style="{StaticResource Card}" Padding="14,8" Margin="6,0,0,0">
+                        <ContentPresenter Content="{Binding SuspiciousTile}" ContentTemplate="{StaticResource ToneTileTemplate}" />
                     </Border>
                 </UniformGrid>
 
@@ -151,10 +164,10 @@
                                   Visibility="{Binding ShowHistory, Converter={StaticResource BoolToVis}}">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="Time" Binding="{Binding TimeText}" SortMemberPath="TimeUtc" Width="150" ElementStyle="{StaticResource CellMuted}" />
-                                <DataGridTemplateColumn Header="Action" SortMemberPath="Action" Width="104">
+                                <DataGridTemplateColumn Header="Action" SortMemberPath="Action" Width="128">
                                     <DataGridTemplateColumn.CellTemplate>
                                         <DataTemplate>
-                                            <ContentControl Style="{StaticResource Chip}" ui:Ui.Tone="{Binding Tone}" Content="{Binding Action}" />
+                                            <ContentControl Style="{StaticResource Chip}" ui:Ui.Tone="{Binding Tone}" Content="{Binding ActionText}" />
                                         </DataTemplate>
                                     </DataGridTemplateColumn.CellTemplate>
                                 </DataGridTemplateColumn>

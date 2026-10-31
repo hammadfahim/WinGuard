@@ -437,12 +437,13 @@ public sealed partial class BlockedIpsViewModel : ObservableObject
     public static string BuildCsv(IEnumerable<BanRowViewModel> rows)
     {
         var builder = new StringBuilder();
-        builder.AppendLine("IP,Kind,Source,BannedAt(local),Expires(local),OffenseCount,Permanent,Note");
+        builder.AppendLine("IP,Kind,Source,Ports,BannedAt(local),Expires(local),OffenseCount,Permanent,Note");
         foreach (var row in rows)
         {
             builder.Append(CsvText.Escape(row.IpAddress)).Append(',');
             builder.Append(CsvText.Escape(row.KindText)).Append(',');
             builder.Append(CsvText.Escape(row.SourceText)).Append(',');
+            builder.Append(CsvText.Escape(row.PortsText)).Append(',');
             builder.Append(CsvText.Escape(row.BannedText)).Append(',');
             builder.Append(CsvText.Escape(row.ExpiresText)).Append(',');
             builder.Append(row.OffenseCount.ToString(CultureInfo.InvariantCulture)).Append(',');
@@ -459,6 +460,7 @@ public sealed partial class BlockedIpsViewModel : ObservableObject
         || row.IpAddress.Contains(filter, StringComparison.OrdinalIgnoreCase)
         || row.SourceText.Contains(filter, StringComparison.OrdinalIgnoreCase)
         || row.KindText.Contains(filter, StringComparison.OrdinalIgnoreCase)
+        || row.PortsText.Contains(filter, StringComparison.OrdinalIgnoreCase)
         || row.NoteText.Contains(filter, StringComparison.OrdinalIgnoreCase);
 
     private static ListSortDirection DefaultDirection(string column) =>
@@ -581,7 +583,7 @@ public sealed partial class BlockedIpsViewModel : ObservableObject
             EmptyTitle = _rows.Count == 0 ? "No blocked addresses" : "No matches";
             EmptyText = _rows.Count == 0
                 ? "Attackers appear here the moment they cross the failed-login threshold."
-                : $"Nothing matches \"{filter}\". Search looks at the address, engine and note.";
+                : $"Nothing matches \"{filter}\". Search looks at the address, engine, ports and note.";
             State = ViewState.Empty;
         }
     }
@@ -596,6 +598,7 @@ public sealed partial class BlockedIpsViewModel : ObservableObject
         {
             nameof(BanRowViewModel.IpSortKey) => Order(row => row.IpSortKey),
             nameof(BanRowViewModel.SourceText) => Order(row => row.SourceText),
+            nameof(BanRowViewModel.PortsText) => Order(row => row.PortsText),
             nameof(BanRowViewModel.ExpiresSortKey) => Order(row => row.ExpiresSortKey),
             nameof(BanRowViewModel.OffenseCount) => Order(row => row.OffenseCount),
             nameof(BanRowViewModel.NoteText) => Order(row => row.NoteText),

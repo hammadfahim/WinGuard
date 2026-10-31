@@ -7,10 +7,16 @@ namespace WinGuard.Gui.ViewModels;
 public sealed partial class FtpSourceRow : ObservableObject
 {
     private readonly Action _changed;
+    private readonly FtpLogSource? _origin;
 
     /// <summary>Creates a row.</summary>
     /// <param name="changed">Called on every edit.</param>
-    public FtpSourceRow(Action changed) => _changed = changed;
+    /// <param name="origin">The source this row edits; null for a new one.</param>
+    public FtpSourceRow(Action changed, FtpLogSource? origin = null)
+    {
+        _changed = changed;
+        _origin = origin;
+    }
 
     /// <summary>Display name.</summary>
     [ObservableProperty]
@@ -31,6 +37,16 @@ public sealed partial class FtpSourceRow : ObservableObject
 
     /// <summary>Whether the row is invalid.</summary>
     public bool HasError => PathError.Length > 0;
+
+    /// <summary>The source to save: what was loaded, with this row's edits on top.</summary>
+    public FtpLogSource ToSource()
+    {
+        var source = _origin is null ? new FtpLogSource() : SettingChecks.Copy(_origin);
+        source.Name = Name.Trim();
+        source.Kind = Kind;
+        source.Path = Path.Trim();
+        return source;
+    }
 
     partial void OnNameChanged(string value) => _changed();
 

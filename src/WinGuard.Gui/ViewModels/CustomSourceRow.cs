@@ -11,11 +11,21 @@ public sealed partial class CustomSourceRow : ObservableObject
     private const int TestDelayMilliseconds = 250;
 
     private readonly Action _changed;
+    private readonly CustomLogSource? _origin;
     private int _testVersion;
 
     /// <summary>Creates a row.</summary>
     /// <param name="changed">Called on every edit.</param>
-    public CustomSourceRow(Action changed) => _changed = changed;
+    /// <param name="origin">The source this row edits; null for a new one.</param>
+    public CustomSourceRow(Action changed, CustomLogSource? origin = null)
+    {
+        _changed = changed;
+        _origin = origin;
+        Ports = new PortProfileRow(Title, changed);
+    }
+
+    /// <summary>The ports a ban from this source blocks, edited in the Blocking section.</summary>
+    public PortProfileRow Ports { get; }
 
     /// <summary>Display name.</summary>
     [ObservableProperty]
@@ -89,9 +99,9 @@ public sealed partial class CustomSourceRow : ObservableObject
         _ when recipe == CustomSourceRecipes.WindowsOpenSsh =>
             "sshd: Failed password for invalid user admin from 203.0.113.7 port 52144 ssh2",
         _ when recipe == CustomSourceRecipes.HMailServer =>
-            "2026-10-31 12:00:01\tFAILED\tadmin@example.com\t25\t203.0.113.7\t",
+            "\"SMTPD\"\t4728\t201\t\"2026-10-31 12:00:01.112\"\t\"203.0.113.7\"\t\"SENT: 535 Authentication failed. Restarting authentication process.\"",
         _ when recipe == CustomSourceRecipes.IisHttpAuth =>
-            "2026-10-31 12:00:01 203.0.113.7 - W3SVC1 WEB01 10.0.0.5 GET /admin - 401 0 0",
+            "2026-10-31 12:00:01 10.0.0.5 POST /login - 443 admin 203.0.113.7 Mozilla/5.0 - 401 1 1326 12",
         _ when recipe == CustomSourceRecipes.Vnc =>
             "<Warn> Connections: blacklisted: 203.0.113.7",
         _ => string.Empty,
@@ -100,7 +110,23 @@ public sealed partial class CustomSourceRow : ObservableObject
     /// <summary>Runs the tester now.</summary>
     public void TestNow() => Result = RegexProbe.Run(Regex, SampleLine);
 
-    partial void OnNameChanged(string value) => _changed();
+    /// <summary>The source to save: what was loaded, with this row's edits on top.</summary>
+    public CustomLogSource ToSource()
+    {
+        var source = _origin is null ? new CustomLogSource() : SettingChecks.Copy(_origin);
+        source.Name = Name.Trim();
+        source.Enabled = Enabled;
+        source.PathGlob = PathGlob.Trim();
+        source.Regex = Regex.Trim();
+        source.BlockedPorts = Ports.Values;
+        return source;
+    }
+
+    partial void OnNameChanged(string value)
+    {
+        Ports.Title = Title;
+        _changed();
+    }
 
     partial void OnEnabledChanged(bool value) => _changed();
 

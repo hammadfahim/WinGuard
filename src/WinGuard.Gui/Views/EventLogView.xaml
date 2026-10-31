@@ -88,11 +88,19 @@
                     </Border>
 
                     <ListBox x:Name="EventsList" Grid.Row="1" ItemsSource="{Binding Events}" SelectionMode="Extended"
-                             ItemContainerStyle="{StaticResource FeedRow}"
                              VirtualizingPanel.ScrollUnit="Item"
                              ScrollViewer.CanContentScroll="True"
                              AutomationProperties.Name="Events, oldest first"
                              KeyDown="OnListKeyDown">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem" BasedOn="{StaticResource FeedRow}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsCompromise}" Value="True">
+                                        <Setter Property="Background" Value="{DynamicResource AttackSoftBrush}" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
                         <ListBox.ContextMenu>
                             <ContextMenu>
                                 <MenuItem Header="Copy event" ui:Ui.Icon="{StaticResource GlyphCopy}" InputGestureText="Ctrl+C"
@@ -109,6 +117,15 @@
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <Grid>
+                                    <Grid.Style>
+                                        <Style TargetType="Grid">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsCompromise}" Value="True">
+                                                    <Setter Property="TextBlock.FontWeight" Value="SemiBold" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Grid.Style>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="36" />
                                         <ColumnDefinition Width="146" />
@@ -119,7 +136,7 @@
                                     </Grid.ColumnDefinitions>
                                     <TextBlock Style="{StaticResource FeedToneIcon}" ui:Ui.Tone="{Binding Tone}" Text="{Binding Glyph}" FontSize="12" HorizontalAlignment="Center" />
                                     <TextBlock Grid.Column="1" Style="{StaticResource FeedMuted}" Text="{Binding TimeText}" />
-                                    <TextBlock Grid.Column="2" Style="{StaticResource FeedTone}" ui:Ui.Tone="{Binding Tone}" Text="{Binding LevelText}" />
+                                    <TextBlock Grid.Column="2" Style="{StaticResource FeedTone}" ui:Ui.Tone="{Binding Tone}" Text="{Binding LevelLabel}" />
                                     <TextBlock Grid.Column="3" Style="{StaticResource FeedMuted}" Text="{Binding SourceText}" />
                                     <TextBlock Grid.Column="4" Style="{StaticResource CellMono}" Text="{Binding IpAddress}" Margin="0,0,12,0" ToolTip="{Binding IpAddress}" />
                                     <TextBlock Grid.Column="5" Style="{StaticResource CellText}" Text="{Binding Message}" Margin="0,0,12,0" ToolTip="{Binding Message}" />

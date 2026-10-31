@@ -235,7 +235,11 @@ public partial class App : System.Windows.Application
     {
         if (_mainViewModel is { } main)
         {
-            _trayIcon?.SetStatus(main.Dashboard.IsConnected, main.Dashboard.Protection.Title);
+            var protection = main.Dashboard.Protection;
+            _trayIcon?.SetStatus(
+                main.Dashboard.IsConnected,
+                protection.TrayText,
+                protection.Kind is ProtectionKind.Disarmed or ProtectionKind.FirewallOff or ProtectionKind.RulesIneffective);
         }
     }
 

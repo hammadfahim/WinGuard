@@ -750,6 +750,31 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<LogEvent>> GetEventsAfterAsync(long afterId, int limit, CancellationToken ct = default)
+    {
+        var take = limit <= 0 ? 200 : limit;
+        return await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "SELECT ts_utc, level, source, ip, message, rowid FROM events WHERE rowid > $after ORDER BY rowid ASC LIMIT $limit;";
+                cmd.Parameters.AddWithValue("$after", afterId);
+                cmd.Parameters.AddWithValue("$limit", take);
+
+                var events = new List<LogEvent>();
+                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    events.Add(ReadEvent(reader));
+                }
+
+                return (IReadOnlyList<LogEvent>)events;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task PruneEventsAsync(DateTime olderThanUtc, CancellationToken ct = default)
     {
         await WithConnectionAsync(

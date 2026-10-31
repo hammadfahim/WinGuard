@@ -1,8 +1,14 @@
+using System.Globalization;
+using WinGuard.Gui.Services;
+
 namespace WinGuard.Gui.ViewModels;
 
 /// <summary>The one overall state the console reports, in the banner and the dashboard hero.</summary>
 public enum ProtectionKind
 {
+    /// <summary>Break-glass is on: WinGuard holds no firewall rules. Outranks everything else.</summary>
+    Disarmed,
+
     /// <summary>The first connection attempt has not finished.</summary>
     Connecting,
 
@@ -17,6 +23,9 @@ public enum ProtectionKind
 
     /// <summary>The Windows Firewall service is stopped, so bans have no effect.</summary>
     FirewallOff,
+
+    /// <summary>The firewall runs, but its policy keeps WinGuard's rules from doing anything.</summary>
+    RulesIneffective,
 
     /// <summary>The service is up, but no engine is watching anything.</summary>
     NotWatching,
@@ -37,6 +46,10 @@ public enum ProtectionKind
 /// <param name="EnginesEnabled">Enabled engines.</param>
 /// <param name="EnginesRunning">Enabled engines that are running.</param>
 /// <param name="ActiveBans">Current ban count.</param>
+/// <param name="Disarmed">The last status said a break-glass window is open.</param>
+/// <param name="DisarmedUntilUtc">When that window ends by itself.</param>
+/// <param name="RulesIneffective">The firewall policy keeps WinGuard's rules from taking effect.</param>
+/// <param name="NowUtc">The time, for the countdown.</param>
 public sealed record ProtectionInputs(
     bool Connected,
     bool ConnectionSettled,
@@ -45,7 +58,11 @@ public sealed record ProtectionInputs(
     bool? FirewallRunning,
     int EnginesEnabled,
     int EnginesRunning,
-    int ActiveBans);
+    int ActiveBans,
+    bool Disarmed = false,
+    DateTime? DisarmedUntilUtc = null,
+    bool RulesIneffective = false,
+    DateTime NowUtc = default);
 
 /// <summary>The overall state, worded for people.</summary>
 /// <param name="Kind">Which state this is.</param>
@@ -56,6 +73,8 @@ public sealed record ProtectionInputs(
 /// <param name="CanRetry">Offers Retry.</param>
 /// <param name="CanStartService">Offers Start service.</param>
 /// <param name="CanReview">Offers a link to the setting behind this state.</param>
+/// <param name="Countdown">What is left of a limited state, as a live count; empty otherwise.</param>
+/// <param name="Tray">The tray's words, when the title alone would say too little; empty otherwise.</param>
 public sealed record ProtectionSummary(
     ProtectionKind Kind,
     Tone Tone,
@@ -64,7 +83,13 @@ public sealed record ProtectionSummary(
     string Detail,
     bool CanRetry = false,
     bool CanStartService = false,
-    bool CanReview = false);
+    bool CanReview = false,
+    string Countdown = "",
+    string Tray = "")
+{
+    /// <summary>What the tray icon says. Windows cuts it off, so it stays short, and it must not tick.</summary>
+    public string TrayText => Tray.Length > 0 ? Tray : Title;
+}
 
 /// <summary>
 /// Pure decision of the overall state. When several things are wrong at once the one with the worst
@@ -82,6 +107,14 @@ public static class ProtectionEvaluator
     /// <summary>Decides the state.</summary>
     public static ProtectionSummary Evaluate(ProtectionInputs input)
     {
+        // First, ahead of the connection: nothing is enforced whatever else is true, and a service
+        // that stops answering during a window does not end the window. Its end is known, so a
+        // stale answer cannot outlast it.
+        if (input.Disarmed && (input.DisarmedUntilUtc is not { } until || until > input.NowUtc))
+        {
+            return Disarmed(input);
+        }
+
         if (!input.Connected)
         {
             if (!string.IsNullOrEmpty(input.Problem))
@@ -111,6 +144,17 @@ public static class ProtectionEvaluator
                 GlyphError,
                 "Firewall off",
                 $"The Windows Firewall service (MpsSvc) is stopped, so {Bans(input.ActiveBans)} no effect.",
+                CanRetry: true);
+        }
+
+        if (input.RulesIneffective && !input.ReportOnly)
+        {
+            return new ProtectionSummary(
+                ProtectionKind.RulesIneffective,
+                Tone.Attack,
+                GlyphError,
+                "Rules have no effect",
+                $"The firewall policy keeps WinGuard's rules from working, so {Bans(input.ActiveBans)} no effect. The dashboard says why.",
                 CanRetry: true);
         }
 
@@ -161,6 +205,28 @@ public static class ProtectionEvaluator
             input.EnginesRunning == 1
                 ? "1 engine is watching and the firewall is enforcing bans."
                 : $"{input.EnginesRunning} engines are watching and the firewall is enforcing bans.");
+    }
+
+    private static ProtectionSummary Disarmed(ProtectionInputs input)
+    {
+        var until = input.DisarmedUntilUtc;
+        var clock = until is { } end ? TimeText.ToLocal(end).ToString("t", CultureInfo.CurrentCulture) : string.Empty;
+        var countdown = until is { } left ? TimeText.Countdown(left - input.NowUtc) : string.Empty;
+
+        var resumes = until is null
+            ? "Enforcement resumes by itself when the window ends."
+            : $"Enforcement resumes by itself at {clock}.";
+        var stale = input.Connected ? string.Empty : " The service is not answering, so this is the last it reported.";
+
+        return new ProtectionSummary(
+            ProtectionKind.Disarmed,
+            Tone.Attack,
+            GlyphError,
+            "Disarmed",
+            $"Break-glass is on: WinGuard holds no firewall rules, so nothing is enforced and attackers are not blocked. {resumes} To end it early, run winguard-svc --rearm from an elevated prompt.{stale}",
+            CanRetry: !input.Connected,
+            Countdown: countdown,
+            Tray: until is null ? "Disarmed, nothing is enforced" : $"Disarmed until {clock}, nothing is enforced");
     }
 
     private static string Bans(int count) => count switch

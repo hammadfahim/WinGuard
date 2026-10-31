@@ -528,6 +528,20 @@ public sealed class FakeStore : IStore
         }
     }
 
+    public Task<IReadOnlyList<LogEvent>> GetEventsAfterAsync(long afterId, int limit, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            IReadOnlyList<LogEvent> result = _events
+                .Where(e => e.Id > afterId)
+                .OrderBy(e => e.Id)
+                .Take(limit)
+                .Select(Clone)
+                .ToList();
+            return Task.FromResult(result);
+        }
+    }
+
     public Task PruneEventsAsync(DateTime olderThanUtc, CancellationToken ct = default)
     {
         lock (_gate)

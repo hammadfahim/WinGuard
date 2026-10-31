@@ -6,6 +6,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using WinGuard.Core.Engine;
 using WinGuard.Core.Ipc;
+using WinGuard.Core.Model;
 using WinGuard.Core.Tests.Fakes;
 using WinGuard.Service;
 using WinGuard.Service.Ipc;
@@ -91,6 +92,35 @@ public sealed class PipeEndToEndTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => client.BlockNowAsync("not-an-ip", null, false, null));
         Assert.True(client.IsConnected);
         Assert.NotNull(await client.GetStatusAsync());
+    }
+
+    [Fact]
+    public async Task A_console_recovers_a_burst_too_large_for_one_read_and_misses_nothing()
+    {
+        await using var service = await TestService.StartAsync(_ => Admin);
+        using var client = TestClient(service.PipeName);
+        Assert.True(await client.TryReconnectNowAsync(), client.LastProblem);
+
+        await service.Store.AddEventAsync(new LogEvent { TimestampUtc = DateTime.UtcNow, Message = "before" });
+        var cursor = new EventCursor();
+        Assert.Equal("before", Assert.Single((await client.ReadNewEventsAsync(cursor)).Events).Message);
+
+        // Five pages fit one read, so this takes two, and neither may lose or repeat a row.
+        for (var i = 0; i < 7200; i++)
+        {
+            await service.Store.AddEventAsync(new LogEvent { TimestampUtc = DateTime.UtcNow, Message = "burst " + i });
+        }
+
+        var first = await client.ReadNewEventsAsync(cursor);
+        var second = await client.ReadNewEventsAsync(cursor);
+
+        Assert.Equal(5000, first.Events.Count);
+        Assert.Equal(2200, second.Events.Count);
+        Assert.Equal(0, first.Skipped + second.Skipped);
+        Assert.Equal(
+            Enumerable.Range(0, 7200).Select(i => "burst " + i),
+            first.Events.Concat(second.Events).Select(e => e.Message));
+        Assert.Same(EventBatch.None, await client.ReadNewEventsAsync(cursor));
     }
 
     [Fact]

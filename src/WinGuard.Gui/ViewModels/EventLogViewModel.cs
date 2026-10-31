@@ -53,8 +53,8 @@ public sealed partial class FilterChip : ObservableObject
 }
 
 /// <summary>
-/// Event Log view-model (PLAN.md §9.3): a capped (1000-entry) live tail with level and engine chips,
-/// search, pause/resume and a "N new events" pill. Pausing freezes the list and queues what arrives;
+/// Event Log view-model (PLAN.md §9.3): a capped live tail with level and engine chips, search,
+/// pause/resume and a "N new events" pill. Pausing freezes the list and queues what arrives;
 /// scrolling up keeps appending but stops following. Either way the pill says how much is waiting.
 /// </summary>
 public sealed partial class EventLogViewModel : ObservableObject
@@ -62,7 +62,8 @@ public sealed partial class EventLogViewModel : ObservableObject
     /// <summary>Label for events no engine produced.</summary>
     public const string SystemSource = "System";
 
-    private const int MaxEntries = 1000;
+    // Several pages of ListEvents: a recovered burst has to fit, or fetching it would be for nothing.
+    private const int MaxEntries = 10_000;
 
     // Beyond this many rows at once a single Reset redraws faster than individual inserts.
     private const int ResetThreshold = 128;
@@ -74,6 +75,7 @@ public sealed partial class EventLogViewModel : ObservableObject
     private readonly Queue<string> _seenOrder = [];
 
     private bool _everConnected;
+    private int _pendingDropped;
 
     /// <summary>Creates the view-model.</summary>
     /// <param name="toasts">Where results are reported.</param>
@@ -186,9 +188,12 @@ public sealed partial class EventLogViewModel : ObservableObject
         if (IsPaused)
         {
             _pending.AddRange(events);
-            if (_pending.Count > MaxEntries)
+            // One short of the feed's capacity: the notice of what was dropped has to fit in it.
+            if (_pending.Count >= MaxEntries)
             {
-                _pending.RemoveRange(0, _pending.Count - MaxEntries);
+                var dropped = _pending.Count - MaxEntries + 1;
+                _pendingDropped += dropped;
+                _pending.RemoveRange(0, dropped);
             }
 
             UnseenCount = _pending.Count;
@@ -250,6 +255,19 @@ public sealed partial class EventLogViewModel : ObservableObject
         ScrollToEndRequested?.Invoke();
     }
 
+    /// <summary>Shows one address across every level and engine: used by the dashboard's alerts.</summary>
+    public void ShowAddress(string ip)
+    {
+        foreach (var chip in LevelChips.Concat(SourceChips))
+        {
+            chip.Set(true);
+        }
+
+        SearchText = ip;
+        Rebuild();
+        ScrollToEndRequested?.Invoke();
+    }
+
     /// <summary>Shows everything again.</summary>
     [RelayCommand]
     private void ResetFilters()
@@ -296,6 +314,7 @@ public sealed partial class EventLogViewModel : ObservableObject
     {
         _all.Clear();
         _pending.Clear();
+        _pendingDropped = 0;
         Events.Clear();
         UnseenCount = 0;
         CountChips();
@@ -389,6 +408,18 @@ public sealed partial class EventLogViewModel : ObservableObject
         IsPaused = false;
         var queued = _pending.ToList();
         _pending.Clear();
+        if (_pendingDropped > 0 && queued.Count > 0)
+        {
+            // Say so at the place where the rows are missing, as for a gap in the feed itself.
+            queued.Insert(0, new EventDto
+            {
+                TimestampUtc = queued[0].TimestampUtc,
+                Level = LogEventLevel.Warning,
+                Message = $"{_pendingDropped:N0} events from this pause are not shown: the list holds the newest {MaxEntries:N0}. The service still has them.",
+            });
+            _pendingDropped = 0;
+        }
+
         Append(queued);
         UnseenCount = 0;
         UpdateState();

@@ -130,12 +130,50 @@
             <Grid Grid.Column="1">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
 
+                <!-- Break-glass: outranks the banner below. It offers no way to disarm or rearm: that
+                     is a deliberate command-line action. -->
+                <Border Style="{StaticResource BannerCritical}" DataContext="{Binding Dashboard}"
+                        Visibility="{Binding IsDisarmed, Converter={StaticResource BoolToVis}}"
+                        AutomationProperties.LiveSetting="Assertive"
+                        AutomationProperties.Name="{Binding Protection.Title, StringFormat='Protection state: {0}'}"
+                        AutomationProperties.HelpText="{Binding Protection.Detail}">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Style="{StaticResource Icon}" Foreground="{DynamicResource OnAttackBrush}" Text="{Binding Protection.Glyph}" FontSize="16" Margin="0,0,10,0" />
+                            <TextBlock FontSize="{StaticResource FontSizeHeading}" FontWeight="SemiBold" Foreground="{DynamicResource OnAttackBrush}" Text="Disarmed: nothing is enforced" VerticalAlignment="Center" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Foreground="{DynamicResource OnAttackBrush}" FontWeight="SemiBold" VerticalAlignment="Center"
+                                       Visibility="{Binding Protection.Countdown, Converter={StaticResource NotEmptyToVis}}">
+                                <Run Text="Resumes in" /> <Run Text="{Binding Protection.Countdown, Mode=OneWay}" FontFamily="{StaticResource FontMono}" />
+                            </TextBlock>
+                            <Button Content="Retry" Margin="12,0,0,0" Height="{StaticResource ControlHeightSmall}"
+                                    ui:Ui.Icon="{StaticResource GlyphRefresh}"
+                                    Command="{Binding DataContext.RetryConnectionCommand, ElementName=Root}"
+                                    ToolTip="Try again now"
+                                    Visibility="{Binding Protection.CanRetry, Converter={StaticResource BoolToVis}}" />
+                        </StackPanel>
+                        <TextBlock Grid.Row="1" Grid.ColumnSpan="2" Foreground="{DynamicResource OnAttackBrush}" Text="{Binding Protection.Detail}"
+                                   TextWrapping="Wrap" Margin="26,3,0,0" />
+                    </Grid>
+                </Border>
+
                 <!-- Global state banner -->
-                <Border Style="{StaticResource Banner}" ui:Ui.Tone="{Binding Protection.Tone}"
+                <Border Grid.Row="1" Style="{StaticResource Banner}" ui:Ui.Tone="{Binding Protection.Tone}"
                         DataContext="{Binding Dashboard}" AutomationProperties.LiveSetting="Polite"
+                        Visibility="{Binding IsDisarmed, Converter={StaticResource InverseBoolToVis}}"
                         AutomationProperties.Name="{Binding Protection.Title, StringFormat='Protection state: {0}'}"
                         AutomationProperties.HelpText="{Binding Protection.Detail}">
                     <Grid>
@@ -150,8 +188,7 @@
                         <TextBlock Grid.Column="1" Style="{StaticResource TextStrong}" Text="{Binding Protection.Title}"
                                    VerticalAlignment="Center" Margin="0,0,12,0" />
                         <TextBlock Grid.Column="2" Style="{StaticResource TextMuted}" Text="{Binding Protection.Detail}"
-                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
-                                   ToolTip="{Binding Protection.Detail}" />
+                                   VerticalAlignment="Center" TextWrapping="Wrap" />
                         <StackPanel Grid.Column="3" Orientation="Horizontal" Margin="12,0,0,0">
                             <Button Content="Review" Margin="8,0,0,0" Command="{Binding ReviewStateCommand}"
                                     Height="{StaticResource ControlHeightSmall}" ToolTip="Open the setting behind this state"
@@ -169,7 +206,7 @@
                     </Grid>
                 </Border>
 
-                <ui:PageHost x:Name="Pages" Grid.Row="1" Page="{Binding CurrentViewModel}" />
+                <ui:PageHost x:Name="Pages" Grid.Row="2" Page="{Binding CurrentViewModel}" />
             </Grid>
         </Grid>
 

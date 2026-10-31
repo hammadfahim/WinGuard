@@ -104,6 +104,34 @@ public sealed record TopAttackerRow(string IpAddress, int BanCount, double Fract
     public string BanText => BanCount == 1 ? "1 ban" : $"{BanCount:N0} bans";
 }
 
+/// <summary>One logon that may mean an attacker got in.</summary>
+public sealed partial class CompromiseAlert : ObservableObject
+{
+    private readonly DateTime _timeUtc;
+
+    /// <summary>Creates an alert from its event.</summary>
+    public CompromiseAlert(EventDto dto)
+    {
+        IpAddress = dto.IpAddress ?? string.Empty;
+        Text = EventRowViewModel.CompromiseText(dto);
+        _timeUtc = TimeText.AsUtc(dto.TimestampUtc);
+        Tick(DateTime.UtcNow);
+    }
+
+    /// <summary>The address, or the IPv6 prefix it is counted under.</summary>
+    public string IpAddress { get; }
+
+    /// <summary>"bob logged on from 203.0.113.7 after 5 failed attempt(s)".</summary>
+    public string Text { get; }
+
+    /// <summary>"4m ago".</summary>
+    [ObservableProperty]
+    private string _agoText = string.Empty;
+
+    /// <summary>Re-reads the relative time.</summary>
+    public void Tick(DateTime nowUtc) => AgoText = TimeText.Ago(_timeUtc, nowUtc);
+}
+
 /// <summary>A small fact under the hero status.</summary>
 /// <param name="Text">The fact.</param>
 /// <param name="Tone">Its meaning.</param>
@@ -118,17 +146,29 @@ public sealed partial class DashboardViewModel : ObservableObject
     private const int RecentBlockCount = 6;
     private const int TopAttackerCount = 5;
     private const int TrendDays = 14;
+    private const int MaxCompromiseAlerts = 5;
+
+    // NET_FW_MODIFY_STATE: Group Policy tells Windows to ignore local rules.
+    private const int ModifyStateGroupPolicyOverride = 1;
+
+    // The first read brings the newest events of the store: an alert missed while no console was
+    // open still shows, without one from last season coming back at every start.
+    private static readonly TimeSpan CompromiseAlertAge = TimeSpan.FromDays(7);
 
     private readonly PipeClient _client;
     private readonly ToastCenter _toasts;
     private readonly DialogCenter _dialogs;
     private readonly LiveActivityTracker _activity = new(60);
     private readonly HashSet<long> _countedBlocks = [];
+    private readonly HashSet<long> _raisedAlerts = [];
 
     private int _enginesEnabled;
     private int _enginesRunning;
     private int _activeBans;
     private bool? _firewallRunning;
+    private bool _rulesIneffective;
+    private bool _disarmed;
+    private DateTime? _disarmedUntilUtc;
     private DateTime? _lastBlockUtc;
     private IReadOnlyList<BanDto> _bans = [];
 
@@ -165,6 +205,9 @@ public sealed partial class DashboardViewModel : ObservableObject
     /// <summary>Asks the shell to open the Event Log filtered to one engine.</summary>
     public event Action<ProtocolSource>? ShowEngineRequested;
 
+    /// <summary>Asks the shell to open the Event Log on one address.</summary>
+    public event Action<string>? ShowAddressRequested;
+
     /// <summary>Asks the shell to open the Statistics page.</summary>
     public event Action? ShowStatisticsRequested;
 
@@ -182,6 +225,12 @@ public sealed partial class DashboardViewModel : ObservableObject
 
     /// <summary>Prerequisite warnings from <see cref="PrereqsDto"/>.</summary>
     public ObservableCollection<string> Warnings { get; } = [];
+
+    /// <summary>What the firewall policy does to WinGuard's rules, set apart from the other warnings.</summary>
+    public ObservableCollection<string> FirewallPolicyWarnings { get; } = [];
+
+    /// <summary>Logons that may mean an attacker got in, newest first.</summary>
+    public ObservableCollection<CompromiseAlert> CompromiseAlerts { get; } = [];
 
     /// <summary>Facts under the hero: firewall, auditing, engines.</summary>
     public ObservableCollection<StatusFact> Facts { get; } = [];
@@ -206,8 +255,12 @@ public sealed partial class DashboardViewModel : ObservableObject
     [ObservableProperty]
     private string _liveSummary = string.Empty;
 
+    /// <summary>Whether the overall state is the break-glass window, which gets a banner of its own.</summary>
+    public bool IsDisarmed => Protection.Kind == ProtectionKind.Disarmed;
+
     /// <summary>The overall state.</summary>
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsDisarmed))]
     private ProtectionSummary _protection = new(ProtectionKind.Connecting, Tone.Neutral, "", "Connecting", "Looking for the WinGuard service.");
 
     /// <summary>The hero's supporting line.</summary>
@@ -236,6 +289,26 @@ public sealed partial class DashboardViewModel : ObservableObject
     /// <summary>Whether any prerequisite warnings exist.</summary>
     [ObservableProperty]
     private bool _hasWarnings;
+
+    /// <summary>Whether the firewall policy needs a look.</summary>
+    [ObservableProperty]
+    private bool _hasFirewallPolicyWarnings;
+
+    /// <summary>Headline over the firewall policy warnings.</summary>
+    [ObservableProperty]
+    private string _firewallPolicyTitle = string.Empty;
+
+    /// <summary>What those warnings mean: rules doing nothing, or something to check.</summary>
+    [ObservableProperty]
+    private Tone _firewallPolicyTone = Tone.Warn;
+
+    /// <summary>Whether a possible compromise is waiting to be looked at.</summary>
+    [ObservableProperty]
+    private bool _hasCompromiseAlerts;
+
+    /// <summary>Headline of the alert card.</summary>
+    [ObservableProperty]
+    private string _compromiseTitle = string.Empty;
 
     /// <summary>Whether the recent-blocks feed has entries.</summary>
     [ObservableProperty]
@@ -270,6 +343,8 @@ public sealed partial class DashboardViewModel : ObservableObject
         VersionText = string.IsNullOrWhiteSpace(status.Version) ? string.Empty : "Service " + status.Version;
         StartedText = status.StartedUtc == default ? string.Empty : "Running since " + TimeText.Full(status.StartedUtc);
         ReportOnly = status.ReportOnly;
+        _disarmed = status.Disarmed;
+        _disarmedUntilUtc = status.DisarmedUntilUtc is { } until ? TimeText.AsUtc(until) : null;
         VersionMismatchText = status.ProtocolVersion == PipeConstants.ProtocolVersion
             ? string.Empty
             : "The service and this console are from different WinGuard versions; some features may not work. Reinstall so both match.";
@@ -303,12 +378,31 @@ public sealed partial class DashboardViewModel : ObservableObject
     {
         _firewallRunning = prereqs.FirewallServiceRunning;
 
+        var policy = prereqs.FirewallPolicy;
+        var policyWarnings = policy?.Warnings.Where(warning => !string.IsNullOrWhiteSpace(warning)).ToList() ?? [];
+
+        // Not every warning means that: all inbound blocked is harmless, and an unknown state is unknown.
+        var rulesDoNothing = policy is { Known: true, RulesTakeEffect: false }
+            && (policy.LocalPolicyModifyState == ModifyStateGroupPolicyOverride || policy.ActiveProfiles.Any(profile => !profile.Enabled));
+        _rulesIneffective = rulesDoNothing;
+
+        FirewallPolicyWarnings.Clear();
+        foreach (var warning in policyWarnings)
+        {
+            FirewallPolicyWarnings.Add(warning);
+        }
+
+        HasFirewallPolicyWarnings = FirewallPolicyWarnings.Count > 0;
+        FirewallPolicyTone = rulesDoNothing ? Tone.Attack : Tone.Warn;
+        FirewallPolicyTitle = rulesDoNothing ? "WinGuard's block rules have no effect" : "Check the firewall policy";
+
         Warnings.Clear();
 
-        // The service already words one warning per failed prerequisite; show those as they are.
+        // The service already words one warning per failed prerequisite; show those as they are. Its
+        // list repeats the policy's warnings, which have a place of their own.
         foreach (var warning in prereqs.Warnings)
         {
-            if (!string.IsNullOrWhiteSpace(warning))
+            if (!string.IsNullOrWhiteSpace(warning) && !policyWarnings.Contains(warning))
             {
                 Warnings.Add(warning);
             }
@@ -317,9 +411,20 @@ public sealed partial class DashboardViewModel : ObservableObject
         HasWarnings = Warnings.Count > 0;
 
         Facts.Clear();
-        Facts.Add(new StatusFact(prereqs.FirewallServiceRunning ? "Windows Firewall on" : "Windows Firewall off", prereqs.FirewallServiceRunning ? Tone.Protected : Tone.Attack));
+        Facts.Add(rulesDoNothing
+            ? new StatusFact("Firewall ignores WinGuard's rules", Tone.Attack)
+            : new StatusFact(prereqs.FirewallServiceRunning ? "Windows Firewall on" : "Windows Firewall off", prereqs.FirewallServiceRunning ? Tone.Protected : Tone.Attack));
         Facts.Add(new StatusFact(prereqs.AuditLogonFailureEnabled ? "Logon auditing on" : "Logon auditing off", prereqs.AuditLogonFailureEnabled ? Tone.Protected : Tone.Warn));
         Evaluate();
+    }
+
+    /// <summary>Runs once a second while the window is on screen: the disarm countdown is live.</summary>
+    public void Tick()
+    {
+        if (_disarmed)
+        {
+            Evaluate();
+        }
     }
 
     /// <summary>Counts new blocks into the live chart.</summary>
@@ -346,6 +451,8 @@ public sealed partial class DashboardViewModel : ObservableObject
         {
             _countedBlocks.Clear();
         }
+
+        RaiseCompromiseAlerts(events, now);
     }
 
     /// <summary>Refreshes everything derived from the ban list.</summary>
@@ -424,6 +531,7 @@ public sealed partial class DashboardViewModel : ObservableObject
         if (!value)
         {
             _firewallRunning = null;
+            _rulesIneffective = false;
         }
 
         Evaluate();
@@ -444,6 +552,27 @@ public sealed partial class DashboardViewModel : ObservableObject
         if (tile is not null)
         {
             ShowEngineRequested?.Invoke(tile.Source);
+        }
+    }
+
+    /// <summary>Opens the Event Log on the address of an alert.</summary>
+    [RelayCommand]
+    private void OpenAlert(CompromiseAlert? alert)
+    {
+        if (alert is { IpAddress.Length: > 0 })
+        {
+            ShowAddressRequested?.Invoke(alert.IpAddress);
+        }
+    }
+
+    /// <summary>Takes one alert off the card. The event itself stays in the log.</summary>
+    [RelayCommand]
+    private void DismissAlert(CompromiseAlert? alert)
+    {
+        if (alert is not null)
+        {
+            CompromiseAlerts.Remove(alert);
+            RefreshCompromiseCard();
         }
     }
 
@@ -528,11 +657,52 @@ public sealed partial class DashboardViewModel : ObservableObject
         }
     }
 
+    private void RaiseCompromiseAlerts(IReadOnlyList<EventDto> events, DateTime now)
+    {
+        var fresh = events
+            .Where(dto => EventRowViewModel.IsCompromiseEvent(dto)
+                && now - TimeText.AsUtc(dto.TimestampUtc) < CompromiseAlertAge
+                && _raisedAlerts.Add(dto.Id))
+            .ToList();
+        if (fresh.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var dto in fresh)
+        {
+            CompromiseAlerts.Insert(0, new CompromiseAlert(dto));
+        }
+
+        while (CompromiseAlerts.Count > MaxCompromiseAlerts)
+        {
+            CompromiseAlerts.RemoveAt(CompromiseAlerts.Count - 1);
+        }
+
+        RefreshCompromiseCard();
+        _toasts.Error(
+            fresh.Count == 1 ? "Possible compromise" : $"{fresh.Count:N0} possible compromises",
+            EventRowViewModel.CompromiseText(fresh[^1]));
+    }
+
+    private void RefreshCompromiseCard()
+    {
+        HasCompromiseAlerts = CompromiseAlerts.Count > 0;
+        CompromiseTitle = CompromiseAlerts.Count == 1
+            ? "Possible compromise: a logon after failed attempts"
+            : $"{CompromiseAlerts.Count:N0} possible compromises: logons after failed attempts";
+    }
+
     private void TickTimes(DateTime now)
     {
         foreach (var row in RecentBlocks)
         {
             row.Tick(now);
+        }
+
+        foreach (var alert in CompromiseAlerts)
+        {
+            alert.Tick(now);
         }
 
         HeroLine = BuildHeroLine(now);
@@ -548,7 +718,7 @@ public sealed partial class DashboardViewModel : ObservableObject
         var parts = new List<string> { DescribeBans(_activeBans, Protection.Kind) };
         if (_lastBlockUtc is { } last)
         {
-            parts.Add((Protection.Kind == ProtectionKind.ReportOnly ? "last recorded " : "last block ") + TimeText.Ago(last, now));
+            parts.Add((Protection.Kind is ProtectionKind.ReportOnly or ProtectionKind.Disarmed ? "last recorded " : "last block ") + TimeText.Ago(last, now));
         }
 
         return string.Join(" · ", parts);
@@ -556,12 +726,13 @@ public sealed partial class DashboardViewModel : ObservableObject
 
     /// <summary>
     /// Words the ban count truthfully. "Blocked" is only true while the firewall enforces bans: in
-    /// report-only they are merely recorded, and with the firewall off they do nothing.
+    /// report-only or disarmed they are merely recorded, and with the firewall off or ignoring
+    /// WinGuard's rules they do nothing.
     /// </summary>
     private static string DescribeBans(int count, ProtectionKind kind) => kind switch
     {
-        ProtectionKind.ReportOnly => count == 1 ? "1 ban recorded, not enforced" : $"{count:N0} bans recorded, not enforced",
-        ProtectionKind.FirewallOff => count == 1 ? "1 ban not in force" : $"{count:N0} bans not in force",
+        ProtectionKind.ReportOnly or ProtectionKind.Disarmed => count == 1 ? "1 ban recorded, not enforced" : $"{count:N0} bans recorded, not enforced",
+        ProtectionKind.FirewallOff or ProtectionKind.RulesIneffective => count == 1 ? "1 ban not in force" : $"{count:N0} bans not in force",
         _ => count == 1 ? "1 address blocked" : $"{count:N0} addresses blocked",
     };
 
@@ -575,7 +746,11 @@ public sealed partial class DashboardViewModel : ObservableObject
             _firewallRunning,
             _enginesEnabled,
             _enginesRunning,
-            _activeBans));
+            _activeBans,
+            _disarmed,
+            _disarmedUntilUtc,
+            _rulesIneffective,
+            DateTime.UtcNow));
 
         // The line below the headline depends on the state, so a change of state must reword it.
         HeroLine = BuildHeroLine(DateTime.UtcNow);
