@@ -699,6 +699,41 @@ public sealed class BanEngineResilienceTests
         Assert.Equal([range], h.Firewall.Blocked);
     }
 
+    // ---------- exclusion take-back during an outage ----------
+
+    [Fact]
+    public async Task Excluded_attempts_are_not_counted_while_the_store_refuses_writes()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        h.Store.FailWrites = true;
+
+        for (var i = 0; i < 6; i++)
+        {
+            await h.ProcessAsync(h.Fail(Attacker, ProtocolSource.Rdp, user: null, detector: "140"));
+            var excluded = h.Fail(Attacker, ProtocolSource.Rdp, user: "backup-svc", detector: "4625");
+            excluded.IsExcluded = true;
+            await h.ProcessAsync(excluded);
+            h.Time.Advance(TimeSpan.FromSeconds(10));
+        }
+
+        Assert.Empty(h.Firewall.Blocked);
+    }
+
+    [Fact]
+    public void Taking_back_a_held_failure_goes_by_source_and_time()
+    {
+        var counter = new FallbackFailureCounter();
+        var at = T0.UtcDateTime;
+        counter.Record(Attacker, ProtocolSource.Rdp, at);
+        var tolerance = TimeSpan.FromSeconds(2);
+
+        Assert.False(counter.TryRemoveNear("203.0.113.51", ProtocolSource.Rdp, at, tolerance));
+        Assert.False(counter.TryRemoveNear(Attacker, ProtocolSource.MsSql, at, tolerance));
+        Assert.False(counter.TryRemoveNear(Attacker, ProtocolSource.Rdp, at.AddSeconds(3), tolerance));
+        Assert.True(counter.TryRemoveNear(Attacker, ProtocolSource.Rdp, at.AddSeconds(1), tolerance));
+        Assert.Equal(0, counter.Count(Attacker, DateTime.MinValue));
+    }
+
     // ---------- the unsaved bans and the RDP de-dup stay bounded ----------
 
     [Fact]

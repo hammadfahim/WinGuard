@@ -772,8 +772,10 @@ public sealed partial class BanEngine
         // first and was already counted, that one count is taken back.
         if (failed.IsExcluded)
         {
+            // During a write outage that count sits in memory, not in the store.
             if (failed.Source == ProtocolSource.Rdp
-                && rdpDedup.RecordExcluded(ip, failed.Detector, failed.TimestampUtc))
+                && rdpDedup.RecordExcluded(ip, failed.Detector, failed.TimestampUtc)
+                && !_fallbackCounts.TryRemoveNear(ip, ProtocolSource.Rdp, failed.TimestampUtc, RdpDeduplicator.Window))
             {
                 try
                 {
