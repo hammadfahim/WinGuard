@@ -166,7 +166,13 @@ public sealed partial class BanEngine
             {
                 // The bans go, the blacklisted ranges stay. Sync instead of ClearAll, which would
                 // leave the ranges unenforced for a moment. Report-only leaves the firewall alone.
-                if (!FirewallFrozen)
+                // Without the lists a sync would take the ranges and blocklists with it, so the
+                // rules stay until reconcile lifts the ban rules as orphans once the lists load.
+                if (!FirewallFrozen && !_listsLoaded)
+                {
+                    _logger.LogWarning("BanEngine left the firewall rules as they are: the lists could not be read. Reconcile clears the old ban rules once they can.");
+                }
+                else if (!FirewallFrozen)
                 {
                     try
                     {
@@ -899,6 +905,27 @@ public sealed partial class BanEngine
         var rule = await EvaluateRulesAsync(failed, count, threshold, settings.Rules, now, ct).ConfigureAwait(false);
         if (count < threshold && rule is null)
         {
+            return;
+        }
+
+        // Until the lists load this may be a whitelisted administrator, and a block rule would lock
+        // them out. That leaves attackers free for now, so the failures stay counted: the next one
+        // after the lists load bans.
+        if (!_listsLoaded)
+        {
+            _logger.LogWarning("Not blocking {Ip} yet: the whitelist could not be read. Its failures stay counted.", ip);
+            if (ShouldRecordSkip("l:" + ip))
+            {
+                await TryAddEventAsync(new LogEvent
+                {
+                    TimestampUtc = now,
+                    Level = LogEventLevel.Warning,
+                    Source = failed.Source,
+                    IpAddress = ip,
+                    Message = $"SKIPPED {ip} (whitelist unreadable: not blocked yet, failures stay counted)",
+                }, ct).ConfigureAwait(false);
+            }
+
             return;
         }
 

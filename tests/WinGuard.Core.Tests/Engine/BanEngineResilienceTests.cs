@@ -340,6 +340,87 @@ public sealed class BanEngineResilienceTests
         Assert.Single(h.Store.BanHistory, row => row.Action == BanHistoryAction.Expired);
     }
 
+    // ---------- whitelist unknown at start-up ----------
+
+    private static Task UnreadableLists(FakeStore store)
+    {
+        store.FailListRead = true;
+        return Task.CompletedTask;
+    }
+
+    [Fact]
+    public async Task A_whitelisted_ip_is_not_banned_while_the_lists_cannot_be_read()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, seed: async store =>
+        {
+            await store.AddToListAsync(ListKind.Whitelist, Attacker);
+            store.FailListRead = true;
+        });
+
+        await Threshold(h, Attacker, ProtocolSource.MsSql);
+        Assert.Empty(h.Firewall.BlockCalls);
+        Assert.Contains(h.Store.Events, e => e.Message.StartsWith($"SKIPPED {Attacker} (whitelist unreadable", StringComparison.Ordinal));
+
+        h.Store.FailListRead = false;
+        await Threshold(h, Attacker, ProtocolSource.MsSql);
+
+        Assert.Empty(h.Firewall.BlockCalls);
+        Assert.Null(await h.Store.GetBanAsync(Attacker));
+    }
+
+    [Fact]
+    public async Task An_attacker_counted_while_the_lists_cannot_be_read_is_banned_once_they_load()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, seed: UnreadableLists);
+
+        await Threshold(h, Attacker, ProtocolSource.MsSql);
+        Assert.Empty(h.Firewall.BlockCalls);
+        Assert.Equal(5, h.Store.FailedLogins.Count);
+
+        h.Store.FailListRead = false;
+        await h.ProcessAsync(h.Fail(Attacker, ProtocolSource.MsSql));
+
+        Assert.Contains(Attacker, h.Firewall.Blocked);
+    }
+
+    [Fact]
+    public async Task Failures_held_in_memory_while_nothing_can_be_read_still_ban_once_the_lists_load()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, seed: store =>
+        {
+            store.FailWrites = true;
+            return UnreadableLists(store);
+        });
+
+        await Threshold(h, Attacker, ProtocolSource.MsSql);
+        Assert.Empty(h.Firewall.BlockCalls);
+
+        h.Store.FailListRead = false;
+        await h.ProcessAsync(h.Fail(Attacker, ProtocolSource.MsSql));
+
+        Assert.Contains(Attacker, h.Firewall.Blocked);
+    }
+
+    [Fact]
+    public async Task A_whitelisted_ip_banned_while_the_lists_were_unreadable_is_released_once_they_load()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, seed: async store =>
+        {
+            await store.AddToListAsync(ListKind.Whitelist, Attacker);
+            store.FailListRead = true;
+        });
+
+        // An administrator can still ban by hand with nothing to check it against.
+        await h.Engine.BanNowAsync(Attacker, null, permanent: false, null);
+        Assert.Contains(Attacker, h.Firewall.Blocked);
+
+        h.Store.FailListRead = false;
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.DoesNotContain(Attacker, h.Firewall.Blocked);
+        Assert.Null(await h.Store.GetBanAsync(Attacker));
+    }
+
     // ---------- shutdown between the block and the save ----------
 
     [Fact]
@@ -422,6 +503,47 @@ public sealed class BanEngineResilienceTests
         var row = (await h.Store.GetBanAsync(Attacker))!;
         Assert.False(row.IsPermanent);
         Assert.Equal(T0.UtcDateTime.AddHours(1), row.ExpiresUtc);
+    }
+
+    // ---------- clearing on start with unreadable lists ----------
+
+    [Fact]
+    public async Task Clearing_on_start_with_unreadable_lists_does_not_sync_the_blacklisted_ranges_away()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, s => s.ClearBansOnStartup = true, seed: async store =>
+        {
+            await store.AddToListAsync(ListKind.Blacklist, "198.51.100.0/24");
+            store.FailListRead = true;
+        });
+
+        Assert.Empty(h.Firewall.SyncRulesCalls);
+    }
+
+    [Fact]
+    public async Task Clearing_on_start_with_unreadable_lists_lifts_the_ban_rules_once_they_load()
+    {
+        const string range = "198.51.100.0/24";
+        await using var h = await EngineHarness.StartAsync(T0, s => s.ClearBansOnStartup = true, seed: async store =>
+        {
+            await store.AddToListAsync(ListKind.Blacklist, range);
+            await store.UpsertBanAsync(new BanEntry
+            {
+                IpAddress = Attacker,
+                Source = ProtocolSource.MsSql,
+                BannedAtUtc = T0.UtcDateTime,
+                ExpiresUtc = T0.UtcDateTime.AddDays(1),
+            });
+            store.FailListRead = true;
+        });
+        h.Firewall.Block(Attacker); // the rules a previous run left in place
+        h.Firewall.Block(range);
+
+        Assert.Null(await h.Store.GetBanAsync(Attacker));
+
+        h.Store.FailListRead = false;
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Equal([range], h.Firewall.Blocked);
     }
 
     // ---------- the unsaved bans and the RDP de-dup stay bounded ----------

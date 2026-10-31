@@ -150,16 +150,18 @@ public sealed partial class BanEngine
     }
 
     /// <summary>
-    /// Lifts range bans that hold a whitelisted address, however they got that way: a whitelist entry
-    /// added later, a server address that changed, or a ban from a version without this check.
+    /// Lifts bans that block a whitelisted address, however they got that way: a whitelist entry added
+    /// later, a server address that changed, a ban made while the lists could not be read, or one
+    /// from a version without this check.
     /// </summary>
-    private async Task LiftWhitelistedRangeBansAsync(IReadOnlyList<BanEntry> activeBans, CancellationToken ct)
+    private async Task LiftWhitelistedBansAsync(IReadOnlyList<BanEntry> activeBans, CancellationToken ct)
     {
         foreach (var ban in activeBans)
         {
-            if (ban.IpAddress.Contains('/') && _matcher.OverlapsWhitelist(ban.IpAddress))
+            var whitelisted = ban.IpAddress.Contains('/') ? _matcher.OverlapsWhitelist(ban.IpAddress) : _matcher.IsWhitelisted(ban.IpAddress);
+            if (whitelisted)
             {
-                _logger.LogWarning("Lifting range ban {Range}: it overlaps the whitelist.", ban.IpAddress);
+                _logger.LogWarning("Lifting ban {Target}: it overlaps the whitelist.", ban.IpAddress);
                 await UnbanCoreAsync(ban.IpAddress, $"UNBLOCKED {ban.IpAddress} (overlaps the whitelist)", ct).ConfigureAwait(false);
             }
         }
@@ -309,7 +311,7 @@ public sealed partial class BanEngine
 
         if (activeForPrune is not null)
         {
-            await LiftWhitelistedRangeBansAsync(activeForPrune, ct).ConfigureAwait(false);
+            await LiftWhitelistedBansAsync(activeForPrune, ct).ConfigureAwait(false);
         }
 
         // Persist the buffered per-day statistics deltas.
