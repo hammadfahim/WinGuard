@@ -9,7 +9,13 @@
     <AssemblyName>winguard-gui</AssemblyName>
     <RootNamespace>WinGuard.Gui</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Also what Windows shows for the shortcuts and the taskbar, and WPF for the window. -->
+    <ApplicationIcon>..\..\installer\assets\icon.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\tray-*.ico" LogicalName="%(Filename)%(Extension)" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />

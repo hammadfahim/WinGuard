@@ -7,11 +7,16 @@ All notable changes to WinGuard are documented here. The format follows
 
 ### Added
 
+- **An application icon**: a shield with a keyhole, on the program files, shortcuts, taskbar, window
+  and Setup, with images for the installer wizard. Small sizes have their own simpler drawing.
 - `POSSIBLE COMPROMISE` alerts have their own stable event ID, 1007, instead of the generic 1900.
   Update any SIEM rule that matched them under 1900.
 
 ### Changed
 
+- The tray icon is sharp at any display scaling and shows its state by shape as well as colour:
+  solid while protecting, hollow while offline, red with an exclamation mark while bans have no
+  effect.
 - A blocklist file that shrinks to under half of a list of 100 entries or more is treated as cut
   off: the last good entries stay in force and a warning says so. To accept a shorter list, take the
   file off the list and add it back.

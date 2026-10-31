@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Draws the icons from their vector source. It is not part of WinGuard.sln because the output
+       is committed: run this project from the repository root only to change the artwork. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>WinGuard.Tools.IconGen</RootNamespace>
+  </PropertyGroup>
+
+</Project>
