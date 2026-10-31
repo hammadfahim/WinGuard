@@ -5,6 +5,17 @@ All notable changes to WinGuard are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **An application icon**: a shield with a keyhole, on the program files, shortcuts, taskbar, window
+  and Setup, with images for the installer wizard. Small sizes have their own simpler drawing.
+
+### Changed
+
+- The tray icon is sharp at any display scaling and shows its state by shape as well as colour:
+  solid while protecting, hollow while offline, red with an exclamation mark while bans have no
+  effect.
+
 ## [0.3.0] — 2026-10-31
 
 ### Added

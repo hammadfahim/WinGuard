@@ -47,6 +47,8 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 #if FileExists(IconFile)
 SetupIconFile={#IconFile}
 #endif
+WizardImageFile=assets\wizard-large-100.bmp,assets\wizard-large-200.bmp
+WizardSmallImageFile=assets\wizard-small-100.bmp,assets\wizard-small-200.bmp
 ; The release workflow defines these when signing secrets are configured, so that the uninstaller
 ; embedded in the setup is signed as well. Unsigned builds skip them.
 #ifdef EnableSigning

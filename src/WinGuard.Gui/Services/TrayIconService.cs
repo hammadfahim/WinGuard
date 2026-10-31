@@ -1,24 +1,20 @@
 using System.Drawing;
-using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace WinGuard.Gui.Services;
 
 /// <summary>
-/// Owns the system-tray <see cref="NotifyIcon"/> (PLAN.md §9). The icon is drawn at runtime with
-/// <c>System.Drawing</c> — a blue shield with a white "W" — so no binary asset is committed.
-/// Double-click (or the Show menu item) raises <see cref="ShowRequested"/>; Exit raises
-/// <see cref="ExitRequested"/>. The HICON handle is destroyed on dispose.
+/// Owns the system-tray <see cref="NotifyIcon"/> (PLAN.md §9). The icons are embedded in the program
+/// (tools/IconGen draws them) and differ in shape as well as colour: a solid shield with a keyhole,
+/// a hollow one, and a red one with an exclamation mark. Double-click (or the Show menu item) raises
+/// <see cref="ShowRequested"/>; Exit raises <see cref="ExitRequested"/>.
 /// </summary>
 public sealed class TrayIconService : IDisposable
 {
     private readonly NotifyIcon _notifyIcon;
-    private readonly Icon _icon;
-    private readonly IntPtr _iconHandle;
-    private readonly Icon _offlineIcon;
-    private readonly IntPtr _offlineHandle;
-    private readonly Icon _alertIcon;
-    private readonly IntPtr _alertHandle;
+    private readonly Icon _icon = LoadIcon("tray-protected.ico");
+    private readonly Icon _offlineIcon = LoadIcon("tray-offline.ico");
+    private readonly Icon _alertIcon = LoadIcon("tray-alert.ico");
     private bool _disposed;
 
     /// <summary>Raised when the user asks to show the main window.</summary>
@@ -30,13 +26,6 @@ public sealed class TrayIconService : IDisposable
     /// <summary>Creates the tray icon and its context menu on the current (UI) thread.</summary>
     public TrayIconService()
     {
-        _iconHandle = CreateShieldIconHandle(Color.FromArgb(59, 130, 246));
-        _icon = Icon.FromHandle(_iconHandle);
-        _offlineHandle = CreateShieldIconHandle(Color.FromArgb(120, 120, 130));
-        _offlineIcon = Icon.FromHandle(_offlineHandle);
-        _alertHandle = CreateShieldIconHandle(Color.FromArgb(207, 58, 51));
-        _alertIcon = Icon.FromHandle(_alertHandle);
-
         var menu = new ContextMenuStrip();
         var showItem = new ToolStripMenuItem("Show WinGuard");
         showItem.Click += (_, _) => ShowRequested?.Invoke(this, EventArgs.Empty);
@@ -46,7 +35,7 @@ public sealed class TrayIconService : IDisposable
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(exitItem);
 
-        // Grey until the first connection is confirmed.
+        // Hollow until the first connection is confirmed.
         _notifyIcon = new NotifyIcon
         {
             Icon = _offlineIcon,
@@ -58,9 +47,9 @@ public sealed class TrayIconService : IDisposable
     }
 
     /// <summary>
-    /// Shows the console's overall state: the blue icon while connected, grey otherwise, and red while
-    /// bans have no effect, with the same words as the banner, so the tray never says "protecting"
-    /// while nothing is being enforced.
+    /// Shows the console's overall state: the solid icon while connected, the hollow one otherwise,
+    /// and the red one while bans have no effect, with the same words as the banner, so the tray
+    /// never says "protecting" while nothing is being enforced.
     /// </summary>
     /// <param name="connected">Whether the service is answering.</param>
     /// <param name="status">The state in words.</param>
@@ -88,48 +77,15 @@ public sealed class TrayIconService : IDisposable
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _icon.Dispose();
-        DestroyIcon(_iconHandle);
         _offlineIcon.Dispose();
-        DestroyIcon(_offlineHandle);
         _alertIcon.Dispose();
-        DestroyIcon(_alertHandle);
     }
 
-    private static IntPtr CreateShieldIconHandle(Color fill)
+    /// <summary>Loads the frame for this display's tray size, so the icon stays sharp at any scaling.</summary>
+    private static Icon LoadIcon(string name)
     {
-        using var bitmap = new Bitmap(32, 32);
-        using (var graphics = Graphics.FromImage(bitmap))
-        {
-            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            graphics.Clear(Color.Transparent);
-
-            using var shield = new System.Drawing.Drawing2D.GraphicsPath();
-            shield.AddLines(new[]
-            {
-                new Point(16, 2),
-                new Point(28, 7),
-                new Point(28, 17),
-                new Point(16, 30),
-                new Point(4, 17),
-                new Point(4, 7),
-            });
-            shield.CloseFigure();
-            using var shieldBrush = new SolidBrush(fill);
-            graphics.FillPath(shieldBrush, shield);
-
-            using var font = new Font("Segoe UI", 11f, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var textBrush = new SolidBrush(Color.White);
-            using var format = new StringFormat
-            {
-                Alignment = StringAlignment.Center,
-                LineAlignment = StringAlignment.Center,
-            };
-            graphics.DrawString("W", font, textBrush, new RectangleF(0, 3, 32, 24), format);
-        }
-
-        return bitmap.GetHicon();
+        using var stream = typeof(TrayIconService).Assembly.GetManifestResourceStream(name)
+            ?? throw new InvalidOperationException($"The tray icon '{name}' is missing from the program.");
+        return new Icon(stream, SystemInformation.SmallIconSize);
     }
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool DestroyIcon(IntPtr hIcon);
 }

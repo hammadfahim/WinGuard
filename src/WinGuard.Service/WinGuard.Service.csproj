@@ -5,6 +5,7 @@
     <OutputType>Exe</OutputType>
     <AssemblyName>winguard-svc</AssemblyName>
     <RootNamespace>WinGuard.Service</RootNamespace>
+    <ApplicationIcon>..\..\installer\assets\icon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>

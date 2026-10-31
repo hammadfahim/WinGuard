@@ -1,3 +1,5 @@
+<img src="installer/assets/icon-256.png" alt="" width="96" align="right">
+
 # WinGuard
 
 **WinGuard is a fail2ban-style intrusion-prevention tool for Windows.** It watches
@@ -360,7 +362,8 @@ winguard/
 ├─ tests/WinGuard.Core.Tests/         # xUnit: parsers, engine, IP matcher, store, notifications, integration
 ├─ installer/
 │  ├─ winguard.iss                    # Inno Setup script
-│  └─ assets/                         # license.txt (+ optional icon.ico)
+│  └─ assets/                         # license.txt, icon.ico, icon.svg, installer wizard images
+├─ tools/IconGen/                     # draws the icons; run it only to change the artwork
 ├─ samples/logs/                      # parser fixtures and their expected results
 ├─ CHANGELOG.md                       # release notes
 ├─ SECURITY.md                        # vulnerability-reporting policy
