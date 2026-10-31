@@ -141,12 +141,20 @@ public sealed class CustomSourceRecipesTests
 
     [Theory]
     [InlineData("/x 198.51.100.9 a b 401 1 1326 0")] // a raw space would shift the columns
-    [InlineData("/x\t198.51.100.9")]
     public void Iis_line_with_shifted_columns_is_dropped(string stem)
     {
         var line = $"2026-10-04 09:50:01 10.0.0.5 GET {stem} - 443 - 203.0.113.1 curl/8 - 401 1 1326 3";
 
         Assert.False(CustomLogDetector.TryParseLine(line, CustomSourceRecipes.IisHttpAuth.Regex, out _));
+    }
+
+    [Fact]
+    public void A_tab_in_the_url_is_no_column_separator()
+    {
+        const string line = "2026-10-04 09:50:01 10.0.0.5 GET /x\t198.51.100.9 - 443 - 203.0.113.1 curl/8 - 401 1 1326 3";
+
+        Assert.True(CustomLogDetector.TryParseLine(line, CustomSourceRecipes.IisHttpAuth.Regex, out var failed));
+        Assert.Equal("203.0.113.1", failed!.IpAddress);
     }
 
     // ---------- VNC ----------
@@ -226,6 +234,54 @@ public sealed class CustomSourceRecipesTests
         Assert.Empty(SettingsValidator.Validate(settings));
     }
 
+    // ---------- columns end at a space, not at any white space ----------
+
+    [Theory]
+    [InlineData("a1")]
+    [InlineData("a\tb")]
+    [InlineData("a\"b")]
+    [InlineData("a b")]
+    public void A_failed_imap_login_counts_whatever_the_client_put_in_its_tag(string tag)
+    {
+        var line = $"\"IMAPD\"\t7001\t401\t\"2026-10-04 09:44:17.310\"\t\"203.0.113.66\"\t\"SENT: {tag} NO Invalid user name or password.\"";
+
+        Assert.True(CustomLogDetector.TryParseLine(line, CustomSourceRecipes.HMailServer.Regex, out var failed));
+        Assert.Equal("203.0.113.66", failed!.IpAddress);
+    }
+
+    [Theory]
+    [InlineData("OK LOGIN completed")]
+    [InlineData("NO Invalid user name or password.")]
+    public void A_tag_with_a_space_does_not_exist_for_hmailserver(string reply)
+    {
+        // The tag ends at the first space, so what follows it is the server's own reply.
+        var line = $"\"IMAPD\"\t7001\t401\t\"2026-10-04 09:44:17.310\"\t\"203.0.113.66\"\t\"SENT: a b {reply}\"";
+
+        Assert.False(CustomLogDetector.TryParseLine(line, CustomSourceRecipes.HMailServer.Regex, out _));
+    }
+
+    [Theory]
+    [InlineData("/owa/")]
+    [InlineData("/owa/ ")]
+    [InlineData("/owa/ x")]
+    public void A_rejected_iis_login_counts_whatever_white_space_the_url_holds(string stem)
+    {
+        var line = $"2026-10-04 09:00:05 10.0.0.5 POST {stem} - 443 admin 203.0.113.81 Mozilla/5.0 - 401 1 1326 15";
+
+        Assert.True(CustomLogDetector.TryParseLine(line, CustomSourceRecipes.IisHttpAuth.Regex, out var failed));
+        Assert.Equal("203.0.113.81", failed!.IpAddress);
+    }
+
+    [Fact]
+    public void A_url_cannot_move_the_iis_address_column()
+    {
+        // An extra space shifts the columns, and the line then matches nothing rather than the
+        // wrong address.
+        const string line = "2026-10-04 09:00:05 10.0.0.5 POST /owa/ 198.51.100.9 - 443 admin 203.0.113.81 Mozilla/5.0 - 401 1 1326 15";
+
+        Assert.False(CustomLogDetector.TryParseLine(line, CustomSourceRecipes.IisHttpAuth.Regex, out _));
+    }
+
     // ---------- upgrades of saved settings ----------
 
     [Theory]
@@ -233,6 +289,8 @@ public sealed class CustomSourceRecipesTests
     [InlineData(@"^(?!#).*\s(?<ipaddress>\S+)\s+\S+\s+\S+\s+\S+\s+\S+\s+(GET|POST)\s+\S+\s+\S+\s+401(?:\.\d+)?\s", "IIS HTTP auth (401.1)")]
     [InlineData(@"Connections: (?:closed|blacklisted): (?<ipaddress>[0-9a-fA-F:.]+)", "RealVNC Server")]
     [InlineData(@"Failed password for (invalid user )?(?<username>\S+) from (?<ipaddress>[0-9a-fA-F:.]+) port \d+", "Windows OpenSSH (sshd)")]
+    [InlineData(@"^""(?:SMTPD|POP3D|IMAPD)""\t\d+\t\d+\t""[^""]*""\t""(?<ipaddress>[0-9a-fA-F:.]+)""\t""SENT: (?:535 Authentication failed\.|-ERR Invalid user name or password\.|\S+ NO Invalid user name(?: or password)?\.|\* Too many invalid logon attempts\.)[^""]*""\s*$", "hMailServer")]
+    [InlineData(@"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+ \S+ \S+ \S+ \d+ (?<username>\S+) (?<ipaddress>[0-9a-fA-F:.]+) \S+ \S+ 401 1 (?:1326|1327|1331|1909|2148074252) \d+\s*$", "IIS HTTP auth (401.1)")]
     public void A_regex_saved_from_an_old_recipe_is_upgraded_when_settings_load(string saved, string recipeName)
     {
         var settings = new WinGuardSettings();

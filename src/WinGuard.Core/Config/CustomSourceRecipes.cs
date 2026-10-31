@@ -59,11 +59,16 @@ public static class CustomSourceRecipes
         // The address column comes before anything a client can influence, and only the server's
         // own SENT replies count: RECEIVED lines hold client text, and SMTPC/POP3C are hMailServer's
         // outgoing connections, where the peer is another server. An IMAP reply starts with the
-        // client's tag. CrLfRecords keeps a bare LF in client text from forging a whole line.
-        Regex = @"^""(?:SMTPD|POP3D|IMAPD)""\t\d+\t\d+\t""[^""]*""\t""(?<ipaddress>[0-9a-fA-F:.]+)""\t""SENT: (?:535 Authentication failed\.|-ERR Invalid user name or password\.|\S+ NO Invalid user name(?: or password)?\.|\* Too many invalid logon attempts\.)[^""]*""\s*$",
+        // client's tag, which hMailServer ends at the first space and nowhere else, so a tab or a
+        // quote can be part of it. CrLfRecords keeps a bare LF in client text from forging a whole line.
+        Regex = @"^""(?:SMTPD|POP3D|IMAPD)""\t\d+\t\d+\t""[^""]*""\t""(?<ipaddress>[0-9a-fA-F:.]+)""\t""SENT: (?:535 Authentication failed\.|-ERR Invalid user name or password\.|[^ ]+ NO Invalid user name(?: or password)?\.|\* Too many invalid logon attempts\.)[^""]*""\s*$",
         Description = "hMailServer failed SMTP/IMAP/POP3 logins. Turn on SMTP, POP3 and IMAP logging under Settings > Logging; the awstats log has no logins.",
         CrLfRecords = true,
     };
+
+    // The hMailServer recipe whose IMAP tag stopped at any white space; a tab in the tag went uncounted.
+    private const string WhitespaceTagHMailServerRegex =
+        @"^""(?:SMTPD|POP3D|IMAPD)""\t\d+\t\d+\t""[^""]*""\t""(?<ipaddress>[0-9a-fA-F:.]+)""\t""SENT: (?:535 Authentication failed\.|-ERR Invalid user name or password\.|\S+ NO Invalid user name(?: or password)?\.|\* Too many invalid logon attempts\.)[^""]*""\s*$";
 
     // The hMailServer recipe from before it had a sample log: the awstats log it read records
     // deliveries only, so it never matched, and hMailServer writes that file with other columns.
@@ -80,10 +85,16 @@ public static class CustomSourceRecipes
         // c-ip column. Only 401.1 with a logon-failure Win32 status counts: 1326 wrong user or
         // password, 1327 account restriction, 1331 disabled, 1909 locked out, 2148074252
         // SEC_E_LOGON_DENIED. 401.2 is the anonymous challenge every browser triggers, and
-        // 401.1 with 2148074254 (SEC_E_NO_CREDENTIALS) is a healthy NTLM handshake step.
-        Regex = @"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+ \S+ \S+ \S+ \d+ (?<username>\S+) (?<ipaddress>[0-9a-fA-F:.]+) \S+ \S+ 401 1 (?:1326|1327|1331|1909|2148074252) \d+\s*$",
+        // 401.1 with 2148074254 (SEC_E_NO_CREDENTIALS) is a healthy NTLM handshake step. A column
+        // ends at a space and nowhere else: \S would also stop at a no-break space, which IIS writes
+        // as it is, so one of those in the URL would hide the failure.
+        Regex = @"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [^ ]+ [^ ]+ [^ ]+ [^ ]+ \d+ (?<username>[^ ]+) (?<ipaddress>[0-9a-fA-F:.]+) [^ ]+ [^ ]+ 401 1 (?:1326|1327|1331|1909|2148074252) \d+\s*$",
         Description = "IIS logins rejected with 401.1, on the default W3C fields. Adjust the W3SVC folder per site.",
     };
+
+    // The IIS recipe whose columns stopped at any white space, no-break spaces included.
+    private const string WhitespaceColumnsIisHttpAuthRegex =
+        @"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+ \S+ \S+ \S+ \d+ (?<username>\S+) (?<ipaddress>[0-9a-fA-F:.]+) \S+ \S+ 401 1 (?:1326|1327|1331|1909|2148074252) \d+\s*$";
 
     // The IIS recipe that assumed another column order; it never matched a default W3C line.
     private const string PositionalIisHttpAuthRegex =
@@ -126,8 +137,8 @@ public static class CustomSourceRecipes
     public static string UpgradeRegex(string regex) => regex switch
     {
         UnanchoredOpenSshRegex => WindowsOpenSsh.Regex,
-        AwstatsHMailServerRegex => HMailServer.Regex,
-        PositionalIisHttpAuthRegex => IisHttpAuth.Regex,
+        AwstatsHMailServerRegex or WhitespaceTagHMailServerRegex => HMailServer.Regex,
+        PositionalIisHttpAuthRegex or WhitespaceColumnsIisHttpAuthRegex => IisHttpAuth.Regex,
         ClosedVncRegex => Vnc.Regex,
         _ => regex,
     };
