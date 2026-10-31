@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Principal;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -8,6 +9,7 @@ using WinGuard.Core.Config;
 using WinGuard.Core.Detection;
 using WinGuard.Core.Engine;
 using WinGuard.Core.Firewall;
+using WinGuard.Core.Monitoring;
 using WinGuard.Core.Notifications;
 using WinGuard.Core.Store;
 using WinGuard.Service.Ipc;
@@ -21,8 +23,12 @@ namespace WinGuard.Service;
 ///   <item><c>--install</c> — register the service via <c>sc.exe</c> (delayed-auto, description,
 ///   restart-on-failure) and start it.</item>
 ///   <item><c>--uninstall</c> — stop and delete the service.</item>
+///   <item><c>--harden-data</c> — hidden, for the setup: secure the data folder (exit 3 when
+///   something had to be moved aside).</item>
 ///   <item><c>--console</c> — run the host in the current console.</item>
 ///   <item><c>--clear-firewall</c> — delete every <c>WinGuard_Block_*</c> rule and exit 0.</item>
+///   <item><c>--disarm</c> / <c>--rearm</c> — break-glass: stop enforcing for a bounded time, and end
+///   that early; both work without the service.</item>
 ///   <item><c>--status</c> / <c>--list-bans</c> / <c>--ban</c> / <c>--unban</c> / <c>--doctor</c> —
 ///   manage the running service over its pipe (elevated console required).</item>
 ///   <item>no arguments — run as the Windows service.</item>
@@ -43,8 +49,14 @@ internal static class Program
                         return InstallService();
                     case "--uninstall":
                         return UninstallService();
+                    case "--harden-data":
+                        return HardenDataFolder();
                     case "--clear-firewall":
                         return ClearFirewall();
+                    case "--disarm":
+                        return BreakGlassCommands.Disarm(args);
+                    case "--rearm":
+                        return BreakGlassCommands.Rearm();
                     case "--console":
                         return await RunHostAsync(args, console: true).ConfigureAwait(false);
                     case "--status":
@@ -146,7 +158,7 @@ internal static class Program
         }
     }
 
-    private static void ConfigureServices(HostApplicationBuilder builder)
+    internal static void ConfigureServices(HostApplicationBuilder builder)
     {
         var databasePath = builder.Configuration["DatabasePath"];
         if (string.IsNullOrWhiteSpace(databasePath))
@@ -170,8 +182,9 @@ internal static class Program
                 () => sp.GetRequiredService<SettingsHolder>().Current));
 
         // Event fan-out: warning/error engine events are enqueued (never blocking the engine path)
-        // and delivered by one background loop — to the Windows Application event log (SIEM
-        // friendly, opt-out via settings) and to the configured notification channels.
+        // and delivered by two background loops: one to the Windows Application event log (SIEM
+        // friendly, opt-out via settings) and syslog, one to the configured notification channels,
+        // so a receiver that hangs cannot hold the SIEM outputs back.
         builder.Services.AddSingleton(sp => new NotificationDispatcher(
             () => sp.GetRequiredService<SettingsHolder>().Current,
             sp.GetRequiredService<ILogger<NotificationDispatcher>>(),
@@ -186,7 +199,11 @@ internal static class Program
                 () => sp.GetRequiredService<SettingsHolder>().Current,
                 sp.GetRequiredService<ILogger<BanEngine>>(),
                 sp.GetRequiredService<TimeProvider>(),
-                sp.GetRequiredService<IEventPublisher>()));
+                sp.GetRequiredService<IEventPublisher>())
+            {
+                BreakGlass = new DisarmFile(Defaults.DisarmFilePath),
+                Metrics = new PrometheusTextfileWriter(sp.GetRequiredService<ILogger<PrometheusTextfileWriter>>()),
+            });
 
         builder.Services.AddSingleton<IDetector>(sp =>
             new RdpSecurityLogDetector(
@@ -199,6 +216,11 @@ internal static class Program
                 () => sp.GetRequiredService<SettingsHolder>().Current,
                 sp.GetRequiredService<ILogger<RdpCoreTsDetector>>(),
                 sp.GetRequiredService<TimeProvider>()));
+
+        builder.Services.AddSingleton<IDetector>(sp =>
+            new LogonSuccessDetector(
+                () => sp.GetRequiredService<SettingsHolder>().Current,
+                sp.GetRequiredService<ILogger<LogonSuccessDetector>>()));
 
         builder.Services.AddSingleton<IDetector>(sp =>
             new MsSqlDetector(
@@ -219,8 +241,11 @@ internal static class Program
                 sp.GetRequiredService<TimeProvider>()));
 
         builder.Services.AddSingleton<IpcRequestHandler>();
-        builder.Services.AddHostedService<GuardWorker>();
+
+        // Hosted services stop in reverse order: delivery comes first so it outlives the engine,
+        // and whatever the engine still reports while it shuts down gets delivered.
         builder.Services.AddHostedService<NotificationHostedService>();
+        builder.Services.AddHostedService<GuardWorker>();
         builder.Services.AddHostedService<PipeServer>();
     }
 
@@ -233,6 +258,13 @@ internal static class Program
         {
             Console.Error.WriteLine("Could not determine the service executable path.");
             return 1;
+        }
+
+        // A portable install gets the same data-folder protection as the setup, before anything
+        // runs as LocalSystem on top of a folder a standard user may have prepared.
+        if (Report(new DataFolderHardener().Harden(Defaults.DataFolder)) == ExitFailure)
+        {
+            return ExitFailure;
         }
 
         // The path is passed WITH its quotes so the stored ImagePath is quoted; an unquoted path
@@ -287,8 +319,22 @@ internal static class Program
             Console.Error.WriteLine($"Warning: could not stop the service (it may not be running): {stop.Output}");
         }
 
-        // Give the SCM a moment to finish stopping before deletion.
-        Thread.Sleep(1500);
+        // Deleting a service that is still stopping only marks it for deletion.
+        var stopped = false;
+        for (var attempt = 0; attempt < ServiceStopWaitSeconds && !stopped; attempt++)
+        {
+            var query = RunProcess(ScExe, "query", Defaults.ServiceName);
+            stopped = IsServiceStopped(query.ExitCode, query.Output);
+            if (!stopped)
+            {
+                Thread.Sleep(1000);
+            }
+        }
+
+        if (!stopped)
+        {
+            Console.Error.WriteLine($"Warning: the service did not stop within {ServiceStopWaitSeconds} seconds; it will be deleted once it has.");
+        }
 
         var delete = RunProcess(ScExe, "delete", Defaults.ServiceName);
         if (delete.ExitCode != 0)
@@ -315,10 +361,56 @@ internal static class Program
         return 0;
     }
 
+    /// <summary>
+    /// The hidden verb the setup runs, from a copy of this program it unpacks first: the installed
+    /// one may be an older version, or not there at all. A portable <c>--install</c> does the same
+    /// thing itself, so the two cannot drift apart. Takes no path: the one folder it is for is the
+    /// one the service uses.
+    /// </summary>
+    private static int HardenDataFolder()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
+        {
+            Console.Error.WriteLine("Securing the data folder needs an elevated prompt.");
+            return ExitFailure;
+        }
+
+        return Report(new DataFolderHardener().Harden(Defaults.DataFolder));
+    }
+
+    /// <summary>Says what happened; the setup shows this text and goes by the exit code.</summary>
+    internal static int Report(HardeningReport report)
+    {
+        foreach (var item in report.Quarantined)
+        {
+            Console.WriteLine($"Moved aside, not deleted: {item.OriginalPath} -> {item.MovedTo} ({item.Reason}).");
+        }
+
+        if (report.Failure is not null)
+        {
+            Console.Error.WriteLine($"Failed to secure the data folder: {report.Failure}");
+            return ExitFailure;
+        }
+
+        return report.Quarantined.Count > 0 ? ExitSecuredWithContentMovedAside : 0;
+    }
+
+    private const int ServiceStopWaitSeconds = 30;
+
+    private const int ExitFailure = 1;
+
+    /// <summary>The data folder is secure, and something an administrator should look at was moved out of it.</summary>
+    private const int ExitSecuredWithContentMovedAside = 3;
+
     /// <summary>Full path, so a file named sc.exe next to this executable can never be run instead.</summary>
     private static string ScExe => Path.Combine(Environment.SystemDirectory, "sc.exe");
 
-    private static (int ExitCode, string Output) RunProcess(string fileName, params string[] arguments)
+    /// <summary>Reads <c>sc query</c>: a service that no longer exists has stopped too.</summary>
+    internal static bool IsServiceStopped(int exitCode, string output) =>
+        exitCode != 0 || output.Contains("STOPPED", StringComparison.OrdinalIgnoreCase);
+
+    internal static (int ExitCode, string Output) RunProcess(string fileName, params string[] arguments)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -337,10 +429,13 @@ internal static class Program
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException($"Could not start '{fileName}'.");
 
-        // Read both streams before waiting to avoid pipe-buffer deadlocks.
-        var stdout = process.StandardOutput.ReadToEnd();
-        var stderr = process.StandardError.ReadToEnd();
+        // Read both streams at once: reading one to its end first deadlocks as soon as the other
+        // fills its pipe buffer.
+        var stdoutRead = process.StandardOutput.ReadToEndAsync();
+        var stderrRead = process.StandardError.ReadToEndAsync();
         process.WaitForExit();
+        var stdout = stdoutRead.GetAwaiter().GetResult();
+        var stderr = stderrRead.GetAwaiter().GetResult();
 
         var output = string.IsNullOrWhiteSpace(stderr) ? stdout : $"{stdout}{Environment.NewLine}{stderr}";
         return (process.ExitCode, output.Trim());
@@ -360,11 +455,16 @@ internal static class Program
           winguard-svc --uninstall  Stop and delete the Windows service.
           winguard-svc --clear-firewall  Delete all WinGuard_Block_* firewall rules.
 
+        Break-glass (work without the service; need an elevated console):
+          winguard-svc --disarm [--minutes N]  Remove all rules and stop enforcing for N minutes
+                                               (default 60, at most 1440). Ends by itself.
+          winguard-svc --rearm                 End a disarm early.
+
         Management (talk to the running service; needs an elevated console):
           winguard-svc --status    Show service status and per-engine counters.
           winguard-svc --list-bans List active bans.
           winguard-svc --ban <ip> [--permanent] [--duration d.hh:mm:ss] [--note text]
-          winguard-svc --unban <ip>
+          winguard-svc --unban <ip|prefix>
           winguard-svc --doctor    Health check: prerequisites, paths, firewall API.
           winguard-svc --help      Show this help.
         """);

@@ -21,4 +21,21 @@ public sealed class BanEntry
     public bool IsPermanent { get; set; }
 
     public string? Note { get; set; }
+
+    /// <summary>
+    /// Which engines' ports this ban blocks; see <see cref="Config.PortProfiles"/>. Null on a ban from
+    /// before port profiles, which follows the global BlockedPorts as it always did.
+    /// </summary>
+    public string? PortScope { get; set; }
+}
+
+/// <summary>How many times one IP (or IPv6 prefix) has offended, which picks its next ban tier.</summary>
+public sealed class OffenseCountEntry
+{
+    public string IpAddress { get; set; } = string.Empty;
+
+    public int Count { get; set; }
+
+    /// <summary>When the IP last offended or a ban of it ended; the offense memory runs from here.</summary>
+    public DateTime LastUtc { get; set; }
 }

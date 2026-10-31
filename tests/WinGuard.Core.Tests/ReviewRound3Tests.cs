@@ -136,7 +136,7 @@ public class ReviewRound3Tests
         const string message =
             "Login failed for user 'x [CLIENT: 8.8.8.8] y'. Reason: Could not find a login matching the name provided. [CLIENT: 203.0.113.77]";
 
-        Assert.True(MsSqlDetector.TryParse(xml, message, new WinGuardSettings(), out var failed));
+        Assert.True(MsSqlDetector.TryParse(xml, message, new WinGuardSettings(), TestData.SqlInstances, out var failed));
         Assert.Equal("203.0.113.77", failed!.IpAddress);
     }
 
@@ -301,8 +301,9 @@ public class ReviewRound3Tests
 
         Assert.True(FtpLogDetector.TryParseFileZillaLine(modern, out var a));
         Assert.Equal("203.0.113.5", a!.IpAddress);
-        Assert.True(FtpLogDetector.TryParseFileZillaLine(legacy, out var b));
-        Assert.Equal("203.0.113.44", b!.IpAddress);
+
+        // Not a server response at all: the 530 is part of the echoed command, so nothing is counted.
+        Assert.False(FtpLogDetector.TryParseFileZillaLine(legacy, out _));
     }
 
     // ---------- settings validation ----------

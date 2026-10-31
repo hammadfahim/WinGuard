@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text;
 using Microsoft.Extensions.Logging;
 
 namespace WinGuard.Service.Logging;
@@ -7,12 +9,21 @@ namespace WinGuard.Service.Logging;
 /// (PLAN.md §10). One daily file kept open behind one shared lock, timestamp + level + category +
 /// message + exception. A file that reaches the size cap is rolled to <c>winguard-yyyyMMdd.1.log</c>. No external
 /// logging package is used and I/O errors never take the service down.
+/// <para>
+/// Messages carry attacker-chosen text (user names, addresses and lines from log files), so every
+/// line break and control character in them is written escaped: one entry is always one line, and
+/// no remote input can forge an entry. Exception text keeps its lines but each is indented, which
+/// a real entry never is.
+/// </para>
 /// </summary>
 public sealed class FileLoggerProvider : ILoggerProvider
 {
+    private const string ExceptionIndent = "    ";
+
     private readonly string _directory;
     private readonly LogLevel _minimumLevel;
     private readonly object _gate = new();
+    private bool _disposed;
 
     /// <summary>Creates the provider and ensures the log directory exists.</summary>
     /// <param name="directory">Absolute log directory (typically <c>%ProgramData%\WinGuard\Logs</c>).</param>
@@ -42,8 +53,41 @@ public sealed class FileLoggerProvider : ILoggerProvider
     {
         lock (_gate)
         {
+            _disposed = true;
             CloseWriter();
         }
+    }
+
+    /// <summary>Makes untrusted text safe for one log line, keeping it readable.</summary>
+    internal static string Escape(string text)
+    {
+        StringBuilder? escaped = null;
+        for (var i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (c != '\t' && (char.IsControl(c) || c is (char)0x2028 or (char)0x2029))
+            {
+                escaped ??= new StringBuilder(text, 0, i, text.Length + 16);
+                escaped.Append(c switch
+                {
+                    '\r' => @"\r",
+                    '\n' => @"\n",
+                    _ => @"\u" + ((int)c).ToString("x4", CultureInfo.InvariantCulture),
+                });
+            }
+            else
+            {
+                escaped?.Append(c);
+            }
+        }
+
+        return escaped?.ToString() ?? text;
+    }
+
+    internal static string FormatException(Exception exception)
+    {
+        var lines = exception.ToString().Split(["\r\n", "\n"], StringSplitOptions.None);
+        return string.Join(Environment.NewLine, lines.Select(line => ExceptionIndent + Escape(line)));
     }
 
     internal void Write(LogLevel level, string category, string message)
@@ -54,6 +98,11 @@ public sealed class FileLoggerProvider : ILoggerProvider
             var line = $"{now:yyyy-MM-dd HH:mm:ss.fff} [{Level(level)}] {category}: {message}{Environment.NewLine}";
             lock (_gate)
             {
+                if (_disposed)
+                {
+                    return;
+                }
+
                 SweepRetention();
                 EnsureWriter(now.Date);
                 if (_writer is null)
@@ -229,10 +278,10 @@ public sealed class FileLoggerProvider : ILoggerProvider
                 return;
             }
 
-            var message = formatter(state, exception);
+            var message = Escape(formatter(state, exception));
             if (exception is not null)
             {
-                message += Environment.NewLine + exception;
+                message += Environment.NewLine + FormatException(exception);
             }
 
             _provider.Write(logLevel, _category, message);

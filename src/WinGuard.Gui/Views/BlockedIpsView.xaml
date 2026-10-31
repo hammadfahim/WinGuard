@@ -1,77 +1,243 @@
 <UserControl x:Class="WinGuard.Gui.Views.BlockedIpsView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Grid Margin="24">
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ui="clr-namespace:WinGuard.Gui.Controls">
+    <Grid Margin="{StaticResource PagePadding}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <DockPanel Grid.Row="0" Margin="0,0,0,12">
-            <TextBlock DockPanel.Dock="Left" Text="Blocked IPs" FontSize="24" FontWeight="Bold"
-                       VerticalAlignment="Center" />
-            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
-                <TextBlock Text="Filter" VerticalAlignment="Center" Margin="0,0,6,0"
-                           Foreground="{DynamicResource SubtleForegroundBrush}" />
-                <TextBox Width="240" VerticalAlignment="Center"
-                         Text="{Binding FilterText, UpdateSourceTrigger=PropertyChanged}"
-                         ToolTip="Filter by IP, source or note" />
-                <Button Content="Export CSV…" Margin="8,0,0,0" Command="{Binding ExportCsvCommand}" />
+        <!-- Header -->
+        <Grid Margin="{StaticResource GapBottom12}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Style="{StaticResource TextTitle}" Text="Blocked IPs" VerticalAlignment="Center" />
+                <TextBlock Style="{StaticResource TextMuted}" Text="{Binding CountText}" Margin="12,5,0,0" VerticalAlignment="Center" />
+                <ContentControl Style="{StaticResource Chip}" ui:Ui.Tone="Warn" Content="Recorded, not enforced" Margin="12,4,0,0"
+                                ToolTip="Report-only or disarmed: these bans are not in the firewall right now"
+                                Visibility="{Binding IsReportOnly, Converter={StaticResource BoolToVis}}" />
             </StackPanel>
-        </DockPanel>
+            <StackPanel Grid.Column="2" Orientation="Horizontal">
+                <TextBox Style="{StaticResource SearchBox}" Width="240" ui:Ui.Placeholder="Search address, ports, note"
+                         Text="{Binding FilterText, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="Filter as you type (Ctrl+F)" AutomationProperties.Name="Search blocked addresses" />
+                <Button Margin="8,0,0,0" Content="Export" ui:Ui.Icon="{StaticResource GlyphExport}" Command="{Binding ExportCsvCommand}"
+                        ToolTip="Save the rows shown to a CSV file" />
+                <Button Margin="8,0,0,0" Style="{StaticResource PrimaryButton}" Content="Block address" ui:Ui.Icon="{StaticResource GlyphAdd}"
+                        Command="{Binding ToggleBlockFormCommand}" ToolTip="Block an address by hand" />
+            </StackPanel>
+        </Grid>
 
         <!-- Manual block -->
-        <Border Grid.Row="1" Style="{StaticResource CardBorderStyle}" Padding="12" Margin="0,0,0,12">
-            <WrapPanel>
-                <StackPanel Width="220" Margin="0,0,12,0">
-                    <TextBlock Text="Block an IP address" Style="{StaticResource FieldLabelStyle}" />
-                    <TextBox Text="{Binding NewIp, UpdateSourceTrigger=PropertyChanged}"
-                             ToolTip="IPv4 or IPv6 address, e.g. 203.0.113.7" />
-                </StackPanel>
-                <StackPanel Width="150" Margin="0,0,12,0">
-                    <TextBlock Text="For" Style="{StaticResource FieldLabelStyle}" />
-                    <ComboBox ItemsSource="{Binding DurationOptions}" SelectedItem="{Binding SelectedDuration, Mode=TwoWay}" />
-                </StackPanel>
-                <StackPanel Width="260" Margin="0,0,12,0">
-                    <TextBlock Text="Note (optional)" Style="{StaticResource FieldLabelStyle}" />
-                    <TextBox Text="{Binding NewNote, UpdateSourceTrigger=PropertyChanged}" />
-                </StackPanel>
-                <Button Content="Block" Style="{StaticResource AccentButtonStyle}" VerticalAlignment="Bottom"
-                        Command="{Binding BlockNowCommand}" />
-            </WrapPanel>
+        <Border Grid.Row="1" Style="{StaticResource Card}" Padding="14,12" Margin="{StaticResource GapBottom12}"
+                Visibility="{Binding IsBlockFormOpen, Converter={StaticResource BoolToVis}}">
+            <StackPanel>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="2*" />
+                        <ColumnDefinition Width="160" />
+                        <ColumnDefinition Width="2*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Margin="{StaticResource GapRight12}">
+                        <TextBlock Style="{StaticResource TextCaption}" Text="Address" Margin="{StaticResource GapBottom4}" />
+                        <TextBox Style="{StaticResource MonoBox}" Text="{Binding NewIp, UpdateSourceTrigger=PropertyChanged}"
+                                 ui:Ui.Placeholder="203.0.113.7" ui:Ui.HasError="{Binding NewIpError, Converter={StaticResource NotEmptyToBool}}"
+                                 AutomationProperties.Name="Address to block">
+                            <TextBox.InputBindings>
+                                <KeyBinding Key="Return" Command="{Binding BlockNowCommand}" />
+                            </TextBox.InputBindings>
+                        </TextBox>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Margin="{StaticResource GapRight12}">
+                        <TextBlock Style="{StaticResource TextCaption}" Text="For" Margin="{StaticResource GapBottom4}" />
+                        <ComboBox ItemsSource="{Binding DurationOptions}" SelectedItem="{Binding SelectedDuration, Mode=TwoWay}"
+                                  AutomationProperties.Name="Block duration" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Margin="{StaticResource GapRight12}">
+                        <TextBlock Style="{StaticResource TextCaption}" Text="Note (optional)" Margin="{StaticResource GapBottom4}" />
+                        <TextBox Text="{Binding NewNote, UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="Note" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Bottom">
+                        <Button Style="{StaticResource GhostButton}" Content="Cancel" Command="{Binding ToggleBlockFormCommand}" Margin="{StaticResource GapRight8}" />
+                        <Button Style="{StaticResource PrimaryButton}" Content="Block" Command="{Binding BlockNowCommand}" />
+                    </StackPanel>
+                </Grid>
+                <TextBlock Style="{StaticResource ToneText}" ui:Ui.Tone="Attack" Text="{Binding NewIpError}" Margin="0,6,0,0" TextWrapping="Wrap"
+                           Visibility="{Binding NewIpError, Converter={StaticResource NotEmptyToVis}}" />
+                <TextBlock Style="{StaticResource ToneText}" ui:Ui.Tone="Warn" Text="{Binding NewIpHint}" Margin="0,6,0,0" TextWrapping="Wrap"
+                           Visibility="{Binding NewIpHint, Converter={StaticResource NotEmptyToVis}}" />
+            </StackPanel>
         </Border>
 
-        <DataGrid Grid.Row="2" ItemsSource="{Binding Bans}" SelectedItem="{Binding SelectedBan}"
-                  IsReadOnly="True" SelectionMode="Single"
-                  PreviewMouseRightButtonDown="OnPreviewMouseRightButtonDown">
-            <DataGrid.ContextMenu>
-                <ContextMenu>
-                    <MenuItem Header="Unblock"
-                              Command="{Binding PlacementTarget.DataContext.UnblockCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                              CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
-                    <MenuItem Header="Unblock &amp; Whitelist"
-                              Command="{Binding PlacementTarget.DataContext.UnblockAndWhitelistCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                              CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
-                    <MenuItem Header="Promote to permanent"
-                              Command="{Binding PlacementTarget.DataContext.PromoteToPermanentCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                              CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
-                </ContextMenu>
-            </DataGrid.ContextMenu>
-            <DataGrid.Columns>
-                <DataGridTextColumn Header="IP" Binding="{Binding IpAddress}" Width="160" />
-                <DataGridTextColumn Header="Source" Binding="{Binding SourceText}" Width="90" />
-                <DataGridTextColumn Header="Banned (local)" Binding="{Binding BannedText}" Width="180" />
-                <DataGridTextColumn Header="Expires (local)" Binding="{Binding ExpiresText}" Width="180" />
-                <DataGridTextColumn Header="Offense" Binding="{Binding OffenseCount}" Width="80" />
-                <DataGridTextColumn Header="Note" Binding="{Binding NoteText}" Width="*" />
-            </DataGrid.Columns>
-        </DataGrid>
+        <!-- Bulk actions -->
+        <Border Grid.Row="2" Style="{StaticResource Callout}" ui:Ui.Tone="Accent" Padding="12,5" Margin="{StaticResource GapBottom12}"
+                Visibility="{Binding HasSelection, Converter={StaticResource BoolToVis}}">
+            <DockPanel>
+                <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                    <Button Height="{StaticResource ControlHeightSmall}" Content="Copy" ui:Ui.Icon="{StaticResource GlyphCopy}" Margin="{StaticResource GapRight8}"
+                            Command="{Binding CopyIpCommand}" ToolTip="Copy the selected addresses (Ctrl+C)" />
+                    <Button Height="{StaticResource ControlHeightSmall}" Content="Make permanent" ui:Ui.Icon="{StaticResource GlyphLock}" Margin="{StaticResource GapRight8}"
+                            Command="{Binding PromoteToPermanentCommand}" ToolTip="Stop these bans from expiring" />
+                    <Button Height="{StaticResource ControlHeightSmall}" Content="Whitelist" ui:Ui.Icon="{StaticResource GlyphAllow}" Margin="{StaticResource GapRight8}"
+                            Command="{Binding UnblockAndWhitelistCommand}" ToolTip="Unblock and never ban again" />
+                    <Button Height="{StaticResource ControlHeightSmall}" Style="{StaticResource PrimaryButton}" Content="Unblock" ui:Ui.Icon="{StaticResource GlyphUnlock}"
+                            Command="{Binding UnblockCommand}" ToolTip="Remove these bans (Del)" />
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Style="{StaticResource TextStrong}" Text="{Binding SelectionText}" />
+                    <TextBlock Style="{StaticResource TextMuted}" Text="{Binding BusyText}" Margin="12,0,0,0" />
+                </StackPanel>
+            </DockPanel>
+        </Border>
 
-        <StackPanel Grid.Row="3" Margin="0,10,0,0">
-            <TextBlock Text="{Binding CountText}" Foreground="{DynamicResource SubtleForegroundBrush}" />
-            <TextBlock Text="{Binding StatusMessage}" TextWrapping="Wrap" />
-        </StackPanel>
+        <!-- Grid -->
+        <Border Grid.Row="3" Style="{StaticResource Card}" Padding="0">
+            <ui:StateHost State="{Binding State}" EmptyGlyph="{StaticResource GlyphShield}" EmptyTitle="{Binding EmptyTitle}" EmptyText="{Binding EmptyText}"
+                          ErrorTitle="Blocked IPs are not available" ErrorText="{Binding ErrorText}"
+                          RetryCommand="{Binding DataContext.RefreshCommand, RelativeSource={RelativeSource AncestorType=ui:PageHost}}"
+                          LoadingText="Loading blocked addresses…">
+                <DataGrid x:Name="BansGrid" ItemsSource="{Binding Bans}" ClipboardCopyMode="None"
+                          Sorting="OnSorting" SelectionChanged="OnSelectionChanged"
+                          PreviewMouseRightButtonDown="OnPreviewMouseRightButtonDown"
+                          RowDetailsVisibilityMode="VisibleWhenSelected"
+                          AutomationProperties.Name="Blocked addresses">
+                    <DataGrid.RowDetailsTemplate>
+                        <DataTemplate>
+                            <StackPanel Margin="12,0,12,8">
+                                <TextBlock Style="{StaticResource CellMuted}" Text="{Binding PortsDetail}" TextWrapping="Wrap" TextTrimming="None"
+                                           FontSize="{StaticResource FontSizeCaption}" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </DataGrid.RowDetailsTemplate>
+                    <DataGrid.InputBindings>
+                        <KeyBinding Key="Delete" Command="{Binding UnblockCommand}" />
+                        <KeyBinding Key="C" Modifiers="Ctrl" Command="{Binding CopyIpCommand}" />
+                    </DataGrid.InputBindings>
+                    <DataGrid.ContextMenu>
+                        <ContextMenu>
+                            <MenuItem Header="Unblock" ui:Ui.Icon="{StaticResource GlyphUnlock}" InputGestureText="Del"
+                                      Command="{Binding PlacementTarget.DataContext.UnblockCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                      CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                            <MenuItem Header="Unblock and whitelist" ui:Ui.Icon="{StaticResource GlyphAllow}"
+                                      Command="{Binding PlacementTarget.DataContext.UnblockAndWhitelistCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                      CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                            <MenuItem Header="Make permanent" ui:Ui.Icon="{StaticResource GlyphLock}"
+                                      Command="{Binding PlacementTarget.DataContext.PromoteToPermanentCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                      CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                            <Separator />
+                            <MenuItem Header="Copy address" ui:Ui.Icon="{StaticResource GlyphCopy}" InputGestureText="Ctrl+C"
+                                      Command="{Binding PlacementTarget.DataContext.CopyIpCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                      CommandParameter="{Binding PlacementTarget.SelectedItem, RelativeSource={RelativeSource AncestorType=ContextMenu}}" />
+                        </ContextMenu>
+                    </DataGrid.ContextMenu>
+                    <DataGrid.Columns>
+                        <DataGridTemplateColumn Header="Address" Width="2.6*" MinWidth="190" SortMemberPath="IpSortKey">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <Grid ToolTip="{Binding IpToolTip}">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Style="{StaticResource CellMono}" Text="{Binding IpAddress}" />
+                                        <ContentControl Grid.Column="1" Style="{StaticResource Chip}" ui:Ui.Tone="Accent" Content="{Binding KindText}" Margin="6,0,0,0"
+                                                        Visibility="{Binding IsPrefix, Converter={StaticResource BoolToVis}}" />
+                                    </Grid>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Header="Engine" Binding="{Binding SourceText}" Width="94" MinWidth="80"
+                                            SortMemberPath="SourceText" ElementStyle="{StaticResource CellText}" />
+                        <DataGridTemplateColumn Header="Ports" Width="110" MinWidth="96" SortMemberPath="PortsText">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding PortsText}" ToolTip="{Binding PortsDetail}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock" BasedOn="{StaticResource CellMono}">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsAllPorts}" Value="True">
+                                                        <Setter Property="FontFamily" Value="{StaticResource FontUi}" />
+                                                        <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}" />
+                                                    </DataTrigger>
+                                                    <MultiDataTrigger>
+                                                        <MultiDataTrigger.Conditions>
+                                                            <Condition Binding="{Binding IsAllPorts}" Value="True" />
+                                                            <Condition Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=DataGridRow}}" Value="True" />
+                                                        </MultiDataTrigger.Conditions>
+                                                        <Setter Property="Foreground" Value="{DynamicResource TextOnSelectedBrush}" />
+                                                    </MultiDataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Header="Banned" Binding="{Binding BannedText}" Width="150" MinWidth="120"
+                                            SortMemberPath="BannedUtc" ElementStyle="{StaticResource CellMuted}" SortDirection="Descending" />
+                        <DataGridTemplateColumn Header="Expires in" Width="96" MinWidth="90" SortMemberPath="ExpiresSortKey">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding CountdownText}" ToolTip="{Binding ExpiresToolTip}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock" BasedOn="{StaticResource CellText}">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsPermanent}" Value="True">
+                                                        <Setter Property="Foreground" Value="{DynamicResource AttackTextBrush}" />
+                                                        <Setter Property="FontWeight" Value="SemiBold" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Header="Offense" Binding="{Binding OffenseCount}" Width="70" MinWidth="64"
+                                            SortMemberPath="OffenseCount" ElementStyle="{StaticResource CellText}" />
+                        <DataGridTextColumn Header="Note" Binding="{Binding NoteText}" Width="1.6*" MinWidth="70"
+                                            SortMemberPath="NoteText" ElementStyle="{StaticResource CellMuted}" />
+                        <DataGridTemplateColumn Width="104" MinWidth="104" CanUserSort="False" CanUserResize="False">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                        <StackPanel.Style>
+                                            <Style TargetType="StackPanel">
+                                                <Setter Property="Visibility" Value="Hidden" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}}" Value="True">
+                                                        <Setter Property="Visibility" Value="Visible" />
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=DataGridRow}}" Value="True">
+                                                        <Setter Property="Visibility" Value="Visible" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </StackPanel.Style>
+                                        <Button Style="{StaticResource RowAction}" ui:Ui.Icon="{StaticResource GlyphCopy}"
+                                                Command="{Binding DataContext.CopyIpCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                CommandParameter="{Binding}" ToolTip="Copy address" AutomationProperties.Name="Copy address" />
+                                        <Button Style="{StaticResource RowAction}" ui:Ui.Icon="{StaticResource GlyphAllow}"
+                                                Command="{Binding DataContext.UnblockAndWhitelistCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                CommandParameter="{Binding}" ToolTip="Unblock and whitelist" AutomationProperties.Name="Unblock and whitelist" />
+                                        <Button Style="{StaticResource RowAction}" ui:Ui.Icon="{StaticResource GlyphUnlock}"
+                                                Command="{Binding DataContext.UnblockCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                                                CommandParameter="{Binding}" ToolTip="Unblock" AutomationProperties.Name="Unblock" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </ui:StateHost>
+        </Border>
     </Grid>
 </UserControl>

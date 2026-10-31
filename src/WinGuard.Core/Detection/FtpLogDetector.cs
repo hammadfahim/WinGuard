@@ -37,16 +37,19 @@ public sealed class FtpLogDetector : IDetector
         "sc-status", "sc-substatus", "sc-win32-status", "time-taken",
     ];
 
+    // Only what comes before the 530 is searched: the session marker has to be there, and this
+    // regex must see the first marker on the line, so it stays on the backtracking engine, which
+    // guarantees that. NonBacktracking returned a later marker here, one a client could type.
     private static readonly Regex FileZillaLoginRegex = new(
         @"(?:\((?<parenUser>[^()]*)\)\s*)?(?<bareUser>[^\s()]+)?\s*\((?<ip>[^()]+)\)>",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    // A server response starts right after the id, time, user and address. A "530 Login" further
+    // along is text a client typed, and a long one would be slow for the regex above.
+    private const int MaxFileZillaPrefixChars = 1024;
+
     private static readonly Regex FileZillaTimestampRegex = new(
         @"^\s*\(\d+\)\s+(?<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-    private static readonly Regex ParenthesizedRegex = new(
-        @"\((?<value>[^()]*)\)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private readonly Func<WinGuardSettings> _settingsAccessor;
@@ -59,6 +62,12 @@ public sealed class FtpLogDetector : IDetector
     // later is new (e.g. the next daily log) and is read from its first line.
     private HashSet<string> _knownSources = new(StringComparer.OrdinalIgnoreCase);
     private volatile bool _loopRunning;
+
+    // How far back a busy file is searched for its last #Fields: line before settling for the first.
+    private const long MaxFieldsHeaderScanBytes = 64 * 1024 * 1024;
+    private const int FieldsHeaderBlockBytes = 1024 * 1024;
+    private const int MaxFieldsHeaderBytes = 16 * 1024;
+
     private readonly Dictionary<string, string> _fieldsHeaders = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _headerPreReadDone = new(StringComparer.OrdinalIgnoreCase);
 
@@ -118,9 +127,11 @@ public sealed class FtpLogDetector : IDetector
             return false;
         }
 
+        // W3C lines are rectangular. A different token count means the columns cannot be trusted
+        // (a raw space in a client field would shift c-ip), so the line is dropped, not guessed at.
         var fields = ParseFields(fieldsHeaderLine);
         var tokens = trimmed.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-        if (tokens.Length == 0)
+        if (tokens.Length != fields.Length)
         {
             return false;
         }
@@ -158,17 +169,19 @@ public sealed class FtpLogDetector : IDetector
             Source = ProtocolSource.Ftp,
             Detector = IisDetectorName,
             TimestampUtc = ParseIisTimestamp(Get("date"), Get("time")),
-            RawLog = trimmed,
+            RawLog = DetectorUtil.LimitRawLog(trimmed),
         };
         return true;
     }
 
     /// <summary>
-    /// Parses one FileZilla Server log line. The session IP is the last <c>(address)</c> token
-    /// before <c>'&gt;'</c>; the user is an optional token immediately before that address, which
-    /// is either <c>(name)</c> (e.g. <c>(not logged in)</c>, which maps to a null user) or a bare
-    /// name after login (e.g. <c>admin (ip)&gt;</c>). Only lines containing
-    /// <c>"530 Login or password incorrect!"</c> match.
+    /// Parses one FileZilla Server log line. The session IP is the first <c>(address)&gt;</c> marker
+    /// and the 530 response must follow it directly: FileZilla also logs client commands verbatim,
+    /// so anything later on the line may be typed by the client, and a line of any other shape is
+    /// dropped instead of being attributed to an address the client chose. The user is an optional
+    /// token immediately before that address, which is either <c>(name)</c> (e.g.
+    /// <c>(not logged in)</c>, which maps to a null user) or a bare name after login (e.g.
+    /// <c>admin (ip)&gt;</c>). Only lines containing <c>"530 Login or password incorrect!"</c> match.
     /// </summary>
     /// <param name="line">A single FileZilla log line.</param>
     /// <param name="failed">The parsed failure when the method returns <see langword="true"/>.</param>
@@ -183,16 +196,21 @@ public sealed class FtpLogDetector : IDetector
         var trimmed = line.Trim();
         // "530 Login or password incorrect!" (Server 0.9.x) and "530 Login incorrect." (1.x).
         var responseIndex = trimmed.IndexOf("530 Login", StringComparison.OrdinalIgnoreCase);
-        if (responseIndex < 0)
+        if (responseIndex < 0 || responseIndex > MaxFileZillaPrefixChars)
         {
             return false;
         }
 
         string? user = null;
         string? rawIp;
-        var match = FileZillaLoginRegex.Match(trimmed);
-        if (match.Success && match.Index < responseIndex)
+        var match = FileZillaLoginRegex.Match(trimmed, 0, responseIndex);
+        if (match.Success)
         {
+            if (!string.IsNullOrWhiteSpace(trimmed[(match.Index + match.Length)..responseIndex]))
+            {
+                return false;
+            }
+
             rawIp = match.Groups["ip"].Value;
             var parenUser = match.Groups["parenUser"].Success ? match.Groups["parenUser"].Value : null;
             var bareUser = match.Groups["bareUser"].Success ? match.Groups["bareUser"].Value : null;
@@ -200,7 +218,7 @@ public sealed class FtpLogDetector : IDetector
         }
         else
         {
-            rawIp = LastParenthesizedIp(trimmed) ?? FirstIpToken(trimmed[..responseIndex]);
+            rawIp = FirstIpToken(trimmed[..responseIndex]);
         }
 
         if (rawIp is null || !IpMatcher.TryNormalize(rawIp, out var ip))
@@ -215,7 +233,7 @@ public sealed class FtpLogDetector : IDetector
             Source = ProtocolSource.Ftp,
             Detector = FileZillaDetectorName,
             TimestampUtc = ParseFileZillaTimestamp(trimmed),
-            RawLog = trimmed,
+            RawLog = DetectorUtil.LimitRawLog(trimmed),
         };
         return true;
     }
@@ -247,6 +265,8 @@ public sealed class FtpLogDetector : IDetector
                     // instead of replaying what was logged in the meantime.
                     _knownSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     _tailer.Prune([]);
+                    _fieldsHeaders.Clear();
+                    _headerPreReadDone.Clear();
                 }
 
                 var interval = settings.Ftp.PollInterval > TimeSpan.Zero ? settings.Ftp.PollInterval : Defaults.FtpPollInterval;
@@ -271,7 +291,7 @@ public sealed class FtpLogDetector : IDetector
         }
     }
 
-    private void PollOnce(WinGuardSettings settings, Channel<FailedLogin> sink)
+    internal void PollOnce(WinGuardSettings settings, Channel<FailedLogin> sink)
     {
         var activeFiles = new List<string>();
         var seenSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -293,12 +313,15 @@ public sealed class FtpLogDetector : IDetector
             foreach (var file in files)
             {
                 activeFiles.Add(file);
-                if (source.Kind != FtpServerKind.FileZilla)
+                var lines = _tailer.ReadNewLines(file, readFromStartIfNew: sourceKnown);
+
+                // Only for a file that has new lines: a log folder can hold years of old logs.
+                if (source.Kind != FtpServerKind.FileZilla && lines.Count > 0)
                 {
                     EnsureFieldsHeaderPreRead(file);
                 }
 
-                foreach (var line in _tailer.ReadNewLines(file, readFromStartIfNew: sourceKnown))
+                foreach (var line in lines)
                 {
                     if (source.Kind == FtpServerKind.FileZilla)
                     {
@@ -364,14 +387,14 @@ public sealed class FtpLogDetector : IDetector
 
     /// <summary>
     /// The tailer skips existing content the first time it sees a file, so the
-    /// <c>#Fields:</c> header IIS wrote earlier is never streamed to us. Pre-read the file's
-    /// tail (last 64 KB) once to recover the active column order; without this, servers with
+    /// <c>#Fields:</c> header IIS wrote earlier is never streamed to us. Search the file for
+    /// the last one, once, to recover the active column order; without this, servers with
     /// a custom W3C field selection would be parsed with <see cref="DefaultW3cFields"/> and
     /// could silently mis-detect (integrator fix for the skip-to-end interaction).
     /// </summary>
     private void EnsureFieldsHeaderPreRead(string file)
     {
-        // Attempt the 64 KB tail pre-read once per file, not on every poll cycle.
+        // Attempt the search once per file, not on every poll cycle.
         if (_fieldsHeaders.ContainsKey(file) || !_headerPreReadDone.Add(file))
         {
             return;
@@ -381,37 +404,67 @@ public sealed class FtpLogDetector : IDetector
         {
             using var stream = new FileStream(
                 file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            const int tailBytes = 64 * 1024;
-            if (stream.Length == 0)
+            var header = FindLastFieldsHeader(stream);
+            if (header is not null)
             {
-                return;
-            }
-
-            var length = (int)Math.Min(stream.Length, tailBytes);
-            stream.Seek(-length, SeekOrigin.End);
-            var buffer = new byte[length];
-            var read = stream.Read(buffer, 0, length);
-            var text = System.Text.Encoding.UTF8.GetString(buffer, 0, read);
-
-            string? lastHeader = null;
-            foreach (var line in text.Split('\n'))
-            {
-                if (line.TrimStart().StartsWith("#Fields:", StringComparison.OrdinalIgnoreCase))
-                {
-                    lastHeader = line.Trim();
-                }
-            }
-
-            if (lastHeader is not null)
-            {
-                _fieldsHeaders[file] = lastHeader;
+                _fieldsHeaders[file] = header;
                 _logger.LogDebug("Pre-read the W3C fields header for {File}.", file);
             }
         }
         catch (Exception ex)
         {
+            _headerPreReadDone.Remove(file);
             _logger.LogDebug(ex, "Could not pre-read the W3C fields header for {File}; using the default column order.", file);
         }
+    }
+
+    /// <summary>
+    /// Searches backwards from the end of the file. IIS writes the header when it opens a log, so in
+    /// a busy file it can be far behind the tail. A very large file is searched up to
+    /// <see cref="MaxFieldsHeaderScanBytes"/> back and then at its start, where the first header is.
+    /// </summary>
+    internal static string? FindLastFieldsHeader(Stream stream)
+    {
+        var length = stream.Length;
+        var buffer = new byte[FieldsHeaderBlockBytes + MaxFieldsHeaderBytes];
+        for (var end = length; end > 0 && length - end < MaxFieldsHeaderScanBytes; end -= FieldsHeaderBlockBytes)
+        {
+            var header = FindFieldsHeaderInBlock(stream, Math.Max(0, end - FieldsHeaderBlockBytes), end, buffer);
+            if (header is not null)
+            {
+                return header;
+            }
+        }
+
+        return length > MaxFieldsHeaderScanBytes
+            ? FindFieldsHeaderInBlock(stream, 0, FieldsHeaderBlockBytes, buffer)
+            : null;
+    }
+
+    /// <summary>The last header starting in a block; the read runs past its end to complete one that straddles it.</summary>
+    private static string? FindFieldsHeaderInBlock(Stream stream, long start, long end, byte[] buffer)
+    {
+        stream.Seek(start, SeekOrigin.Begin);
+        var count = stream.ReadAtLeast(
+            buffer.AsSpan(0, (int)(end - start) + MaxFieldsHeaderBytes),
+            (int)(end - start) + MaxFieldsHeaderBytes,
+            throwOnEndOfStream: false);
+
+        // Latin-1 maps bytes to chars one to one, so a stray byte cannot shift anything, and the
+        // field names the parser needs are ASCII.
+        var text = System.Text.Encoding.Latin1.GetString(buffer, 0, count);
+        for (var index = text.LastIndexOf("#Fields:", StringComparison.OrdinalIgnoreCase);
+            index >= 0;
+            index = index == 0 ? -1 : text.LastIndexOf("#Fields:", index - 1, StringComparison.OrdinalIgnoreCase))
+        {
+            if (index == 0 ? start == 0 : text[index - 1] is '\n')
+            {
+                var lineEnd = text.IndexOf('\n', index);
+                return (lineEnd < 0 ? text[index..] : text[index..lineEnd]).Trim();
+            }
+        }
+
+        return null;
     }
 
     private static string[] ParseFields(string? fieldsHeaderLine)
@@ -434,23 +487,6 @@ public sealed class FtpLogDetector : IDetector
 
         var fields = header.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         return fields.Length == 0 ? DefaultW3cFields : fields;
-    }
-
-    private static string? LastParenthesizedIp(string line)
-    {
-        var arrow = line.IndexOf('>');
-        var region = arrow >= 0 ? line[..arrow] : line;
-        string? found = null;
-        foreach (Match match in ParenthesizedRegex.Matches(region))
-        {
-            var candidate = match.Groups["value"].Value;
-            if (IpMatcher.TryNormalize(candidate, out _))
-            {
-                found = candidate;
-            }
-        }
-
-        return found;
     }
 
     /// <summary>

@@ -1,29 +1,75 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
-    <!-- High-contrast theme: every brush maps to a Windows system color so the user's
-         high-contrast palette is honored. Keys are shared with Dark.xaml / Light.xaml.
-         Filled areas (status pills, selection, accent buttons) use Highlight with HighlightText
-         on top, the one pairing every high-contrast palette guarantees to be readable. -->
+    <!-- High-contrast theme: every brush maps to a Windows system colour so the user's palette is
+         honoured. Keys are shared with Dark.xaml / Light.xaml. Meaning cannot rely on colour here,
+         so every status in the views also carries an icon and a word. Filled areas use Highlight
+         with HighlightText on top, the one pairing every palette guarantees to be readable. -->
 
-    <SolidColorBrush x:Key="WindowBackgroundBrush" Color="{x:Static SystemColors.WindowColor}" />
-    <SolidColorBrush x:Key="PanelBackgroundBrush" Color="{x:Static SystemColors.WindowColor}" />
-    <SolidColorBrush x:Key="CardBackgroundBrush" Color="{x:Static SystemColors.WindowColor}" />
-    <SolidColorBrush x:Key="ControlBackgroundBrush" Color="{x:Static SystemColors.WindowColor}" />
-    <SolidColorBrush x:Key="ForegroundBrush" Color="{x:Static SystemColors.WindowTextColor}" />
-    <SolidColorBrush x:Key="SubtleForegroundBrush" Color="{x:Static SystemColors.WindowTextColor}" />
-    <SolidColorBrush x:Key="BorderBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <!-- Surfaces. -->
+    <SolidColorBrush x:Key="CanvasBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="RailBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="SurfaceBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="SurfaceRaisedBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="SurfaceSunkenBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="SurfaceHoverBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="SurfacePressedBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="SurfaceSelectedBrush" Color="{x:Static SystemColors.HighlightColor}" />
+    <SolidColorBrush x:Key="ScrimBrush" Color="{x:Static SystemColors.WindowColor}" Opacity="0.8" />
+
+    <!-- Lines. -->
+    <SolidColorBrush x:Key="LineBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <SolidColorBrush x:Key="LineStrongBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <SolidColorBrush x:Key="HoverLineBrush" Color="{x:Static SystemColors.HighlightColor}" />
+    <SolidColorBrush x:Key="FocusRingBrush" Color="{x:Static SystemColors.HighlightColor}" />
+    <SolidColorBrush x:Key="ChipBorderBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+
+    <!-- Text. -->
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <SolidColorBrush x:Key="TextTertiaryBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <SolidColorBrush x:Key="TextOnAccentBrush" Color="{x:Static SystemColors.HighlightTextColor}" />
+    <SolidColorBrush x:Key="TextOnSelectedBrush" Color="{x:Static SystemColors.HighlightTextColor}" />
+
+    <!-- Accent. -->
     <SolidColorBrush x:Key="AccentBrush" Color="{x:Static SystemColors.HighlightColor}" />
-    <SolidColorBrush x:Key="AccentForegroundBrush" Color="{x:Static SystemColors.HighlightTextColor}" />
-    <SolidColorBrush x:Key="SuccessBrush" Color="{x:Static SystemColors.HighlightColor}" />
-    <SolidColorBrush x:Key="WarningBrush" Color="{x:Static SystemColors.HighlightColor}" />
-    <SolidColorBrush x:Key="ErrorBrush" Color="{x:Static SystemColors.HighlightColor}" />
-    <SolidColorBrush x:Key="InfoBrush" Color="{x:Static SystemColors.HighlightColor}" />
-    <SolidColorBrush x:Key="HoverBackgroundBrush" Color="{x:Static SystemColors.WindowColor}" />
-    <SolidColorBrush x:Key="SelectedBackgroundBrush" Color="{x:Static SystemColors.HighlightColor}" />
-    <SolidColorBrush x:Key="SelectedForegroundBrush" Color="{x:Static SystemColors.HighlightTextColor}" />
-    <SolidColorBrush x:Key="ControlTrackBrush" Color="{x:Static SystemColors.GrayTextColor}" />
-    <SolidColorBrush x:Key="OnAccentForegroundBrush" Color="{x:Static SystemColors.HighlightTextColor}" />
-    <SolidColorBrush x:Key="WarningForegroundBrush" Color="{x:Static SystemColors.HighlightTextColor}" />
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="{x:Static SystemColors.HighlightColor}" />
+    <SolidColorBrush x:Key="AccentPressedBrush" Color="{x:Static SystemColors.HighlightColor}" />
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="AccentTextBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+
+    <!-- Meaning: the solid is Highlight, the tint is the window, text is plain window text. -->
+    <SolidColorBrush x:Key="ProtectedBrush" Color="{x:Static SystemColors.HighlightColor}" />
+    <SolidColorBrush x:Key="ProtectedSoftBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="ProtectedTextBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <SolidColorBrush x:Key="OnProtectedBrush" Color="{x:Static SystemColors.HighlightTextColor}" />
+
+    <SolidColorBrush x:Key="AttackBrush" Color="{x:Static SystemColors.HighlightColor}" />
+    <SolidColorBrush x:Key="AttackSoftBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="AttackTextBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <SolidColorBrush x:Key="OnAttackBrush" Color="{x:Static SystemColors.HighlightTextColor}" />
+
+    <SolidColorBrush x:Key="WarnBrush" Color="{x:Static SystemColors.HighlightColor}" />
+    <SolidColorBrush x:Key="WarnSoftBrush" Color="{x:Static SystemColors.WindowColor}" />
+    <SolidColorBrush x:Key="WarnTextBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <SolidColorBrush x:Key="OnWarnBrush" Color="{x:Static SystemColors.HighlightTextColor}" />
+
+    <SolidColorBrush x:Key="NeutralSoftBrush" Color="{x:Static SystemColors.WindowColor}" />
+
+    <!-- Charts. -->
+    <SolidColorBrush x:Key="ChartSeries0Brush" Color="{x:Static SystemColors.HighlightColor}" />
+    <SolidColorBrush x:Key="ChartSeries1Brush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <SolidColorBrush x:Key="ChartSeries2Brush" Color="{x:Static SystemColors.GrayTextColor}" />
+    <SolidColorBrush x:Key="ChartSeries3Brush" Color="{x:Static SystemColors.HotTrackColor}" />
+    <SolidColorBrush x:Key="ChartLineBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <SolidColorBrush x:Key="ChartGridBrush" Color="{x:Static SystemColors.GrayTextColor}" />
+    <SolidColorBrush x:Key="ChartHoverBrush" Color="{x:Static SystemColors.GrayTextColor}" Opacity="0.3" />
+
+    <!-- Scroll bars. -->
+    <SolidColorBrush x:Key="ScrollThumbBrush" Color="{x:Static SystemColors.WindowTextColor}" />
+    <SolidColorBrush x:Key="ScrollThumbHoverBrush" Color="{x:Static SystemColors.HighlightColor}" />
+
+    <!-- No shadows: an overlay is separated by its solid border. -->
+    <x:Null x:Key="ElevationOverlay" />
 
 </ResourceDictionary>

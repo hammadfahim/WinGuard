@@ -3,6 +3,96 @@
 All notable changes to WinGuard are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project versions by tag.
 
+## [Unreleased]
+
+### Added
+
+- **Per-engine port profiles**: ban an attacker on the attacked service's ports only, with presets
+  for RDP, MS SQL, FTP and SSH. The default stays all ports, and a port-scoped ban widens when the
+  same address attacks another engine.
+- **Local blocklist files**: block lists the administrator downloaded (Spamhaus DROP format works),
+  capped at 50,000 entries, with whitelisted and internal ranges cut out. WinGuard fetches nothing.
+- **Detection rules** (all off by default): honeypot usernames, password spraying from one IP, slow
+  brute force across engines, `POSSIBLE COMPROMISE` alerts on a successful logon after failures, and
+  optional short-lived trust of an administrator's address.
+- **Break-glass recovery**: `--disarm [--minutes N]` and `--rearm` work with the service down, are
+  bounded to 24 hours and end by themselves. `--doctor` warns when Group Policy makes Windows ignore
+  local firewall rules.
+- **Encrypted secrets**: the SMTP password, Telegram token and webhook URL are stored with DPAPI.
+- **Monitoring**: a Prometheus textfile for windows_exporter and a syslog notification channel (RFC
+  5424 or CEF). No listening port.
+- **New console**: redesigned shell, dashboard, Blocked IPs, Event log, Statistics, Lists and
+  Settings, with in-app toasts, confirmation dialogs, keyboard shortcuts, bulk actions, live
+  countdowns, interactive charts and a regex tester for custom sources.
+- `OffenseMemory` (default 90 days) and `BanHistoryRetentionDays` (default 365).
+- CI fails on vulnerable packages; release builds are signed when `WINGUARD_SIGNING_PFX_BASE64` and
+  `WINGUARD_SIGNING_PFX_PASSWORD` are configured.
+
+### Changed
+
+- **Protocol version 5**: use a matching console and service. An older console saving settings could
+  reset the new options, so the two are versioned together.
+- **Database schema 5**: offense counts move to their own table and bans record their port scope.
+  Existing data is migrated in place; downgrading loses escalation counts.
+- With `BlockedPorts` set, new manual bans, blacklist bans and blacklisted ranges now block **all**
+  ports.
+- **Setup now checks the data folder before trusting it.** `--harden-data` walks it without following
+  links; links, hard links and items not owned by SYSTEM or Administrators are moved to a
+  `Quarantine-*` folder with a `quarantine.txt`, never deleted, and it exits with code 3 when that
+  happens. It runs with the service stopped.
+- MS SQL events are ignored unless their provider is an installed SQL Server instance.
+- `ban_history` is pruned after `BanHistoryRetentionDays` instead of growing forever.
+- Report-only mode now never touches the firewall: rules that already exist stay until it is
+  switched off, even if their ban is lifted.
+- CGNAT (100.64.0.0/10) and benchmarking (198.18.0.0/15) addresses count as internal; a NAT64 address
+  is judged by the IPv4 address inside it.
+- Manual bans are labelled Manual instead of Custom.
+- The console now verifies that the service's pipe is owned by SYSTEM or an elevated administrator,
+  and refuses it otherwise.
+- Setup now stops with an error if it cannot secure the data folder or stop the service.
+- Webhook payloads changed so Slack, Discord, Mattermost and Teams-style receivers accept them.
+  Windows events have stable IDs per event type, listed in `SECURITY.md`.
+
+### Fixed
+
+- **The whitelist now wins over range blocks.** Windows block rules beat allow rules, so a
+  blacklisted range is split around whitelisted addresses (including the server's own) instead of
+  blocking them, and an IPv6 prefix holding a whitelisted address stays on per-address bans. An
+  aggregate ban that comes to overlap the whitelist is lifted by housekeeping.
+- **Backlog replay no longer re-counts.** Failures the previous run already processed are skipped
+  and replayed 4625/140 pairs merge, so a restart cannot ban a user for failures counted before it
+  or undo a manual unban. The engine saves its position during housekeeping and on stop. The first
+  start after this upgrade replays nothing, because no position has been saved yet.
+- **IPv6 aggregate bans can be lifted early**: Unblock, Unblock & Whitelist and Promote work on
+  them, as does `--unban <prefix>`, and whitelisting a covering range lifts them.
+- **Attacker-chosen user names can no longer pick the banned address.** The Windows OpenSSH recipe
+  takes the address from the end of the line; sources saved from the old recipe are upgraded when
+  loaded. A FileZilla line counts only when the 530 response directly follows the first session
+  marker, so a client command echoing "530 Login" is ignored.
+- **A database failure no longer stops blocking.** The firewall block now comes first. While the
+  store refuses writes, failures are counted in memory and unsaved bans stay enforced until
+  housekeeping can save them.
+- Blacklisted ranges stay enforced across a restart; an unreadable database at start-up no longer
+  wipes the firewall rules.
+- Escalation no longer resets 4 days after a ban ends.
+- `--doctor` can now actually fail its firewall check.
+- The IIS HTTP recipe matches real W3C logs and counts real logon failures only; the hMailServer
+  and VNC recipes were rewritten against their real log formats, and saved sources upgrade on load.
+- Two custom sources can share a file; UTF-16 logs are read; rotated logs are not lost; a crafted
+  line can no longer hide later attempts through a regex timeout.
+- Log forging through newlines in attacker-controlled text, and URLs leaking into logs.
+- Expired bans now notify; a suppressed-notification summary shows what the rate limit dropped.
+- **Review of the combined work.** A failed ban read is no longer taken for "no ban", which could
+  overwrite a ban or demote a permanent one; bans made during a database outage survive expiry
+  passes and cancellation; a whitelisted address banned while the lists were unreadable is lifted;
+  NAT64 addresses are judged by the IPv4 address inside them and never aggregated, and bans of the
+  NAT64 prefix left by older versions are lifted; a manual re-ban keeps a longer existing ban;
+  `ClearBansOnStartup` no longer wipes range rules when the lists are unreadable.
+- A hanging webhook or mail server no longer holds back the Windows Event Log and syslog outputs.
+- Failures logged during the start-up replay are no longer lost.
+- Old plaintext secrets are scrubbed from the database files, not only overwritten.
+- Saving settings in the console no longer loses the syslog settings or a custom source's ports.
+
 ## [0.2.0] — 2026-10-07
 
 ### Added

@@ -9,8 +9,8 @@ namespace WinGuard.Core.Tests;
 
 /// <summary>
 /// Tests for the notification fan-out: the sliding-window rate limiter, the severity filter and
-/// the composite publisher's failure isolation. Network delivery itself is exercised live, not
-/// in unit tests.
+/// the composite publisher's failure isolation. Delivery itself is in
+/// <see cref="NotificationDeliveryTests"/>.
 /// </summary>
 public sealed class NotificationDispatcherTests
 {

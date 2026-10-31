@@ -16,8 +16,20 @@ public static class Defaults
     public static readonly TimeSpan HousekeepingInterval = TimeSpan.FromSeconds(15);
     public static readonly TimeSpan FtpPollInterval = TimeSpan.FromSeconds(3);
 
+    /// <summary>
+    /// How long a repeat offender stays remembered after a ban ends. Well past the longest default
+    /// tier: an attacker returning a few weeks after a ban must not be back at 24 hours.
+    /// </summary>
+    public static readonly TimeSpan OffenseMemory = TimeSpan.FromDays(90);
+
+    public const int EventRetentionDays = 30;
+    public const int BanHistoryRetentionDays = 365;
+
     /// <summary>Windows Firewall practical limit of addresses per rule; batch into WinGuard_Block_0001, ...</summary>
     public const int MaxAddressesPerRule = 1000;
+
+    /// <summary>Most firewall entries taken from blocklist files together: 50 rules of the size above.</summary>
+    public const int MaxBlocklistEntries = 50_000;
 
     public const string RuleNamePrefix = "WinGuard_Block_";
     public const string ServiceName = "WinGuardService";
@@ -31,4 +43,7 @@ public static class Defaults
     public static string DatabasePath => Path.Combine(DataFolder, "winguard.db");
 
     public static string LogFolder => Path.Combine(DataFolder, "Logs");
+
+    /// <summary>The break-glass drop file; see <see cref="Engine.DisarmFile"/>.</summary>
+    public static string DisarmFilePath => Path.Combine(DataFolder, Engine.DisarmFile.FileName);
 }

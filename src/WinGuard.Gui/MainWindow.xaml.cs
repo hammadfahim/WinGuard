@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Input;
 using System.Windows.Interop;
 
 namespace WinGuard.Gui;
@@ -17,7 +18,12 @@ public partial class MainWindow : System.Windows.Window
     public bool AllowClose { get; set; }
 
     /// <summary>Initializes the window.</summary>
-    public MainWindow() => InitializeComponent();
+    public MainWindow()
+    {
+        InitializeComponent();
+        CommandBindings.Add(new CommandBinding(NavigationCommands.Search, (_, _) => Shell.FocusPageSearch()));
+        InputBindings.Add(new KeyBinding(NavigationCommands.Search, Key.F, ModifierKeys.Control));
+    }
 
     /// <summary>
     /// Asks Windows to draw the title bar dark (or light) so it matches the theme. No effect on

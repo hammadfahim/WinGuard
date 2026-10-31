@@ -6,6 +6,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using WinGuard.Core.Engine;
 using WinGuard.Core.Ipc;
+using WinGuard.Core.Model;
 using WinGuard.Core.Tests.Fakes;
 using WinGuard.Service;
 using WinGuard.Service.Ipc;
@@ -25,12 +26,15 @@ public sealed class PipeEndToEndTests
     private static readonly PipeClientIdentity.Result NotAdmin = new(true, false, "test-user", null);
     private static readonly PipeClientIdentity.Result Unidentified = new(false, false, "unknown", "test: cannot identify");
 
+    /// <summary>The tests run non-elevated on their own pipes, so the console's server check is stood in for.</summary>
+    private static PipeClient TestClient(string pipeName) => new(pipeName, _ => new PipeServerIdentity.Result(true, null));
+
     [Fact]
     public async Task The_real_caller_check_lets_an_elevated_console_in_and_tells_any_other_why_not()
     {
         // No stand-in here: the server identifies this test process exactly as it would the console.
         await using var service = await TestService.StartAsync(identify: null);
-        using var client = new PipeClient(service.PipeName);
+        using var client = TestClient(service.PipeName);
 
         var connected = await client.TryReconnectNowAsync();
 
@@ -52,7 +56,7 @@ public sealed class PipeEndToEndTests
     public async Task An_authorized_console_connects_and_can_use_every_kind_of_request()
     {
         await using var service = await TestService.StartAsync(_ => Admin);
-        using var client = new PipeClient(service.PipeName);
+        using var client = TestClient(service.PipeName);
         var states = new List<bool>();
         client.StateChanged += states.Add;
 
@@ -91,10 +95,39 @@ public sealed class PipeEndToEndTests
     }
 
     [Fact]
+    public async Task A_console_recovers_a_burst_too_large_for_one_read_and_misses_nothing()
+    {
+        await using var service = await TestService.StartAsync(_ => Admin);
+        using var client = TestClient(service.PipeName);
+        Assert.True(await client.TryReconnectNowAsync(), client.LastProblem);
+
+        await service.Store.AddEventAsync(new LogEvent { TimestampUtc = DateTime.UtcNow, Message = "before" });
+        var cursor = new EventCursor();
+        Assert.Equal("before", Assert.Single((await client.ReadNewEventsAsync(cursor)).Events).Message);
+
+        // Five pages fit one read, so this takes two, and neither may lose or repeat a row.
+        for (var i = 0; i < 7200; i++)
+        {
+            await service.Store.AddEventAsync(new LogEvent { TimestampUtc = DateTime.UtcNow, Message = "burst " + i });
+        }
+
+        var first = await client.ReadNewEventsAsync(cursor);
+        var second = await client.ReadNewEventsAsync(cursor);
+
+        Assert.Equal(5000, first.Events.Count);
+        Assert.Equal(2200, second.Events.Count);
+        Assert.Equal(0, first.Skipped + second.Skipped);
+        Assert.Equal(
+            Enumerable.Range(0, 7200).Select(i => "burst " + i),
+            first.Events.Concat(second.Events).Select(e => e.Message));
+        Assert.Same(EventBatch.None, await client.ReadNewEventsAsync(cursor));
+    }
+
+    [Fact]
     public async Task A_refused_console_is_not_connected_and_shows_the_services_reason()
     {
         await using var service = await TestService.StartAsync(_ => NotAdmin);
-        using var client = new PipeClient(service.PipeName);
+        using var client = TestClient(service.PipeName);
         var states = new List<bool>();
         client.StateChanged += states.Add;
 
@@ -115,7 +148,7 @@ public sealed class PipeEndToEndTests
     {
         var calls = 0;
         await using var service = await TestService.StartAsync(_ => Interlocked.Increment(ref calls) == 1 ? Unidentified : Admin);
-        using var client = new PipeClient(service.PipeName);
+        using var client = TestClient(service.PipeName);
 
         Assert.True(await client.TryReconnectNowAsync(), client.LastProblem);
         Assert.NotNull(await client.GetStatusAsync());
@@ -153,7 +186,7 @@ public sealed class PipeEndToEndTests
     public async Task The_console_notices_a_stopped_service_and_reconnects_to_a_restarted_one()
     {
         var pipeName = TestService.NewPipeName();
-        using var client = new PipeClient(pipeName);
+        using var client = TestClient(pipeName);
 
         var first = await TestService.StartAsync(_ => Admin, pipeName);
         Assert.True(await client.TryReconnectNowAsync(), client.LastProblem);
@@ -173,7 +206,7 @@ public sealed class PipeEndToEndTests
     public async Task Several_consoles_can_be_connected_at_once()
     {
         await using var service = await TestService.StartAsync(_ => Admin);
-        var clients = Enumerable.Range(0, 4).Select(_ => new PipeClient(service.PipeName)).ToList();
+        var clients = Enumerable.Range(0, 4).Select(_ => TestClient(service.PipeName)).ToList();
         try
         {
             foreach (var client in clients)
@@ -225,6 +258,163 @@ public sealed class PipeEndToEndTests
         }
     }
 
+    [Fact]
+    public async Task A_pipe_that_fails_the_server_check_is_left_before_anything_is_sent()
+    {
+        var name = TestService.NewPipeName();
+        using var squatter = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        var accepted = squatter.WaitForConnectionAsync();
+        using var client = new PipeClient(name, _ => new PipeServerIdentity.Result(false, "not the service"));
+        var states = new List<bool>();
+        client.StateChanged += states.Add;
+
+        Assert.False(await client.TryReconnectNowAsync());
+
+        Assert.False(client.IsConnected);
+        Assert.Equal("not the service", client.LastProblem);
+        Assert.Empty(states);
+
+        // The squatter got a connection and then nothing: not even the status probe.
+        await accepted;
+        var received = await squatter.ReadAsync(new byte[256]);
+        Assert.Equal(0, received);
+    }
+
+    [Fact]
+    public async Task The_real_server_check_trusts_this_process_only_when_it_is_elevated()
+    {
+        var name = TestService.NewPipeName();
+        using var server = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        var accepted = server.WaitForConnectionAsync();
+        using var pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Identification);
+        await pipe.ConnectAsync(5000);
+        await accepted;
+
+        var result = PipeServerIdentity.Verify(pipe);
+
+        Assert.Equal(IsElevatedAdministrator(), result.Trusted);
+        if (!result.Trusted)
+        {
+            Assert.Contains($"Process {Environment.ProcessId} ", result.Problem);
+            Assert.Contains(WindowsIdentity.GetCurrent().User!.Value, result.Problem);
+            Assert.Contains("neither LocalSystem nor an elevated administrator", result.Problem);
+        }
+    }
+
+    [Fact]
+    public async Task Production_clients_always_run_the_real_server_check()
+    {
+        if (IsElevatedAdministrator())
+        {
+            return; // this process is a server the check trusts; see the test above
+        }
+
+        var name = TestService.NewPipeName();
+        using var squatter = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        var accepted = squatter.WaitForConnectionAsync();
+        using var client = new PipeClient(name);
+
+        Assert.Null(await client.GetStatusAsync());
+
+        Assert.Contains("neither LocalSystem nor an elevated administrator", client.LastProblem);
+        Assert.Equal(client.LastProblem, client.LastRequestError);
+        await accepted;
+        Assert.Equal(0, await squatter.ReadAsync(new byte[256]));
+    }
+
+    [Fact]
+    public async Task Answers_that_cannot_be_read_are_reported_and_never_thrown()
+    {
+        var name = TestService.NewPipeName();
+        using var server = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        var serving = Task.Run(async () =>
+        {
+            await server.WaitForConnectionAsync();
+            using var reader = new StreamReader(server, Encoding.UTF8, leaveOpen: true);
+            using var writer = new StreamWriter(server, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true, NewLine = "\n" };
+
+            async Task<long> NextIdAsync() =>
+                JsonSerializer.Deserialize<IpcRequest>((await reader.ReadLineAsync())!, IpcJson.Options)!.Id;
+
+            await writer.WriteLineAsync($$"""{"id":{{await NextIdAsync()}},"ok":true}""");                       // handshake
+            await writer.WriteLineAsync($$"""{"id":{{await NextIdAsync()}},"ok":true,"result":"not a status"}"""); // wrong shape
+            await NextIdAsync();
+            await writer.WriteLineAsync("{ this is not json");
+        });
+        using var client = TestClient(name);
+
+        Assert.True(await client.TryReconnectNowAsync(), client.LastProblem);
+
+        Assert.Null(await client.GetStatusAsync());
+        Assert.Contains("does not understand", client.LastRequestError);
+        Assert.True(client.IsConnected); // a healthy stream with an odd result stays usable
+
+        Assert.Null(await client.GetStatusAsync());
+        Assert.Contains("does not understand", client.LastRequestError);
+        Assert.False(client.IsConnected); // garbage on the stream ends the session
+
+        await serving;
+    }
+
+    [Fact]
+    public async Task A_stray_success_during_the_handshake_is_not_a_connection()
+    {
+        var name = TestService.NewPipeName();
+        using var server = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        var serving = Task.Run(async () =>
+        {
+            await server.WaitForConnectionAsync();
+            using var reader = new StreamReader(server, Encoding.UTF8, leaveOpen: true);
+            await reader.ReadLineAsync();
+            await server.WriteAsync(Encoding.UTF8.GetBytes("""{"id":999999,"ok":true}""" + "\n"));
+        });
+        using var client = TestClient(name);
+
+        Assert.False(await client.TryReconnectNowAsync());
+
+        Assert.Contains("does not understand", client.LastProblem);
+        await serving;
+    }
+
+    [Fact]
+    public async Task The_next_pipe_instance_exists_before_a_client_is_served()
+    {
+        var created = 0;
+        var seenByClient = 0;
+        await using var service = await TestService.StartAsync(
+            _ =>
+            {
+                seenByClient = Volatile.Read(ref created);
+                return Admin;
+            },
+            onInstanceCreated: () => Interlocked.Increment(ref created));
+        using var client = TestClient(service.PipeName);
+
+        Assert.True(await client.TryReconnectNowAsync(), client.LastProblem);
+
+        // Otherwise a client hanging up at once closes the last instance and frees the name.
+        Assert.Equal(2, seenByClient);
+    }
+
+    [Fact]
+    public async Task The_accept_loop_recovers_when_a_pipe_cannot_be_created()
+    {
+        var attempts = 0;
+        await using var service = await TestService.StartAsync(
+            _ => Admin,
+            onInstanceCreated: () =>
+            {
+                if (Interlocked.Increment(ref attempts) == 1)
+                {
+                    throw new IOException("test: no pipe today");
+                }
+            });
+        using var client = TestClient(service.PipeName);
+
+        Assert.True(await client.TryReconnectNowAsync(), client.LastProblem);
+        Assert.True(attempts >= 2);
+    }
+
     private static bool IsElevatedAdministrator()
     {
         using var identity = WindowsIdentity.GetCurrent();
@@ -247,7 +437,8 @@ public sealed class PipeEndToEndTests
 
         public static async Task<TestService> StartAsync(
             Func<NamedPipeServerStream, PipeClientIdentity.Result>? identify,
-            string? pipeName = null)
+            string? pipeName = null,
+            Action? onInstanceCreated = null)
         {
             var service = new TestService { PipeName = pipeName ?? NewPipeName() };
             var time = new FakeTimeProvider(new DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero));
@@ -274,14 +465,18 @@ public sealed class PipeEndToEndTests
             service._server = new PipeServer(
                 handler,
                 NullLogger<PipeServer>.Instance,
-                pipeFactory: () => new NamedPipeServerStream(
-                    name,
-                    PipeDirection.InOut,
-                    NamedPipeServerStream.MaxAllowedServerInstances,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous,
-                    inBufferSize: 4096,   // same buffer sizes as the service's own pipe
-                    outBufferSize: 4096),
+                pipeFactory: () =>
+                {
+                    onInstanceCreated?.Invoke();
+                    return new NamedPipeServerStream(
+                        name,
+                        PipeDirection.InOut,
+                        NamedPipeServerStream.MaxAllowedServerInstances,
+                        PipeTransmissionMode.Byte,
+                        PipeOptions.Asynchronous,
+                        inBufferSize: 4096,   // same buffer sizes as the service's own pipe
+                        outBufferSize: 4096);
+                },
                 identify: identify);
             await service._server.StartAsync(CancellationToken.None);
             return service;

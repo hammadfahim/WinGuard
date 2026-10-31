@@ -10,6 +10,13 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    env:
+      # Code signing is optional: without these two secrets the signing steps are skipped and the
+      # release is built unsigned, as before. WINGUARD_SIGNING_PFX_BASE64 is the PFX file in
+      # base64, WINGUARD_SIGNING_PFX_PASSWORD its password. A step's "if" cannot read secrets, so
+      # the job exposes only whether they are set.
+      SIGNING_ENABLED: ${{ secrets.WINGUARD_SIGNING_PFX_BASE64 != '' && secrets.WINGUARD_SIGNING_PFX_PASSWORD != '' }}
+      TIMESTAMP_URL: http://timestamp.digicert.com
     steps:
       # Actions are pinned to commit SHAs (the comment names the tag each SHA was taken from).
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -38,6 +45,42 @@ jobs:
              -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false
              -p:Version=${{ steps.ver.outputs.v }} -o publish/gui
 
+      # The key goes into the runner's certificate store and is used by thumbprint from then on, so
+      # neither the password nor a key file ever appears on a command line or stays on disk.
+      - name: Prepare code signing
+        id: signing
+        if: env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        env:
+          PFX_BASE64: ${{ secrets.WINGUARD_SIGNING_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINGUARD_SIGNING_PFX_PASSWORD }}
+        run: |
+          $flags = [Security.Cryptography.X509Certificates.X509KeyStorageFlags]'UserKeySet,PersistKeySet'
+          $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            [Convert]::FromBase64String($env:PFX_BASE64), $env:PFX_PASSWORD, $flags)
+          $store = [Security.Cryptography.X509Certificates.X509Store]::new('My', 'CurrentUser')
+          $store.Open('ReadWrite')
+          $store.Add($certificate)
+          $store.Close()
+
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) { throw 'signtool.exe was not found on this runner.' }
+
+          "thumbprint=$($certificate.Thumbprint)" >> $env:GITHUB_OUTPUT
+          "signtool=$($signtool.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Sign the executables
+        if: env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        env:
+          SIGNTOOL: ${{ steps.signing.outputs.signtool }}
+          THUMBPRINT: ${{ steps.signing.outputs.thumbprint }}
+        run: |
+          & $env:SIGNTOOL sign /sha1 $env:THUMBPRINT /fd SHA256 /tr $env:TIMESTAMP_URL /td SHA256 `
+            publish/service/winguard-svc.exe publish/gui/winguard-gui.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Stage installer inputs
         shell: pwsh
         run: |
@@ -49,13 +92,22 @@ jobs:
 
       - name: Build installer (Inno Setup)
         shell: pwsh
+        env:
+          SIGNTOOL: ${{ steps.signing.outputs.signtool }}
+          THUMBPRINT: ${{ steps.signing.outputs.thumbprint }}
         run: |
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
-            /DMyAppVersion=${{ steps.ver.outputs.v }} installer/winguard.iss
+          $arguments = @('/DMyAppVersion=${{ steps.ver.outputs.v }}')
+          if ($env:SIGNING_ENABLED -eq 'true') {
+            # Setup signs its embedded uninstaller and itself with this command; $f is the file.
+            $arguments += '/DEnableSigning'
+            $arguments += "/Swinguardsign=`$q$env:SIGNTOOL`$q sign /sha1 $env:THUMBPRINT /fd SHA256 /tr $env:TIMESTAMP_URL /td SHA256 `$f"
+          }
+
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" @arguments installer/winguard.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         # Inno Setup 6 is preinstalled on windows-latest runners.
         # Fallback if a future image drops it:
         #   winget install --id JRSoftware.InnoSetup -e -h
-        #   or: uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
 
       - name: Also zip portable EXEs
         shell: pwsh
@@ -77,3 +129,11 @@ jobs:
             installer/Output/WinGuard-Setup-*.exe
             dist/WinGuard-portable-win-x64.zip
             dist/*.sha256
+
+      - name: Remove the signing certificate
+        if: always() && env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        env:
+          THUMBPRINT: ${{ steps.signing.outputs.thumbprint }}
+        run: |
+          if ($env:THUMBPRINT) { Remove-Item "Cert:\CurrentUser\My\$env:THUMBPRINT" -DeleteKey -ErrorAction SilentlyContinue }

@@ -1,114 +1,196 @@
 <UserControl x:Class="WinGuard.Gui.Views.StatisticsView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24">
-        <StackPanel>
-            <DockPanel Margin="0,0,0,16">
-                <TextBlock DockPanel.Dock="Left" Text="Statistics" FontSize="24" FontWeight="Bold" VerticalAlignment="Center" />
-                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
-                    <ComboBox Width="90" ItemsSource="{Binding DayOptions}" SelectedItem="{Binding SelectedDays}" />
-                    <Button Content="Refresh" Margin="6,0,0,0" Command="{Binding LoadCommand}" />
-                </StackPanel>
-            </DockPanel>
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ui="clr-namespace:WinGuard.Gui.Controls">
 
-            <TextBlock Text="{Binding SummaryText}" Foreground="{DynamicResource SubtleForegroundBrush}" Margin="0,0,0,12" TextWrapping="Wrap" />
-            <TextBlock Text="{Binding StatusMessage}" Foreground="{DynamicResource ErrorBrush}" Margin="0,0,0,8" TextWrapping="Wrap" />
+    <UserControl.Resources>
+        <DataTemplate x:Key="StatTileTemplate">
+            <StackPanel>
+                <TextBlock Style="{StaticResource TextCaption}" Text="{Binding Title}" />
+                <TextBlock Style="{StaticResource TextMetric}" FontSize="24" Text="{Binding Value}" />
+                <TextBlock Style="{StaticResource TextCaption}" Text="{Binding Detail}" TextTrimming="CharacterEllipsis" />
+            </StackPanel>
+        </DataTemplate>
 
-            <!-- Per-day chart -->
-            <Border Style="{StaticResource CardBorderStyle}" Margin="0,0,0,16">
-                <StackPanel>
-                    <TextBlock Text="Detections and bans per day" Style="{StaticResource SectionHeaderStyle}" />
-                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                        <Rectangle Width="12" Height="12" Fill="{DynamicResource AccentBrush}" RadiusX="2" RadiusY="2" />
-                        <TextBlock Text="detections" Margin="6,0,18,0" VerticalAlignment="Center" />
-                        <Rectangle Width="12" Height="12" Fill="{DynamicResource ErrorBrush}" RadiusX="2" RadiusY="2" />
-                        <TextBlock Text="bans" Margin="6,0,0,0" VerticalAlignment="Center" />
+        <!-- The same tile for a figure that means more than a count. -->
+        <DataTemplate x:Key="ToneTileTemplate">
+            <StackPanel>
+                <TextBlock Style="{StaticResource TextCaption}" Text="{Binding Title}" />
+                <TextBlock Style="{StaticResource TextMetric}" FontSize="24" Text="{Binding Value}" />
+                <TextBlock Style="{StaticResource ToneText}" ui:Ui.Tone="{Binding Tone}" FontSize="{StaticResource FontSizeCaption}" Text="{Binding Detail}"
+                           TextTrimming="CharacterEllipsis" ToolTip="{Binding Detail}" />
+            </StackPanel>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Grid Margin="{StaticResource PagePadding}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <Grid Margin="{StaticResource GapBottom12}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Style="{StaticResource TextTitle}" Text="Statistics" VerticalAlignment="Center" />
+            <StackPanel Grid.Column="2" Orientation="Horizontal">
+                <Border Style="{StaticResource SegmentGroup}">
+                    <StackPanel Orientation="Horizontal">
+                        <RadioButton Style="{StaticResource Segment}" GroupName="Range" Content="7 days" IsChecked="{Binding Is7Days, Mode=TwoWay}" />
+                        <RadioButton Style="{StaticResource Segment}" GroupName="Range" Content="30 days" IsChecked="{Binding Is30Days, Mode=TwoWay}" />
+                        <RadioButton Style="{StaticResource Segment}" GroupName="Range" Content="90 days" IsChecked="{Binding Is90Days, Mode=TwoWay}" />
                     </StackPanel>
-                    <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="8,0">
-                        <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled" Height="140">
-                            <ItemsControl ItemsSource="{Binding Days}">
-                                <ItemsControl.ItemsPanel>
-                                    <ItemsPanelTemplate>
-                                        <StackPanel Orientation="Horizontal" />
-                                    </ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
+                </Border>
+                <Button Margin="8,0,0,0" Style="{StaticResource IconButton}" ui:Ui.Icon="{StaticResource GlyphRefresh}" Command="{Binding LoadCommand}"
+                        ToolTip="Refresh (F5)" AutomationProperties.Name="Refresh statistics" />
+            </StackPanel>
+        </Grid>
+
+        <ui:StateHost Grid.Row="1" State="{Binding State}" EmptyGlyph="{StaticResource GlyphStatistics}"
+                      EmptyTitle="No statistics yet" EmptyText="Daily counters and ban history build up as WinGuard sees attacks."
+                      ErrorTitle="Statistics are not available" ErrorText="{Binding ErrorText}"
+                      RetryCommand="{Binding DataContext.RefreshCommand, RelativeSource={RelativeSource AncestorType=ui:PageHost}}"
+                      LoadingText="Loading statistics…">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="5*" MinHeight="210" />
+                    <RowDefinition Height="12" />
+                    <RowDefinition Height="4*" MinHeight="150" />
+                </Grid.RowDefinitions>
+
+                <!-- Headline figures -->
+                <UniformGrid Columns="5" Margin="{StaticResource GapBottom12}">
+                    <Border Style="{StaticResource Card}" Padding="14,8" Margin="0,0,6,0">
+                        <ContentPresenter Content="{Binding DetectionsTile}" ContentTemplate="{StaticResource StatTileTemplate}" />
+                    </Border>
+                    <Border Style="{StaticResource Card}" Padding="14,8" Margin="6,0">
+                        <ContentPresenter Content="{Binding BansTile}" ContentTemplate="{StaticResource StatTileTemplate}" />
+                    </Border>
+                    <Border Style="{StaticResource Card}" Padding="14,8" Margin="6,0">
+                        <ContentPresenter Content="{Binding PeakTile}" ContentTemplate="{StaticResource StatTileTemplate}" />
+                    </Border>
+                    <Border Style="{StaticResource Card}" Padding="14,8" Margin="6,0">
+                        <ContentPresenter Content="{Binding ActiveTile}" ContentTemplate="{StaticResource StatTileTemplate}" />
+                    </Border>
+                    <Border Style="{StaticResource Card}" Padding="14,8" Margin="6,0,0,0">
+                        <ContentPresenter Content="{Binding SuspiciousTile}" ContentTemplate="{StaticResource ToneTileTemplate}" />
+                    </Border>
+                </UniformGrid>
+
+                <!-- Charts and breakdown -->
+                <Grid Grid.Row="1">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="12" />
+                        <ColumnDefinition Width="232" />
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Two charts, one scale each: bans are far fewer than detections, so one plot
+                         would flatten them, and two axes on one plot would invent a correlation. -->
+                    <Border Style="{StaticResource Card}" Padding="16,12,16,8">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="3*" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="2*" />
+                            </Grid.RowDefinitions>
+                            <TextBlock Style="{StaticResource TextStrong}" Text="Detections per day" Margin="{StaticResource GapBottom4}" />
+                            <ui:ActivityChart Grid.Row="1" Data="{Binding DetectionsChart}"
+                                              AutomationProperties.Name="Detections per day"
+                                              AutomationProperties.HelpText="{Binding ChartSummary}" />
+                            <TextBlock Grid.Row="2" Style="{StaticResource TextStrong}" Text="Bans per day" Margin="0,8,0,4" />
+                            <ui:ActivityChart Grid.Row="3" Data="{Binding BansChart}"
+                                              AutomationProperties.Name="Bans per day"
+                                              AutomationProperties.HelpText="{Binding ChartSummary}" />
+                        </Grid>
+                    </Border>
+
+                    <!-- Per-engine breakdown: also the legend, and a filter for the charts. -->
+                    <Border Grid.Column="2" Style="{StaticResource Card}" Padding="14,12">
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Top" Style="{StaticResource TextStrong}" Text="By engine" Margin="{StaticResource GapBottom4}" />
+                            <TextBlock DockPanel.Dock="Top" Style="{StaticResource TextCaption}" Text="Switch an engine off to hide it" Margin="{StaticResource GapBottom8}" />
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" Focusable="False">
+                            <ItemsControl ItemsSource="{Binding Engines}" Focusable="False">
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
-                                        <StackPanel Width="22" Margin="1,0" ToolTip="{Binding ToolTipText}">
-                                            <StackPanel Height="90" VerticalAlignment="Bottom" Orientation="Horizontal" HorizontalAlignment="Center">
-                                                <Rectangle Width="8" Height="{Binding DetectionBar}" VerticalAlignment="Bottom"
-                                                           Fill="{DynamicResource AccentBrush}" RadiusX="1" RadiusY="1" />
-                                                <Rectangle Width="8" Height="{Binding BanBar}" VerticalAlignment="Bottom" Margin="1,0,0,0"
-                                                           Fill="{DynamicResource ErrorBrush}" RadiusX="1" RadiusY="1" />
-                                            </StackPanel>
-                                            <TextBlock Text="{Binding Label}" FontSize="9" HorizontalAlignment="Center"
-                                                       Foreground="{DynamicResource SubtleForegroundBrush}" />
+                                        <StackPanel Margin="{StaticResource GapBottom12}">
+                                            <DockPanel Margin="{StaticResource GapBottom4}">
+                                                <CheckBox DockPanel.Dock="Right" Style="{StaticResource Toggle}" IsChecked="{Binding IsOn, Mode=TwoWay}"
+                                                          AutomationProperties.Name="{Binding Name, StringFormat='Show {0} in the charts'}"
+                                                          ToolTip="Show or hide this engine in the charts" />
+                                                <Border Style="{StaticResource SeriesSwatch}" Margin="0,0,7,0" />
+                                                <TextBlock Style="{StaticResource TextBody}" Text="{Binding Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                                            </DockPanel>
+                                            <ProgressBar Style="{StaticResource ShareBar}" Value="{Binding Share, Mode=OneWay}" Margin="{StaticResource GapBottom4}" />
+                                            <DockPanel>
+                                                <TextBlock DockPanel.Dock="Right" Style="{StaticResource TextCaption}" Text="{Binding ShareText}" />
+                                                <TextBlock Style="{StaticResource TextCaption}">
+                                                    <Run Text="{Binding DetectionsText, Mode=OneWay}" /> detections, <Run Text="{Binding BansText, Mode=OneWay}" /> bans
+                                                </TextBlock>
+                                            </DockPanel>
                                         </StackPanel>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
-                        </ScrollViewer>
+                            </ScrollViewer>
+                        </DockPanel>
                     </Border>
-                </StackPanel>
-            </Border>
+                </Grid>
 
-            <!-- Per-engine totals -->
-            <Border Style="{StaticResource CardBorderStyle}" Margin="0,0,0,16">
-                <StackPanel>
-                    <TextBlock Text="Per engine" Style="{StaticResource SectionHeaderStyle}" />
-                    <ItemsControl ItemsSource="{Binding Sources}">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <Grid Margin="0,2">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="180" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="*" />
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Text="{Binding Source}" FontWeight="SemiBold" />
-                                    <TextBlock Grid.Column="1" Text="{Binding Detections, StringFormat=detections: {0}}" />
-                                    <TextBlock Grid.Column="2" Text="{Binding Bans, StringFormat=bans: {0}}" />
-                                </Grid>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </StackPanel>
-            </Border>
+                <!-- Tables -->
+                <Border Grid.Row="3" Style="{StaticResource Card}" Padding="0">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+                        <Border Style="{StaticResource SegmentGroup}" HorizontalAlignment="Left" Margin="10,8,0,6">
+                            <StackPanel Orientation="Horizontal">
+                                <RadioButton Style="{StaticResource Segment}" GroupName="Table" Content="Ban history"
+                                             IsChecked="{Binding ShowHistory, Mode=TwoWay}" />
+                                <RadioButton Style="{StaticResource Segment}" GroupName="Table" Content="Top offenders"
+                                             IsChecked="{Binding ShowHistory, Mode=TwoWay, Converter={StaticResource InverseBool}}" />
+                            </StackPanel>
+                        </Border>
 
-            <!-- Top offenders -->
-            <Border Style="{StaticResource CardBorderStyle}" Margin="0,0,0,16">
-                <StackPanel>
-                    <TextBlock Text="Most persistent attackers" Style="{StaticResource SectionHeaderStyle}" />
-                    <DataGrid ItemsSource="{Binding TopOffenders}" Height="180">
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="IP address" Binding="{Binding IpAddress}" Width="*" />
-                            <DataGridTextColumn Header="Bans" Binding="{Binding BanCount}" Width="80" />
-                            <DataGridTextColumn Header="Max offense" Binding="{Binding MaxOffense}" Width="100" />
-                            <DataGridTextColumn Header="Last seen (local)" Binding="{Binding LastSeenText}" Width="170" />
-                        </DataGrid.Columns>
-                    </DataGrid>
-                </StackPanel>
-            </Border>
+                        <DataGrid Grid.Row="1" ItemsSource="{Binding History}" AutomationProperties.Name="Ban history"
+                                  Visibility="{Binding ShowHistory, Converter={StaticResource BoolToVis}}">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Time" Binding="{Binding TimeText}" SortMemberPath="TimeUtc" Width="150" ElementStyle="{StaticResource CellMuted}" />
+                                <DataGridTemplateColumn Header="Action" SortMemberPath="Action" Width="128">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <ContentControl Style="{StaticResource Chip}" ui:Ui.Tone="{Binding Tone}" Content="{Binding ActionText}" />
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTextColumn Header="Address" Binding="{Binding IpAddress}" Width="2*" MinWidth="170" ElementStyle="{StaticResource CellMono}" />
+                                <DataGridTextColumn Header="Engine" Binding="{Binding SourceText}" Width="100" ElementStyle="{StaticResource CellText}" />
+                                <DataGridTextColumn Header="Offense" Binding="{Binding OffenseCount}" Width="74" ElementStyle="{StaticResource CellText}" />
+                                <DataGridTextColumn Header="Duration" Binding="{Binding Duration}" SortMemberPath="DurationTicks" Width="96" ElementStyle="{StaticResource CellText}" />
+                                <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="*" MinWidth="80" ElementStyle="{StaticResource CellMuted}" />
+                            </DataGrid.Columns>
+                        </DataGrid>
 
-            <!-- Ban history -->
-            <Border Style="{StaticResource CardBorderStyle}" Margin="0,0,0,16">
-                <StackPanel>
-                    <TextBlock Text="Ban history" Style="{StaticResource SectionHeaderStyle}" />
-                    <TextBlock Text="Every ban, expiry and manual unban is kept here even after the ban itself is gone."
-                               Foreground="{DynamicResource SubtleForegroundBrush}" TextWrapping="Wrap" Margin="0,0,0,8" />
-                    <DataGrid ItemsSource="{Binding History}" Height="220">
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="Time (local)" Binding="{Binding TimeText}" Width="150" />
-                            <DataGridTextColumn Header="Action" Binding="{Binding Action}" Width="90" />
-                            <DataGridTextColumn Header="IP address" Binding="{Binding IpAddress}" Width="*" />
-                            <DataGridTextColumn Header="Engine" Binding="{Binding SourceText}" Width="100" />
-                            <DataGridTextColumn Header="Offense" Binding="{Binding OffenseCount}" Width="70" />
-                            <DataGridTextColumn Header="Duration" Binding="{Binding Duration}" Width="110" />
-                            <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="120" />
-                        </DataGrid.Columns>
-                    </DataGrid>
-                </StackPanel>
-            </Border>
-        </StackPanel>
-    </ScrollViewer>
+                        <DataGrid Grid.Row="1" ItemsSource="{Binding TopOffenders}" AutomationProperties.Name="Top offenders"
+                                  Visibility="{Binding ShowHistory, Converter={StaticResource InverseBoolToVis}}">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Address" Binding="{Binding IpAddress}" Width="2*" ElementStyle="{StaticResource CellMono}" />
+                                <DataGridTextColumn Header="Bans" Binding="{Binding BanCount}" Width="90" ElementStyle="{StaticResource CellText}" />
+                                <DataGridTextColumn Header="Worst offense" Binding="{Binding MaxOffense}" Width="120" ElementStyle="{StaticResource CellText}" />
+                                <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeenText}" SortMemberPath="LastSeenUtc" Width="*" ElementStyle="{StaticResource CellMuted}" />
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Grid>
+                </Border>
+            </Grid>
+        </ui:StateHost>
+    </Grid>
 </UserControl>

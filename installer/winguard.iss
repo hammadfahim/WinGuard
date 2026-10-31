@@ -5,7 +5,7 @@
 
 #define MyAppName "WinGuard"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.0"
+  #define MyAppVersion "0.2.0"
 #endif
 #define MyAppPublisher "WinGuard contributors"
 #define MyAppUrl "https://github.com/hammadfahim/WinGuard"
@@ -14,6 +14,8 @@
 #define MyAppServiceName "WinGuardService"
 #define MyAppServiceDisplayName "WinGuard Service"
 #define MyAppServiceDescription "WinGuard - blocks brute-force attackers in the firewall"
+; Longer than the service host's own 30 s shutdown timeout, so a slow stop is not called a failure.
+#define MyAppStopTimeoutSeconds 60
 
 #define IconFile SourcePath + "\assets\icon.ico"
 
@@ -45,6 +47,12 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 #if FileExists(IconFile)
 SetupIconFile={#IconFile}
 #endif
+; The release workflow defines these when signing secrets are configured, so that the uninstaller
+; embedded in the setup is signed as well. Unsigned builds skip them.
+#ifdef EnableSigning
+SignTool=winguardsign
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -63,6 +71,8 @@ Source: "{#IconFile}"; DestDir: "{app}"; DestName: "icon.ico"; Flags: ignorevers
 #endif
 
 [Dirs]
+; The data folder and Logs are created and locked down in PrepareToInstall, before anything else
+; happens. These entries find them there and change nothing.
 Name: "{commonappdata}\WinGuard"
 Name: "{commonappdata}\WinGuard\Logs"
 
@@ -82,11 +92,6 @@ Filename: "{sys}\sc.exe"; Parameters: "create {#MyAppServiceName} binPath= ""\""
 Filename: "{sys}\sc.exe"; Parameters: "config {#MyAppServiceName} binPath= ""\""{app}\{#MyAppServiceExe}\"""""; Flags: runhidden
 Filename: "{sys}\sc.exe"; Parameters: "description {#MyAppServiceName} ""{#MyAppServiceDescription}"""; Flags: runhidden
 Filename: "{sys}\sc.exe"; Parameters: "failure {#MyAppServiceName} reset= 86400 actions= restart/5000/restart/5000/restart/5000"; Flags: runhidden
-; Lock down the data folder (created by [Dirs]) before the service starts, so no
-; local standard user can pre-create/poison the DB: remove inherited ACEs and grant
-; only SYSTEM + Administrators full control. The accounts are given as SIDs
-; (S-1-5-18 = SYSTEM, S-1-5-32-544 = Administrators) because their names are localized.
-Filename: "{sys}\icacls.exe"; Parameters: """{commonappdata}\WinGuard"" /inheritance:r /grant:r ""*S-1-5-18:(OI)(CI)F"" ""*S-1-5-32-544:(OI)(CI)F"""; Flags: runhidden; StatusMsg: "Securing {#MyAppName} data folder..."
 Filename: "{sys}\sc.exe"; Parameters: "start {#MyAppServiceName}"; Flags: runhidden; StatusMsg: "Starting {#MyAppServiceDisplayName}..."
 ; Optional prerequisites. The subcategory GUID is locale-independent (the English name
 ; "Logon" silently fails on non-English Windows).
@@ -137,8 +142,11 @@ begin
   end;
 end;
 
-{ Request a stop and poll `sc query` until the state reports STOPPED, for up to
-  ~30 seconds. Returns True once stopped (or if the query is unreadable). }
+{ Stop the service and poll `sc query` until it reports STOPPED or the service is
+  gone. The stop is requested again on every poll that does not show it in
+  progress: a service that is still starting refuses the request, and one request
+  would then be waited out in vain. Returns False when it did not stop in time, or
+  when its state cannot be read: the caller must not assume it is stopped. }
 function StopServiceAndWait(): Boolean;
 var
   Attempts: Integer;
@@ -146,30 +154,91 @@ var
   State: string;
 begin
   Result := False;
-  Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#MyAppServiceName}', '',
-    SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Attempts := 0;
-  while Attempts < 30 do
+  while Attempts < {#MyAppStopTimeoutSeconds} do
   begin
-    State := QueryServiceState();
-    if (State = '') or (Pos('STOPPED', Uppercase(State)) > 0) then
+    if not ServiceExistsFlag() then
     begin
       Result := True;
       Exit;
     end;
+    State := Uppercase(QueryServiceState());
+    if Pos('STOPPED', State) > 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+    if Pos('STOP_PENDING', State) = 0 then
+      Exec(ExpandConstant('{sys}\sc.exe'), 'stop {#MyAppServiceName}', '',
+        SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(1000);
     Attempts := Attempts + 1;
   end;
+  Log('WinGuard: the service did not stop within {#MyAppStopTimeoutSeconds} seconds. Last state: ' + State);
+end;
+
+{ --- Data folder ----------------------------------------------------------- }
+
+{ Leave the data folder to SYSTEM + Administrators alone, whoever created it, so no
+  local standard user can pre-create it and poison the database. All the logic is in
+  one tested place, the hidden verb "winguard-svc --harden-data", which --install
+  runs as well (DataFolderHardener). It walks the folder without following a link,
+  and moves aside what is a link or not owned by SYSTEM or Administrators before
+  anything takes ownership of it.
+  The installed program may be an older one, or not there yet, so the new one is
+  unpacked to run it: it is the first file in [Files], and with solid compression
+  that takes no time. Its output comes back through a file, as Exec cannot capture
+  it. Exit codes: 0 secured, 3 secured with content moved aside, anything else not
+  secured.
+  Returns the reason it could not, or an empty string. }
+function SecureDataFolder(): String;
+var
+  Dir: String;
+  Tool: String;
+  OutputFile: String;
+  Contents: AnsiString;
+  Details: String;
+  ResultCode: Integer;
+begin
+  Result := '';
+  Dir := ExpandConstant('{commonappdata}\WinGuard');
+  Tool := ExpandConstant('{tmp}\{#MyAppServiceExe}');
+  OutputFile := ExpandConstant('{tmp}\winguard-harden-data.txt');
+
+  ExtractTemporaryFile('{#MyAppServiceExe}');
+  if not Exec(ExpandConstant('{cmd}'), '/c ""' + Tool + '" --harden-data > "' + OutputFile + '" 2>&1"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    Result := 'Setup could not run ' + Tool + ' to secure the data folder ' + Dir +
+      '. Nothing was installed.';
+    Exit;
+  end;
+
+  Details := '';
+  if LoadStringFromFile(OutputFile, Contents) then
+    Details := Contents;
+  Log('WinGuard: --harden-data exited with code ' + IntToStr(ResultCode) + ': ' + Details);
+
+  if ResultCode = 3 then
+    SuppressibleMsgBox('Setup found content in ' + Dir + ' that it could not trust, and moved it ' +
+      'aside. Nothing was deleted. If it is yours, check it before you put it back:'#13#10#13#10 +
+      Details, mbInformation, MB_OK, IDOK)
+  else if ResultCode <> 0 then
+    Result := 'Setup could not secure the data folder ' + Dir + '. Nothing was installed.'#13#10#13#10 +
+      Details;
 end;
 
 { --- Install --------------------------------------------------------------- }
 
-{ Stop any existing service before [Files] overwrites the running EXE. }
+{ A non-empty result stops Setup with that message before anything is installed
+  (exit code 7 in silent mode). The data folder is secured once the service has
+  stopped: a running service keeps its database and log open, and what is open
+  cannot be moved aside, so a bad file there would stop every upgrade. If it fails,
+  the service is started again, so protection stays as it was. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
 begin
-  Result := '';
   { Close a running console first. It lives in the tray and turns a normal close
     request into "hide", so without this an upgrade can leave the OLD console
     running: its EXE cannot be replaced, and starting WinGuard afterwards only
@@ -177,8 +246,20 @@ begin
     running, which is fine. }
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyAppExeName}', '',
     SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  if ServiceExistsFlag then
-    StopServiceAndWait();
+
+  { Stop any existing service before [Files] overwrites the running EXE. A service
+    that will not stop keeps that EXE locked, so go no further and say so. }
+  if ServiceExistsFlag() and not StopServiceAndWait() then
+  begin
+    Result := 'The {#MyAppServiceDisplayName} could not be stopped, so its files cannot be replaced. ' +
+      'Nothing was installed. Stop it with "sc stop {#MyAppServiceName}" and run Setup again.';
+    Exit;
+  end;
+
+  Result := SecureDataFolder();
+  if (Result <> '') and ServiceExistsFlag() then
+    Exec(ExpandConstant('{sys}\sc.exe'), 'start {#MyAppServiceName}', '',
+      SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 { --- Uninstall ------------------------------------------------------------- }
@@ -218,7 +299,13 @@ begin
       runs against a quiet firewall and the binary can still be started here. }
     if ServiceExistsFlag then
     begin
-      StopServiceAndWait();
+      if not StopServiceAndWait() then
+      begin
+        Log('WinGuard: uninstalling while the service is still running.');
+        if not UninstallSilent then
+          MsgBox('The {#MyAppServiceDisplayName} could not be stopped. It is removed once it stops or ' +
+            'after a restart; until then its firewall rules and files may remain.', mbError, MB_OK);
+      end;
       Exec(ExpandConstant('{sys}\sc.exe'), 'delete {#MyAppServiceName}', '',
         SW_HIDE, ewWaitUntilTerminated, ResultCode);
     end;

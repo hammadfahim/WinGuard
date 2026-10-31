@@ -1,6 +1,9 @@
 using System.Globalization;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using WinGuard.Core.Abstractions;
 using WinGuard.Core.Config;
+using WinGuard.Core.Engine;
 using WinGuard.Core.Ipc;
 using WinGuard.Core.Model;
 using WinGuard.Core.Firewall;
@@ -31,12 +34,25 @@ internal static class CliCommands
 
         if (status is null)
         {
-            Console.Error.WriteLine("The WinGuard service is not running (or this console is not elevated).");
+            Console.Error.WriteLine(DescribeUnavailable(client.LastProblem, client.LastRequestError));
+
+            // A disarm is most likely to be looked up when the service is the problem.
+            var local = new DisarmFile(Defaults.DisarmFilePath).Read(DateTime.UtcNow);
+            if (BreakGlassCommands.DescribeForStatus(local.Status == DisarmStatus.Active ? local.UntilUtc : null) is { } disarmed)
+            {
+                Console.WriteLine(disarmed);
+            }
+
             return 1;
         }
 
         Console.WriteLine($"WinGuard {status.Version} (protocol {status.ProtocolVersion}), up since {status.StartedUtc:u} UTC");
         Console.WriteLine($"Active bans: {status.ActiveBans}" + (status.ReportOnly ? "  [REPORT-ONLY MODE]" : string.Empty));
+        if (BreakGlassCommands.DescribeForStatus(status.Disarmed ? status.DisarmedUntilUtc : null) is { } line)
+        {
+            Console.WriteLine(line);
+        }
+
         foreach (var engine in status.Engines)
         {
             Console.WriteLine(
@@ -64,7 +80,7 @@ internal static class CliCommands
 
         if (bans is null)
         {
-            Console.Error.WriteLine("The WinGuard service is not running (or this console is not elevated).");
+            Console.Error.WriteLine(DescribeUnavailable(client.LastProblem, client.LastRequestError));
             return 1;
         }
 
@@ -147,10 +163,9 @@ internal static class CliCommands
         using var client = new PipeClient();
         try
         {
-            await client.BlockNowAsync(ip, duration, permanent, note).ConfigureAwait(false);
-            Console.WriteLine(permanent
-                ? $"Banned {ip} permanently."
-                : $"Banned {ip} for {(duration is { } d ? d : TimeSpan.FromHours(24)):c}.");
+            var ban = await client.BlockNowAsync(ip, duration, permanent, note).ConfigureAwait(false);
+            var status = await client.GetStatusAsync().ConfigureAwait(false);
+            Console.WriteLine(DescribeBan(ip, ban, status?.ReportOnly == true));
             return 0;
         }
         catch (Exception ex)
@@ -160,12 +175,12 @@ internal static class CliCommands
         }
     }
 
-    /// <summary>Manually lifts a ban: <c>--unban &lt;ip&gt;</c>.</summary>
+    /// <summary>Manually lifts a ban: <c>--unban &lt;ip|prefix&gt;</c>.</summary>
     public static async Task<int> UnbanAsync(string[] args)
     {
-        if (args.Length < 2 || !IsValidIp(args[1]))
+        if (args.Length < 2 || !Core.Engine.IpMatcher.TryNormalizeBanTarget(args[1], out _))
         {
-            Console.Error.WriteLine("Usage: winguard-svc --unban <ip>");
+            Console.Error.WriteLine("Usage: winguard-svc --unban <ip|prefix>");
             return 2;
         }
 
@@ -214,22 +229,17 @@ internal static class CliCommands
         Console.WriteLine(new string('-', 60));
 
         // 1. Service pipe + live status.
-        ServiceStatusDto? status = null;
+        ServiceStatusDto? status;
+        string? unavailable;
         using (var client = new PipeClient())
         {
-            try
-            {
-                status = await client.GetStatusAsync().ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                Report("Service pipe", ok: false, detail: ex.Message);
-            }
+            status = await client.GetStatusAsync().ConfigureAwait(false);
+            unavailable = DescribeUnavailable(client.LastProblem, client.LastRequestError);
         }
 
         if (status is null)
         {
-            Report("Service running", ok: false, detail: "no answer on the WinGuard pipe (is the service started? is this console elevated?)");
+            Report("Service running", ok: false, detail: unavailable);
         }
         else
         {
@@ -247,22 +257,20 @@ internal static class CliCommands
             // 2. Prerequisites as the service itself sees them.
             using (var client = new PipeClient())
             {
-                PrereqsDto? prereqs = null;
-                try
+                var prereqs = await client.CheckPrereqsAsync().ConfigureAwait(false);
+                if (prereqs is null)
                 {
-                    prereqs = await client.CheckPrereqsAsync().ConfigureAwait(false);
+                    // The report below still covers the local checks, but it must not look complete.
+                    Report("Prerequisites", ok: false, warnOnly: true, DescribeUnavailable(client.LastProblem, client.LastRequestError));
                 }
-                catch
-                {
-                    // The report below still covers the local checks.
-                }
-
-                if (prereqs is not null)
+                else
                 {
                     Report("Logon failure auditing", prereqs.AuditLogonFailureEnabled, detail: "required for RDP 4625 detection");
                     Report("Windows Defender Firewall service (MpsSvc)", prereqs.FirewallServiceRunning);
                     Report("RdpCoreTS/Operational channel", prereqs.RdpCoreTsChannelEnabled, warnOnly: true, "140 fallback");
-                    foreach (var warning in prereqs.Warnings)
+
+                    // The policy gets its own report below, service or not.
+                    foreach (var warning in prereqs.Warnings.Except(prereqs.FirewallPolicy?.Warnings ?? []))
                     {
                         Console.WriteLine("       " + warning);
                     }
@@ -271,39 +279,131 @@ internal static class CliCommands
         }
 
         // 3. Local environment checks (no service needed).
-        Report("Data folder", CheckWritable(Defaults.DataFolder), detail: Defaults.DataFolder);
+        var dataFolderWritable = CheckWritable(Defaults.DataFolder);
+        var (armed, armedDetail) = BreakGlassCommands.DescribeForDoctor(new DisarmFile(Defaults.DisarmFilePath).Read(DateTime.UtcNow), status, dataFolderWritable);
+        Report("Enforcement", armed, warnOnly: true, armedDetail);
+        Report("Data folder", dataFolderWritable, detail: Defaults.DataFolder);
         Report("Log folder", CheckWritable(Defaults.LogFolder), detail: Defaults.LogFolder);
         Report("Database file", File.Exists(Defaults.DatabasePath), warnOnly: true, File.Exists(Defaults.DatabasePath) ? "present" : "not created yet");
 
-        var firewall = new WindowsFirewall(NullLogger<WindowsFirewall>.Instance);
-        var blocked = firewall.ListBlocked();
-        var firewallOk = blocked is not null;
-        Report(
-            "Firewall COM API",
-            firewallOk,
-            detail: blocked is { Count: 0 } ? "reachable, no WinGuard rules" : $"reachable, {blocked?.Count ?? 0} address(es) blocked");
-        Report("Firewall service state (local probe)", firewall.IsServiceRunning());
+        var (firewallOk, firewallDetail) = ProbeFirewall(logger => new WindowsFirewall(logger));
+        Report("Firewall COM API", firewallOk, detail: firewallDetail);
+        Report("Firewall service state (local probe)", new WindowsFirewall(NullLogger<WindowsFirewall>.Instance).IsServiceRunning());
+
+        var policy = FirewallPolicyEvaluator.ReadSafely(new ComFirewallPolicyReader());
+        foreach (var check in DescribeFirewallPolicy(policy))
+        {
+            Report(check.Label, check.Ok, check.WarnOnly, check.Detail);
+        }
+
+        foreach (var warning in policy.Warnings)
+        {
+            Console.WriteLine("       " + warning);
+        }
 
         Console.WriteLine(new string('-', 60));
         Console.WriteLine(failures == 0 && warnings == 0
             ? "All checks passed."
             : $"{failures} failure(s), {warnings} warning(s).");
         return failures == 0 ? 0 : 1;
+    }
 
-        static bool CheckWritable(string folder)
+    /// <summary>
+    /// The firewall policy as doctor checks. Rules that silently do nothing fail the check, as a
+    /// stopped firewall service does. A policy that blocks all inbound traffic only warns: no
+    /// attacker gets through that, and neither does anyone else, which is hard to overlook.
+    /// </summary>
+    internal static IReadOnlyList<(string Label, bool Ok, bool WarnOnly, string Detail)> DescribeFirewallPolicy(FirewallPolicyDto policy)
+    {
+        if (!policy.Known)
         {
-            try
+            return [("Firewall policy", false, true, "could not be read")];
+        }
+
+        var checks = new List<(string Label, bool Ok, bool WarnOnly, string Detail)>();
+        foreach (var profile in policy.ActiveProfiles)
+        {
+            checks.Add(($"Firewall profile {profile.Name}", profile.Enabled, false, profile.Enabled ? "on" : "OFF, rules have no effect"));
+        }
+
+        if (policy.ActiveProfiles.Count == 0)
+        {
+            checks.Add(("Firewall profiles", false, true, "none active"));
+        }
+
+        checks.Add(("Local firewall rules honoured", policy.LocalPolicyHonoured, false, policy.LocalPolicyHonoured ? "yes" : "NO, rules have no effect"));
+        if (policy.InboundBlocked)
+        {
+            checks.Add(("Inbound traffic", false, true, "all incoming connections are blocked"));
+        }
+
+        return checks;
+    }
+
+    /// <summary>What to print when the service gave no answer, most specific reason first.</summary>
+    internal static string DescribeUnavailable(string? problem, string? requestError) =>
+        problem ?? requestError ?? PipeClient.ServiceNotRunningMessage;
+
+    /// <summary>The outcome of a manual ban, as the service recorded it.</summary>
+    internal static string DescribeBan(string ip, BanDto? ban, bool reportOnly)
+    {
+        var outcome = ban switch
+        {
+            null => $"Banned {ip}.",
+            { IsPermanent: true } => $"Banned {ban.IpAddress} permanently (offense #{ban.OffenseCount}).",
+            _ => $"Banned {ban.IpAddress} for {ban.ExpiresUtc - ban.BannedAtUtc:c}, until {ban.ExpiresUtc:u} (offense #{ban.OffenseCount}).",
+        };
+
+        return reportOnly ? outcome + " Report-only mode: recorded, but the firewall is unchanged." : outcome;
+    }
+
+    /// <summary>
+    /// Whether the firewall's rules can really be read. <see cref="IFirewall.ListBlocked"/> never
+    /// throws and answers null when it failed; the reason only shows in what it logs, which is why
+    /// the probe listens there.
+    /// </summary>
+    /// <param name="create">Creates the firewall to probe, logging to the given logger.</param>
+    internal static (bool Ok, string Detail) ProbeFirewall(Func<ILogger<WindowsFirewall>, IFirewall> create)
+    {
+        var errors = new FirstErrorLogger();
+        try
+        {
+            var blocked = create(errors).ListBlocked();
+            if (blocked is null)
             {
-                Directory.CreateDirectory(folder);
-                var probe = Path.Combine(folder, ".winguard-doctor-probe");
-                File.WriteAllText(probe, "probe");
-                File.Delete(probe);
-                return true;
+                return (false, errors.First ?? "The firewall rules could not be read.");
             }
-            catch (Exception)
+
+            return (true, blocked.Count == 0 ? "reachable, no WinGuard rules" : $"reachable, {blocked.Count} address(es) blocked");
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Whether a file can be written to the folder. A missing folder is a failed check, not
+    /// something to create: it would belong to whoever ran the doctor, and the installer's
+    /// hardening assumes nobody but an administrator gets to create it.
+    /// </summary>
+    internal static bool CheckWritable(string folder)
+    {
+        try
+        {
+            if (!Directory.Exists(folder))
             {
                 return false;
             }
+
+            var probe = Path.Combine(folder, ".winguard-doctor-probe");
+            File.WriteAllText(probe, "probe");
+            File.Delete(probe);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 
@@ -311,4 +411,27 @@ internal static class CliCommands
         !string.IsNullOrWhiteSpace(value)
         && value.IndexOf('/') < 0
         && Core.Engine.IpMatcher.IsValid(value);
+
+    /// <summary>Remembers the first error logged, for <see cref="ProbeFirewall"/>.</summary>
+    private sealed class FirstErrorLogger : ILogger<WindowsFirewall>
+    {
+        public string? First { get; private set; }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Error;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (IsEnabled(logLevel))
+            {
+                First ??= exception?.GetBaseException().Message ?? formatter(state, exception);
+            }
+        }
+    }
 }

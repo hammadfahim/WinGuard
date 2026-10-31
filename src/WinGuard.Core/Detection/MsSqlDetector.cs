@@ -23,6 +23,14 @@ namespace WinGuard.Core.Detection;
 /// runtime the detector transparently falls back to an EventID-only subscription and filters the
 /// provider name in code.
 /// </para>
+/// <para>
+/// Interactive users may write to the Application log, under any source name they like. An event
+/// therefore only counts when its provider is an instance of SQL Server installed on this machine
+/// (<see cref="SqlServerInstances"/>), which turns the forgery off wherever there is no SQL Server.
+/// On a real SQL host a local user can still forge one: nothing in the event tells it apart. The
+/// event's <c>Security UserID</c> does not help, because ReportEvent takes it from the caller
+/// (lpUserSid, which may be NULL) and Microsoft documents no check of it. See SECURITY.md.
+/// </para>
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class MsSqlDetector : EventLogDetectorBase
@@ -57,19 +65,30 @@ public sealed class MsSqlDetector : EventLogDetectorBase
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private readonly Func<WinGuardSettings> _settingsAccessor;
+    private readonly SqlServerInstances _instances;
 
     /// <summary>Creates the detector.</summary>
     /// <param name="settingsAccessor">Returns the current live settings.</param>
     /// <param name="logger">Logger for subscription/parse diagnostics.</param>
-    /// <param name="timeProvider">Accepted for API symmetry; the event's own SystemTime stamps the record.</param>
+    /// <param name="timeProvider">Clock for re-reading the installed instances; the event's own SystemTime stamps the record.</param>
     public MsSqlDetector(
         Func<WinGuardSettings> settingsAccessor,
         ILogger<MsSqlDetector> logger,
         TimeProvider? timeProvider = null)
+        : this(settingsAccessor, logger, timeProvider, SqlServerInstances.ReadInstalledProviders)
+    {
+    }
+
+    /// <summary>For the tests: a machine with whatever instances they need.</summary>
+    internal MsSqlDetector(
+        Func<WinGuardSettings> settingsAccessor,
+        ILogger<MsSqlDetector> logger,
+        TimeProvider? timeProvider,
+        Func<IReadOnlySet<string>> readInstalledProviders)
         : base(logger)
     {
         _settingsAccessor = settingsAccessor;
-        _ = timeProvider;
+        _instances = new SqlServerInstances(readInstalledProviders, timeProvider ?? TimeProvider.System, logger);
     }
 
     /// <inheritdoc />
@@ -100,21 +119,30 @@ public sealed class MsSqlDetector : EventLogDetectorBase
     /// <inheritdoc />
     protected override FailedLogin? Parse(EventRecord record)
     {
-        var xml = record.ToXml();
-        var message = TryFormatDescription(record);
-        return TryParse(xml, message, _settingsAccessor(), out var failed) ? failed : null;
+        // No SQL Server here: nothing a user writes under its name is worth parsing.
+        if (_instances.Current.Count == 0)
+        {
+            return null;
+        }
+
+        return ParseEvent(record.ToXml(), TryFormatDescription(record));
     }
 
+    /// <summary>What <see cref="Parse"/> makes of an event's text, against this machine's instances.</summary>
+    internal FailedLogin? ParseEvent(string eventXml, string? formattedMessage) =>
+        TryParse(eventXml, formattedMessage, _settingsAccessor(), _instances.Current, out var failed) ? failed : null;
+
     /// <summary>
-    /// Parses a 18456 event XML record plus its formatted message. The provider name must contain
-    /// <c>MSSQL</c> (case-insensitive), the message must not contain any configured ignore pattern,
-    /// and a valid client IP must be present in <c>[CLIENT: ...]</c>.
+    /// Parses a 18456 event XML record plus its formatted message. The provider must be one of the
+    /// installed instances (case-insensitive), the message must not contain any configured ignore
+    /// pattern, and a valid client IP must be present in <c>[CLIENT: ...]</c>.
     /// </summary>
     /// <param name="eventXml">The Event XML (as produced by <c>EventLogRecord.ToXml()</c>).</param>
     /// <param name="formattedMessage">The provider-formatted message, or null when unavailable.</param>
     /// <param name="settings">Live settings providing ignore patterns.</param>
+    /// <param name="installedProviders">Provider names of this machine's instances; see <see cref="SqlServerInstances"/>.</param>
     /// <param name="failed">The parsed failure when the method returns <see langword="true"/>.</param>
-    public static bool TryParse(string eventXml, string? formattedMessage, WinGuardSettings settings, out FailedLogin? failed)
+    public static bool TryParse(string eventXml, string? formattedMessage, WinGuardSettings settings, IReadOnlySet<string> installedProviders, out FailedLogin? failed)
     {
         failed = null;
         if (string.IsNullOrWhiteSpace(eventXml) || settings is null)
@@ -152,12 +180,18 @@ public sealed class MsSqlDetector : EventLogDetectorBase
         }
 
         var provider = (string?)system.Element(ns + "Provider")?.Attribute("Name") ?? string.Empty;
-        if (provider.IndexOf("MSSQL", StringComparison.OrdinalIgnoreCase) < 0)
+        if (!installedProviders.Contains(provider))
         {
             return false;
         }
 
-        if (formattedMessage is not null && IsIgnored(formattedMessage, settings.MsSql.IgnoreMessagePatterns))
+        var user = NormalizeOptional(
+            root.Element(ns + "EventData")?.Elements(ns + "Data").FirstOrDefault()?.Value);
+
+        // The message quotes the login name, which the client chooses: one spelled like an ignore
+        // pattern must not switch counting off for that client.
+        if (formattedMessage is not null
+            && IsIgnored(user is null ? formattedMessage : formattedMessage.Replace($"'{user}'", string.Empty), settings.MsSql.IgnoreMessagePatterns))
         {
             return false;
         }
@@ -167,9 +201,6 @@ public sealed class MsSqlDetector : EventLogDetectorBase
         {
             return false;
         }
-
-        var user = NormalizeOptional(
-            root.Element(ns + "EventData")?.Elements(ns + "Data").FirstOrDefault()?.Value);
 
         failed = new FailedLogin
         {

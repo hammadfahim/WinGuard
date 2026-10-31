@@ -28,6 +28,19 @@ public interface IStore
     /// <summary>Deletes the newest attempt of this IP for the source (takes back one count). No-op when none.</summary>
     Task RemoveLatestFailedLoginAsync(string ip, ProtocolSource source, CancellationToken ct = default);
 
+    /// <summary>
+    /// The distinct user names this IP tried with ts_utc &gt;= sinceUtc, across all sources, exactly as
+    /// they were logged. Attempts without a user name are left out.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetFailedLoginUsersAsync(string ip, DateTime sinceUtc, CancellationToken ct = default);
+
+    /// <summary>
+    /// Names the newest nameless attempt of this IP for the source with ts_utc &gt;= sinceUtc: an
+    /// attempt counted from an event without a user name, once the other event for it supplies one.
+    /// No-op when there is none.
+    /// </summary>
+    Task SetFailedLoginUserAsync(string ip, ProtocolSource source, string user, DateTime sinceUtc, CancellationToken ct = default);
+
     /// <summary>Delete this IP's counter rows (after a ban fires, so the next tier starts fresh).</summary>
     Task ClearFailedLoginsAsync(string ip, CancellationToken ct = default);
 
@@ -58,6 +71,17 @@ public interface IStore
 
     Task RemoveBanAsync(string ip, CancellationToken ct = default);
 
+    // ---- offense counts (ban-tier escalation) ----
+
+    /// <summary>Every persisted offense count.</summary>
+    Task<IReadOnlyList<OffenseCountEntry>> GetOffenseCountsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Writes the given rows and deletes the given IPs' rows in one transaction. Only what changed
+    /// is written, so the cost of a ban does not grow with the number of remembered attackers.
+    /// </summary>
+    Task SaveOffenseCountsAsync(IReadOnlyCollection<OffenseCountEntry> changed, IReadOnlyCollection<string> removed, CancellationToken ct = default);
+
     // ---- whitelist / blacklist ----
     Task<IReadOnlyList<string>> GetListAsync(ListKind kind, CancellationToken ct = default);
 
@@ -65,7 +89,7 @@ public interface IStore
 
     Task RemoveFromListAsync(ListKind kind, string value, CancellationToken ct = default);
 
-    // ---- ban history (append-only; survives ban deletion) ----
+    // ---- ban history (append-only until retention drops it; survives ban deletion) ----
 
     /// <summary>Appends one lifecycle row (banned / expired / unbanned / updated).</summary>
     Task AddBanHistoryAsync(BanHistoryEntry entry, CancellationToken ct = default);
@@ -73,11 +97,22 @@ public interface IStore
     /// <summary>Newest-first ban-history rows, capped at <paramref name="limit"/>.</summary>
     Task<IReadOnlyList<BanHistoryEntry>> GetBanHistoryAsync(int limit, CancellationToken ct = default);
 
+    /// <summary>Total number of ban-history rows.</summary>
+    Task<int> CountBanHistoryAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Deletes up to <paramref name="maxRows"/> rows older than the given UTC time, oldest first, so
+    /// a large backlog is worked off over several calls instead of holding the database in one.
+    /// </summary>
+    /// <returns>Number of rows deleted.</returns>
+    Task<int> PruneBanHistoryAsync(DateTime olderThanUtc, int maxRows, CancellationToken ct = default);
+
     // ---- daily statistics ----
 
     /// <summary>
     /// Adds deltas to the (day, source) counter row, creating it when missing. The engine buffers
     /// increments in memory and flushes them here during housekeeping, so the write rate stays low.
+    /// Days are the server's local calendar days: see <see cref="DailyStatEntry.DayUtc"/>.
     /// </summary>
     Task AddDailyStatsAsync(DateTime dayUtc, ProtocolSource source, int detectionsDelta, int bansDelta, CancellationToken ct = default);
 
@@ -92,6 +127,13 @@ public interface IStore
 
     /// <summary>Newest-first, capped at <paramref name="limit"/>. When <paramref name="afterId"/> is set only events with a larger <see cref="LogEvent.Id"/> are returned (cursor polling).</summary>
     Task<IReadOnlyList<LogEvent>> GetEventsAsync(int limit, DateTime? sinceUtc = null, long? afterId = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// Oldest-first from just after <paramref name="afterId"/>, capped at <paramref name="limit"/>. A
+    /// reader passes the last id it got and walks forward through a burst of any size, which
+    /// <see cref="GetEventsAsync"/> cannot do: it returns the newest rows and leaves the older ones out.
+    /// </summary>
+    Task<IReadOnlyList<LogEvent>> GetEventsAfterAsync(long afterId, int limit, CancellationToken ct = default);
 
     /// <summary>Forget events older than the given UTC time (retention housekeeping; the events table must not grow unbounded).</summary>
     Task PruneEventsAsync(DateTime olderThanUtc, CancellationToken ct = default);

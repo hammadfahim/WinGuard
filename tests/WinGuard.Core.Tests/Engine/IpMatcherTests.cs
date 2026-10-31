@@ -6,6 +6,47 @@ namespace WinGuard.Core.Tests;
 /// <summary>Tests for IP/CIDR parsing, validation and list matching (PLAN.md §5).</summary>
 public sealed class IpMatcherTests
 {
+    // ---------- NAT64 ----------
+
+    [Theory]
+    [InlineData("64:ff9b::cb00:7101", 64)]
+    [InlineData("64:ff9b::cb00:7101", 96)]
+    [InlineData("64:ff9b::cb00:7101", 128)]
+    [InlineData("64:ff9b:0:1::5", 32)] // outside the /96, but this prefix would take it in
+    public void TryAggregateIpv6_never_takes_in_the_nat64_prefix(string ip, int prefixLength)
+    {
+        Assert.False(IpMatcher.TryAggregateIpv6(ip, prefixLength, out _));
+    }
+
+    [Fact]
+    public void TryAggregateIpv6_leaves_the_rest_of_64_ff9b_alone()
+    {
+        Assert.True(IpMatcher.TryAggregateIpv6("64:ff9b:0:1::5", 64, out var prefix));
+        Assert.Equal("64:ff9b:0:1::/64", prefix);
+    }
+
+    [Theory]
+    [InlineData("203.0.113.1", true)]
+    [InlineData("203.0.113.0/24", true)]
+    [InlineData("64:ff9b::/96", true)]
+    [InlineData("203.0.113.2", false)]
+    public void A_nat64_address_matches_the_lists_by_the_ipv4_client_inside_it(string entry, bool expected)
+    {
+        var matcher = new IpMatcher([entry], [entry]);
+
+        Assert.Equal(expected, matcher.IsWhitelisted("64:ff9b::cb00:7101"));
+        Assert.Equal(expected, matcher.IsBlacklisted("64:ff9b::cb00:7101"));
+    }
+
+    [Fact]
+    public void An_address_outside_the_nat64_prefix_does_not_match_by_its_last_bits()
+    {
+        var matcher = new IpMatcher(["203.0.113.1"], []);
+
+        Assert.False(matcher.IsWhitelisted("64:ff9b:0:1::cb00:7101"));
+        Assert.False(matcher.IsWhitelisted("2001:db8::cb00:7101"));
+    }
+
     // ---------- TryNormalize ----------
 
     [Theory]
@@ -62,6 +103,20 @@ public sealed class IpMatcherTests
     [InlineData("fe80::1", true)]
     [InlineData("8.8.8.8", false)]
     [InlineData("203.0.113.1", false)]
+    [InlineData("100.63.255.255", false)]
+    [InlineData("100.64.0.0", true)]
+    [InlineData("100.100.100.100", true)] // a Tailscale peer
+    [InlineData("100.127.255.255", true)]
+    [InlineData("100.128.0.0", false)]
+    [InlineData("198.17.255.255", false)]
+    [InlineData("198.18.0.1", true)]
+    [InlineData("198.19.255.255", true)]
+    [InlineData("198.20.0.0", false)]
+    [InlineData("::ffff:100.64.0.1", true)]
+    [InlineData("64:ff9b::808:808", false)]    // NAT64 of 8.8.8.8: a real client behind a translator
+    [InlineData("64:ff9b::a00:1", true)]       // NAT64 of 10.0.0.1
+    [InlineData("64:ff9b::6440:1", true)]      // NAT64 of 100.64.0.1
+    [InlineData("64:ff9b:0:1::808:808", false)] // outside the /96
     public void IsInternal_cases(string ip, bool expected)
     {
         Assert.Equal(expected, IpMatcher.IsInternal(ip));
@@ -82,6 +137,18 @@ public sealed class IpMatcherTests
         Assert.Equal(32, v6.PrefixLength);
 
         Assert.False(IpMatcher.TryParseCidr("not-a-cidr", out _));
+    }
+
+    [Theory]
+    [InlineData("203.0.113.7/32", "203.0.113.7")]
+    [InlineData("2001:db8::1/128", "2001:db8::1")]
+    [InlineData("203.0.113.0/24", "203.0.113.0/24")]
+    [InlineData("2001:db8::/32", "2001:db8::/32")] // 2^96 addresses, whatever the number looks like
+    [InlineData("2001:db8:1:2::/64", "2001:db8:1:2::/64")]
+    public void Only_a_true_single_host_cidr_folds_to_a_bare_address(string value, string expected)
+    {
+        Assert.True(IpMatcher.TryNormalizeBanTarget(value, out var target));
+        Assert.Equal(expected, target);
     }
 
     // ---------- Instance list matching ----------

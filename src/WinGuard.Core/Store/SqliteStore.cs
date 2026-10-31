@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using WinGuard.Core.Abstractions;
@@ -18,9 +19,16 @@ namespace WinGuard.Core.Store;
 /// WAL journaling and a busy timeout are enabled to keep readers/writers cooperating.
 /// </para>
 /// </summary>
-public sealed class SqliteStore : IStore, IAsyncDisposable
+public sealed class SqliteStore : IStore, ISecretScrubbingStore, IAsyncDisposable
 {
     private const int BusyTimeoutMs = 5_000;
+
+    // VACUUM rewrites the whole file while the service is still starting, and Windows gives a
+    // service 30 seconds for that. Pruning keeps a normal database well below this.
+    private const long MaxBytesToVacuumAtStartup = 64 * 1024 * 1024;
+
+    // A locked database is retried for 30 seconds by default, as long as that whole allowance.
+    private const int ScrubCommandTimeoutSeconds = 5;
 
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly string _databasePath;
@@ -155,6 +163,51 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<string>> GetFailedLoginUsersAsync(string ip, DateTime sinceUtc, CancellationToken ct = default)
+    {
+        return await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "SELECT DISTINCT user FROM failed_logins WHERE ip = $ip AND ts_utc >= $since AND user IS NOT NULL;";
+                cmd.Parameters.AddWithValue("$ip", ip);
+                cmd.Parameters.AddWithValue("$since", ToDb(sinceUtc));
+
+                var users = new List<string>();
+                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    users.Add(reader.GetString(0));
+                }
+
+                return (IReadOnlyList<string>)users;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task SetFailedLoginUserAsync(string ip, ProtocolSource source, string user, DateTime sinceUtc, CancellationToken ct = default)
+    {
+        await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "UPDATE failed_logins SET user = $user WHERE rowid = (" +
+                    "SELECT rowid FROM failed_logins WHERE ip = $ip AND source = $source AND ts_utc >= $since AND user IS NULL " +
+                    "ORDER BY ts_utc DESC, rowid DESC LIMIT 1);";
+                cmd.Parameters.AddWithValue("$user", user);
+                cmd.Parameters.AddWithValue("$ip", ip);
+                cmd.Parameters.AddWithValue("$source", (int)source);
+                cmd.Parameters.AddWithValue("$since", ToDb(sinceUtc));
+                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                return true;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task ClearFailedLoginsAsync(string ip, CancellationToken ct = default)
     {
         await WithConnectionAsync(
@@ -279,12 +332,12 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
             {
                 await using var cmd = connection.CreateCommand();
                 cmd.CommandText =
-                    "INSERT INTO bans (ip, source, banned_at_utc, expires_utc, offense_count, is_permanent, note) " +
-                    "VALUES ($ip, $source, $banned, $expires, $offense, $permanent, $note) " +
+                    "INSERT INTO bans (ip, source, banned_at_utc, expires_utc, offense_count, is_permanent, note, port_scope) " +
+                    "VALUES ($ip, $source, $banned, $expires, $offense, $permanent, $note, $portScope) " +
                     "ON CONFLICT(ip) DO UPDATE SET " +
                     "source = excluded.source, banned_at_utc = excluded.banned_at_utc, " +
                     "expires_utc = excluded.expires_utc, offense_count = excluded.offense_count, " +
-                    "is_permanent = excluded.is_permanent, note = excluded.note;";
+                    "is_permanent = excluded.is_permanent, note = excluded.note, port_scope = excluded.port_scope;";
                 cmd.Parameters.AddWithValue("$ip", ban.IpAddress);
                 cmd.Parameters.AddWithValue("$source", (int)ban.Source);
                 cmd.Parameters.AddWithValue("$banned", ToDb(ban.BannedAtUtc));
@@ -292,6 +345,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
                 cmd.Parameters.AddWithValue("$offense", ban.OffenseCount);
                 cmd.Parameters.AddWithValue("$permanent", ban.IsPermanent ? 1 : 0);
                 cmd.Parameters.AddWithValue("$note", (object?)ban.Note ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$portScope", (object?)ban.PortScope ?? DBNull.Value);
                 await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                 return true;
             },
@@ -311,6 +365,87 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
                 return true;
             },
             ct).ConfigureAwait(false);
+    }
+
+    // ---- offense counts ----
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<OffenseCountEntry>> GetOffenseCountsAsync(CancellationToken ct = default)
+    {
+        return await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText = "SELECT ip, offense_count, last_utc FROM offense_counts;";
+
+                var rows = new List<OffenseCountEntry>();
+                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    rows.Add(new OffenseCountEntry
+                    {
+                        IpAddress = reader.GetString(0),
+                        Count = reader.GetInt32(1),
+                        LastUtc = FromDb(reader.GetString(2)),
+                    });
+                }
+
+                return (IReadOnlyList<OffenseCountEntry>)rows;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task SaveOffenseCountsAsync(IReadOnlyCollection<OffenseCountEntry> changed, IReadOnlyCollection<string> removed, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(changed);
+        ArgumentNullException.ThrowIfNull(removed);
+        if (changed.Count == 0 && removed.Count == 0)
+        {
+            return;
+        }
+
+        await WithConnectionAsync(
+            async connection =>
+            {
+                await using var transaction = connection.BeginTransaction();
+                await UpsertOffenseCountsAsync(connection, transaction, changed, ct).ConfigureAwait(false);
+
+                await using (var cmd = connection.CreateCommand())
+                {
+                    cmd.Transaction = transaction;
+                    cmd.CommandText = "DELETE FROM offense_counts WHERE ip = $ip;";
+                    var ip = cmd.Parameters.Add("$ip", SqliteType.Text);
+                    foreach (var value in removed)
+                    {
+                        ip.Value = value;
+                        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    }
+                }
+
+                await transaction.CommitAsync(ct).ConfigureAwait(false);
+                return true;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    private static async Task UpsertOffenseCountsAsync(SqliteConnection connection, SqliteTransaction transaction, IEnumerable<OffenseCountEntry> rows, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText =
+            "INSERT INTO offense_counts (ip, offense_count, last_utc) VALUES ($ip, $count, $last) " +
+            "ON CONFLICT(ip) DO UPDATE SET offense_count = excluded.offense_count, last_utc = excluded.last_utc;";
+        var ip = cmd.Parameters.Add("$ip", SqliteType.Text);
+        var count = cmd.Parameters.Add("$count", SqliteType.Integer);
+        var last = cmd.Parameters.Add("$last", SqliteType.Text);
+        foreach (var row in rows)
+        {
+            ip.Value = row.IpAddress;
+            count.Value = row.Count;
+            last.Value = ToDb(row.LastUtc);
+            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
     }
 
     // ---- whitelist / blacklist ----
@@ -440,6 +575,37 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
                 }
 
                 return (IReadOnlyList<BanHistoryEntry>)rows;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<int> CountBanHistoryAsync(CancellationToken ct = default)
+    {
+        return await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText = "SELECT COUNT(*) FROM ban_history;";
+                var result = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+                return Convert.ToInt32(result, CultureInfo.InvariantCulture);
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<int> PruneBanHistoryAsync(DateTime olderThanUtc, int maxRows, CancellationToken ct = default)
+    {
+        return await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "DELETE FROM ban_history WHERE id IN (" +
+                    "SELECT id FROM ban_history WHERE ts_utc < $before ORDER BY ts_utc LIMIT $limit);";
+                cmd.Parameters.AddWithValue("$before", ToDb(olderThanUtc));
+                cmd.Parameters.AddWithValue("$limit", maxRows);
+                return await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             },
             ct).ConfigureAwait(false);
     }
@@ -591,6 +757,31 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<LogEvent>> GetEventsAfterAsync(long afterId, int limit, CancellationToken ct = default)
+    {
+        var take = limit <= 0 ? 200 : limit;
+        return await WithConnectionAsync(
+            async connection =>
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText =
+                    "SELECT ts_utc, level, source, ip, message, rowid FROM events WHERE rowid > $after ORDER BY rowid ASC LIMIT $limit;";
+                cmd.Parameters.AddWithValue("$after", afterId);
+                cmd.Parameters.AddWithValue("$limit", take);
+
+                var events = new List<LogEvent>();
+                await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    events.Add(ReadEvent(reader));
+                }
+
+                return (IReadOnlyList<LogEvent>)events;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task PruneEventsAsync(DateTime olderThanUtc, CancellationToken ct = default)
     {
         await WithConnectionAsync(
@@ -650,10 +841,95 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
             ct).ConfigureAwait(false);
     }
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// In WAL mode an update leaves the old row in the main file until a checkpoint. secure_delete
+    /// zeroes what this write frees, and the checkpoint carries that into the main file; VACUUM
+    /// goes further and also drops the copies earlier saves left in free pages and page slack,
+    /// which no write can reach, as long as the file is small enough to rewrite during start-up.
+    /// </remarks>
+    public async Task SetSettingAndScrubAsync(string key, string value, CancellationToken ct = default)
+    {
+        await WithConnectionAsync(
+            async connection =>
+            {
+                var secureDelete = await ReadPragmaAsync(connection, "secure_delete", ct).ConfigureAwait(false);
+                await ExecuteNonQueryAsync(connection, "PRAGMA secure_delete=ON;", ct).ConfigureAwait(false);
+                try
+                {
+                    await using var cmd = connection.CreateCommand();
+                    cmd.CommandText =
+                        "INSERT INTO settings (key, value) VALUES ($key, $value) " +
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value;";
+                    cmd.Parameters.AddWithValue("$key", key);
+                    cmd.Parameters.AddWithValue("$value", value);
+                    await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                }
+                finally
+                {
+                    await ExecuteNonQueryAsync(connection, $"PRAGMA secure_delete={secureDelete};", ct).ConfigureAwait(false);
+                }
+
+                await TryScrubFilesAsync(connection, ct).ConfigureAwait(false);
+                return true;
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Never throws but for a cancelled start: the new value is stored by now.</summary>
+    private async Task TryScrubFilesAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        try
+        {
+            var bytes = await ReadPragmaAsync(connection, "page_count", ct).ConfigureAwait(false)
+                * await ReadPragmaAsync(connection, "page_size", ct).ConfigureAwait(false);
+            if (bytes <= MaxBytesToVacuumAtStartup)
+            {
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText = "VACUUM;";
+                cmd.CommandTimeout = ScrubCommandTimeoutSeconds;
+                await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "The database is {Bytes} bytes, too large to rewrite during start-up. Copies of old settings in free pages stay until SQLite reuses those pages.",
+                    bytes);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Could not compact the database; copies of old settings may stay in its free pages.");
+        }
+
+        try
+        {
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            cmd.CommandTimeout = ScrubCommandTimeoutSeconds;
+            await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            if (await reader.ReadAsync(ct).ConfigureAwait(false) && reader.GetInt32(0) != 0)
+            {
+                _logger.LogWarning("The database checkpoint was blocked; old settings stay in the main file until the next one.");
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Could not checkpoint the database; old settings stay in the main file until the next checkpoint.");
+        }
+    }
+
+    private static async Task<long> ReadPragmaAsync(SqliteConnection connection, string name, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"PRAGMA {name};";
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false), CultureInfo.InvariantCulture);
+    }
+
     // ---- plumbing ----
 
     private const string BanColumns =
-        "ip, source, banned_at_utc, expires_utc, offense_count, is_permanent, note";
+        "ip, source, banned_at_utc, expires_utc, offense_count, is_permanent, note, port_scope";
 
     private async Task<T> WithConnectionAsync<T>(Func<SqliteConnection, Task<T>> action, CancellationToken ct)
     {
@@ -729,8 +1005,10 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
     /// Brings an existing database up to <see cref="SchemaVersion"/> (tracked in PRAGMA user_version).
     /// v2: the events table gets an AUTOINCREMENT id so the GUI's event cursor never sees an id
     /// reused after pruning, and raw log lines stored by older versions are discarded.
+    /// v4: offense counts move from one settings row into their own table.
+    /// v5: bans get a port scope. Rows from before it have none, and keep following BlockedPorts.
     /// </summary>
-    private static async Task MigrateAsync(SqliteConnection connection, CancellationToken ct)
+    private async Task MigrateAsync(SqliteConnection connection, CancellationToken ct)
     {
         int version;
         await using (var cmd = connection.CreateCommand())
@@ -775,13 +1053,83 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
                 ct).ConfigureAwait(false);
         }
 
+        await ImportOffenseCountsBlobAsync(connection, ct).ConfigureAwait(false);
+        await AddBanPortScopeAsync(connection, ct).ConfigureAwait(false);
+
         await ExecuteNonQueryAsync(
             connection,
             $"UPDATE failed_logins SET raw = NULL WHERE raw IS NOT NULL; PRAGMA user_version = {SchemaVersion};",
             ct).ConfigureAwait(false);
     }
 
-    private const int SchemaVersion = 3;
+    /// <summary>Adds the column to a bans table from before v5; a new table has it already.</summary>
+    private static async Task AddBanPortScopeAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('bans') WHERE name = 'port_scope';";
+        if (Convert.ToInt32(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            await ExecuteNonQueryAsync(connection, "ALTER TABLE bans ADD COLUMN port_scope TEXT;", ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Moves the offense counts that versions before schema 4 kept in one JSON settings row into the
+    /// offense_counts table. A row that cannot be read costs escalation memory, not the service: it
+    /// is dropped with a warning, because a store that refuses to open would stop all protection.
+    /// </summary>
+    private async Task ImportOffenseCountsBlobAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        string? json;
+        await using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = "SELECT value FROM settings WHERE key = $key;";
+            cmd.Parameters.AddWithValue("$key", LegacyOffenseCountsKey);
+            json = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) as string;
+        }
+
+        if (json is null)
+        {
+            return;
+        }
+
+        var rows = new List<OffenseCountEntry>();
+        try
+        {
+            var legacy = JsonSerializer.Deserialize<Dictionary<string, LegacyOffenseCount>>(json);
+            foreach (var (ip, record) in legacy ?? [])
+            {
+                if (record is { Count: > 0 })
+                {
+                    rows.Add(new OffenseCountEntry { IpAddress = ip, Count = record.Count, LastUtc = record.LastUtc });
+                }
+            }
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Discarding unreadable offense counts; tier escalation restarts for the IPs without an active ban.");
+        }
+
+        // One transaction: an interrupted upgrade finds the row still there and starts over.
+        await using var transaction = connection.BeginTransaction();
+        await UpsertOffenseCountsAsync(connection, transaction, rows, ct).ConfigureAwait(false);
+        await using (var cmd = connection.CreateCommand())
+        {
+            cmd.Transaction = transaction;
+            cmd.CommandText = "DELETE FROM settings WHERE key = $key;";
+            cmd.Parameters.AddWithValue("$key", LegacyOffenseCountsKey);
+            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(ct).ConfigureAwait(false);
+        _logger.LogInformation("Moved {Count} offense count(s) into their own table.", rows.Count);
+    }
+
+    private const int SchemaVersion = 5;
+
+    private const string LegacyOffenseCountsKey = "offense_counts";
+
+    private sealed record LegacyOffenseCount(int Count, DateTime LastUtc);
 
     private static async Task ExecuteNonQueryAsync(SqliteConnection connection, string sql, CancellationToken ct)
     {
@@ -795,7 +1143,8 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
     /// Administrators keep access, so a local standard user cannot pre-create or tamper
     /// with the database (e.g. seeding a whitelist) while it is absent. Only applied to
     /// the production location under %ProgramData%; failures are logged and never block
-    /// startup. The installer applies the same ACL via icacls.
+    /// startup. The installer applies the same ACL, and checks the folder's content, through
+    /// <c>winguard-svc --harden-data</c>.
     /// </summary>
     private void TryHardenDirectoryAcl(string directoryPath)
     {
@@ -809,15 +1158,15 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
                 return;
             }
 
-            // "P" = protected DACL (no inheritance, mirrors the installer's
-            // icacls /inheritance:r); SYSTEM + Administrators full control only.
+            // "P" = protected DACL (no inheritance, mirrors the installer's hardening);
+            // SYSTEM + Administrators full control only.
             if (!AclInterop.ConvertStringSecurityDescriptorToSecurityDescriptor(
                     "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", 1, out var securityDescriptor, IntPtr.Zero)
                 || securityDescriptor == IntPtr.Zero)
             {
                 _logger.LogWarning(
                     "Could not build the data-directory security descriptor (Win32 error {Error}); " +
-                    "ACL hardening skipped — the installer's icacls step is the fallback.",
+                    "ACL hardening skipped — the installer's hardening step is the fallback.",
                     Marshal.GetLastWin32Error());
                 return;
             }
@@ -908,6 +1257,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
         OffenseCount = reader.GetInt32(4),
         IsPermanent = reader.GetInt32(5) != 0,
         Note = reader.IsDBNull(6) ? null : reader.GetString(6),
+        PortScope = reader.IsDBNull(7) ? null : reader.GetString(7),
     };
 
     private static LogEvent ReadEvent(SqliteDataReader reader) => new()
@@ -996,7 +1346,8 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
           expires_utc TEXT NOT NULL,
           offense_count INTEGER NOT NULL DEFAULT 1,
           is_permanent INTEGER NOT NULL DEFAULT 0,
-          note TEXT
+          note TEXT,
+          port_scope TEXT
         );
 
         CREATE TABLE IF NOT EXISTS lists (
@@ -1031,6 +1382,13 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
         );
         CREATE INDEX IF NOT EXISTS ix_ban_history_ts ON ban_history(ts_utc);
         CREATE INDEX IF NOT EXISTS ix_ban_history_ip_ts ON ban_history(ip, ts_utc);
+        CREATE INDEX IF NOT EXISTS ix_ban_history_top ON ban_history(ip, offense_count, ts_utc) WHERE action = 0;
+
+        CREATE TABLE IF NOT EXISTS offense_counts (
+          ip TEXT PRIMARY KEY,
+          offense_count INTEGER NOT NULL,
+          last_utc TEXT NOT NULL
+        );
 
         CREATE TABLE IF NOT EXISTS daily_stats (
           day_utc TEXT NOT NULL,

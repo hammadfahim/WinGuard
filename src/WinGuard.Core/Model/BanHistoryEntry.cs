@@ -14,12 +14,16 @@ public enum BanHistoryAction
 
     /// <summary>The ban was superseded (e.g. promoted to permanent or re-banned while still banned).</summary>
     Updated = 3,
+
+    /// <summary>No change to a ban: an IP with failures or an active ban logged on successfully.</summary>
+    SuspiciousLogon = 4,
 }
 
 /// <summary>
-/// One append-only row of the ban history: every ban, expiry and manual unban is recorded so
-/// administrators can answer "how many attacks happened last month?" even though active bans
-/// are deleted on expiry. Written by the engine, read by the statistics view.
+/// One row of the ban history: every ban, expiry and manual unban is recorded so administrators
+/// can answer "how many attacks happened last month?" even though active bans are deleted on
+/// expiry. Written by the engine, read by the statistics view; rows are never changed, and
+/// housekeeping drops them once they are older than the retention period.
 /// </summary>
 public sealed class BanHistoryEntry
 {
@@ -49,7 +53,10 @@ public sealed class BanHistoryEntry
 /// <summary>Per-day, per-protocol activity counters kept by the engine and flushed during housekeeping.</summary>
 public sealed class DailyStatEntry
 {
-    /// <summary>The UTC day the counters belong to (date part only).</summary>
+    /// <summary>
+    /// The day the counters belong to (date part only). Despite the name this is the server's LOCAL
+    /// calendar day, which is what the dashboard's "today" means; it is only stored as a UTC value.
+    /// </summary>
     public DateTime DayUtc { get; set; }
 
     public ProtocolSource Source { get; set; }

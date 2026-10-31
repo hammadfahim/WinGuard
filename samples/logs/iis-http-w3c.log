@@ -1,0 +1,17 @@
+#Software: Microsoft Internet Information Services 10.0
+#Version: 1.0
+#Date: 2026-10-04 09:50:00
+#Fields: date time s-ip cs-method cs-uri-stem cs-uri-query s-port cs-username c-ip cs(User-Agent) cs(Referer) sc-status sc-substatus sc-win32-status time-taken
+2026-10-04 09:50:01 10.0.0.5 GET /secure/ - 443 - 198.51.100.80 Mozilla/5.0+(Windows+NT+10.0;+Win64;+x64) - 401 2 5 3
+2026-10-04 09:50:01 10.0.0.5 GET /secure/ - 443 - 198.51.100.80 Mozilla/5.0+(Windows+NT+10.0;+Win64;+x64) - 401 1 2148074254 1
+2026-10-04 09:50:02 10.0.0.5 GET /secure/ - 443 EXAMPLE\alice 198.51.100.80 Mozilla/5.0+(Windows+NT+10.0;+Win64;+x64) - 200 0 0 14
+2026-10-04 09:50:10 10.0.0.5 POST /api/login - 443 admin 203.0.113.81 python-requests/2.32 - 401 1 1326 22
+2026-10-04 09:50:12 10.0.0.5 GET /secure/ - 443 EXAMPLE\bob 203.0.113.82 curl/8.9.1 - 401 1 2148074252 19
+2026-10-04 09:50:14 10.0.0.5 GET /secure/ q=1 443 root 2001:db8::83 curl/8.9.1 https://example.com/ 401 1 1909 17
+2026-10-04 09:50:16 10.0.0.5 PROPFIND /dav/ - 443 svc 203.0.113.84 Microsoft-WebDAV-MiniRedir/10.0 - 401 1 1331 11
+2026-10-04 09:50:18 10.0.0.5 GET /files/report.pdf - 443 EXAMPLE\carol 198.51.100.85 Mozilla/5.0 - 401 3 5 2
+2026-10-04 09:50:20 10.0.0.5 GET /app/ - 443 - 198.51.100.86 Mozilla/5.0 - 401 0 0 4
+2026-10-04 09:50:22 10.0.0.5 GET /app/ - 443 - 198.51.100.87 Mozilla/5.0 - 401 501 0 1
+2026-10-04 09:50:24 10.0.0.5 GET /login.aspx - 443 - 198.51.100.88 Mozilla/5.0 - 200 0 0 8
+2026-10-04 09:50:26 10.0.0.5 GET /missing.php - 443 - 203.0.113.89 sqlmap/1.8 - 404 0 2 1
+2026-10-04 09:50:28 10.0.0.5 GET /forbidden/ - 443 - 203.0.113.90 Mozilla/5.0 - 403 14 0 1

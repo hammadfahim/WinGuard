@@ -26,7 +26,17 @@ public sealed class NotificationHostedService : BackgroundService
     /// <inheritdoc />
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        await _dispatcher.StopAsync().ConfigureAwait(false);
+        try
+        {
+            // Bounded by the host's shutdown timeout: a delivery stuck in a blocking call (the
+            // event-log writer's) must not hold the whole service in STOP_PENDING.
+            await _dispatcher.StopAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // The host gave up waiting; what is pending was best-effort anyway.
+        }
+
         await base.StopAsync(cancellationToken).ConfigureAwait(false);
     }
 }

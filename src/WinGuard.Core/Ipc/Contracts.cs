@@ -16,9 +16,13 @@ public static class PipeConstants
     /// <summary>
     /// Bumped whenever a request, response or DTO changes shape. The service reports it in
     /// <see cref="ServiceStatusDto.ProtocolVersion"/> so a GUI from another release can say so
-    /// instead of misbehaving. v3: statistics + ban history + report-only.
+    /// instead of misbehaving. v3: statistics + ban history + report-only. v4: BlockNow answers
+    /// with the ban it recorded. v5: settings carry the detection rules, which a client that does
+    /// not know them would reset on save; disarm status, firewall policy prerequisites; bans report
+    /// their ports, status reports blocklist files, and ListEvents can walk forward, which a service
+    /// without it ignores and <see cref="EventCursor"/> copes with.
     /// </summary>
-    public const int ProtocolVersion = 3;
+    public const int ProtocolVersion = 5;
 }
 
 /// <summary>Method names used in <see cref="IpcRequest.Method"/>.</summary>
@@ -29,7 +33,7 @@ public static class IpcMethods
     public const string ListEvents = "ListEvents";           // params: ListEventsParams; result: List<EventDto>
     public const string ListLists = "ListLists";             // result: List<ListEntryDto>
     public const string Unblock = "Unblock";                 // params: UnblockParams
-    public const string BlockNow = "BlockNow";               // params: BlockNowParams
+    public const string BlockNow = "BlockNow";               // params: BlockNowParams; result: BanDto
     public const string WhitelistAdd = "WhitelistAdd";       // params: ListValueParams
     public const string BlacklistAdd = "BlacklistAdd";       // params: ListValueParams
     public const string ListRemove = "ListRemove";           // params: ListRemoveParams
@@ -88,6 +92,63 @@ public sealed class ServiceStatusDto
 
     /// <summary>True when the engine runs in monitoring mode: bans are recorded but not enforced.</summary>
     public bool ReportOnly { get; set; }
+
+    /// <summary>True during a break-glass window: no firewall rules are held and nothing is enforced.</summary>
+    public bool Disarmed { get; set; }
+
+    /// <summary>When the break-glass window ends and enforcement resumes by itself; null when <see cref="Disarmed"/> is false.</summary>
+    public DateTime? DisarmedUntilUtc { get; set; }
+
+    /// <summary>What the local blocklist files contributed.</summary>
+    public BlocklistStatusDto Blocklists { get; set; } = new();
+}
+
+/// <summary>The blocklist files as a whole. All counts are zero when none is configured.</summary>
+public sealed class BlocklistStatusDto
+{
+    /// <summary>Firewall entries taken from the files, after collapsing and the cap.</summary>
+    public int Loaded { get; set; }
+
+    /// <summary>Lines refused: not an IP or CIDR, or a prefix too broad to block.</summary>
+    public int Skipped { get; set; }
+
+    /// <summary>Entries left out because of the cap of <see cref="Defaults.MaxBlocklistEntries"/>.</summary>
+    public int Capped { get; set; }
+
+    public List<BlocklistFileStatusDto> Files { get; set; } = [];
+
+    public static BlocklistStatusDto From(BlocklistSnapshot snapshot) => new()
+    {
+        Loaded = snapshot.Entries.Count,
+        Skipped = snapshot.Skipped,
+        Capped = snapshot.Capped,
+        Files = snapshot.Files.Select(file => new BlocklistFileStatusDto
+        {
+            Path = file.Path,
+            Loaded = file.Loaded,
+            Skipped = file.Skipped,
+            LastLoadedUtc = file.LastLoadedUtc,
+            Problem = file.Problem,
+        }).ToList(),
+    };
+}
+
+/// <summary>One blocklist file.</summary>
+public sealed class BlocklistFileStatusDto
+{
+    public string Path { get; set; } = string.Empty;
+
+    /// <summary>Valid entries in the file when it was last read.</summary>
+    public int Loaded { get; set; }
+
+    /// <summary>Lines refused when it was last read.</summary>
+    public int Skipped { get; set; }
+
+    /// <summary>When it was last read successfully; null if it never was.</summary>
+    public DateTime? LastLoadedUtc { get; set; }
+
+    /// <summary>Why the file is not being read, in which case its last good entries stay in force.</summary>
+    public string? Problem { get; set; }
 }
 
 public sealed class EngineStatusDto
@@ -110,7 +171,10 @@ public sealed class BanDto
     public bool IsPermanent { get; set; }
     public string? Note { get; set; }
 
-    public static BanDto From(BanEntry b) => new()
+    /// <summary>The ports this ban blocks, e.g. <c>1433,3389</c>. Empty = all ports.</summary>
+    public string Ports { get; set; } = string.Empty;
+
+    public static BanDto From(BanEntry b, WinGuardSettings settings) => new()
     {
         IpAddress = b.IpAddress,
         Source = b.Source,
@@ -119,6 +183,7 @@ public sealed class BanDto
         OffenseCount = b.OffenseCount,
         IsPermanent = b.IsPermanent,
         Note = b.Note,
+        Ports = PortProfiles.Resolve(b.PortScope, settings).Text,
     };
 }
 
@@ -160,7 +225,45 @@ public sealed class PrereqsDto
     /// <summary>RdpCoreTS/Operational channel exists and is enabled.</summary>
     public bool RdpCoreTsChannelEnabled { get; set; }
 
+    /// <summary>Whether Windows acts on WinGuard's rules at all; its warnings are in <see cref="Warnings"/> too.</summary>
+    public FirewallPolicyDto? FirewallPolicy { get; set; }
+
     public List<string> Warnings { get; set; } = [];
+}
+
+/// <summary>The firewall policy as it affects WinGuard's rules. Read-only: WinGuard never changes policy.</summary>
+public sealed class FirewallPolicyDto
+{
+    /// <summary>False when the policy could not be read; the other fields then say nothing.</summary>
+    public bool Known { get; set; }
+
+    public List<FirewallProfileDto> ActiveProfiles { get; set; } = [];
+
+    /// <summary>Raw <c>NET_FW_MODIFY_STATE</c>: 0 OK, 1 Group Policy override, 2 inbound blocked.</summary>
+    public int LocalPolicyModifyState { get; set; }
+
+    /// <summary>False when Group Policy keeps local rules from taking effect, or the state is not understood.</summary>
+    public bool LocalPolicyHonoured { get; set; }
+
+    /// <summary>All incoming connections are blocked anyway: harmless, but WinGuard's rules add nothing.</summary>
+    public bool InboundBlocked { get; set; }
+
+    /// <summary>True only when a WinGuard rule really blocks: firewall on in every active profile, local rules honoured.</summary>
+    public bool RulesTakeEffect { get; set; }
+
+    /// <summary>In plain language; empty when all is well.</summary>
+    public List<string> Warnings { get; set; } = [];
+}
+
+/// <summary>One firewall profile currently in use.</summary>
+public sealed class FirewallProfileDto
+{
+    /// <summary>Domain, Private or Public.</summary>
+    public string Name { get; set; } = string.Empty;
+
+    public bool Enabled { get; set; }
+
+    public bool BlockAllInbound { get; set; }
 }
 
 // ---- method params ----
@@ -172,6 +275,13 @@ public sealed class ListEventsParams
 
     /// <summary>When set, only events with a larger <see cref="EventDto.Id"/> are returned.</summary>
     public long? AfterId { get; set; }
+
+    /// <summary>
+    /// Walks forward: the OLDEST events after <see cref="AfterId"/>, oldest first, so a caller asks
+    /// again from the last id it got and misses nothing however large a burst was. Otherwise the
+    /// newest come back, newest first. <see cref="SinceUtc"/> does not apply here.
+    /// </summary>
+    public bool OldestFirst { get; set; }
 }
 
 public sealed class UnblockParams

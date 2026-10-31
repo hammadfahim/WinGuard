@@ -1,26 +1,77 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
-    <!-- WinGuard dark theme brushes (PLAN.md §9). Keys are shared with Light.xaml. -->
+    <!-- Dark theme. Keys are shared with Light.xaml and HighContrast.xaml.
+         Identity: blue-black ink surfaces, one cool accent for "you can act here", and colour
+         otherwise reserved for meaning: mint = protected, coral = attacked, amber = warning. -->
 
-    <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#FF1E1E22" />
-    <SolidColorBrush x:Key="PanelBackgroundBrush" Color="#FF25252B" />
-    <SolidColorBrush x:Key="CardBackgroundBrush" Color="#FF2D2D34" />
-    <SolidColorBrush x:Key="ControlBackgroundBrush" Color="#FF35353D" />
-    <SolidColorBrush x:Key="ForegroundBrush" Color="#FFF0F0F2" />
-    <SolidColorBrush x:Key="SubtleForegroundBrush" Color="#FFA0A0AA" />
-    <SolidColorBrush x:Key="BorderBrush" Color="#FF3F3F48" />
-    <SolidColorBrush x:Key="AccentBrush" Color="#FF3B82F6" />
-    <SolidColorBrush x:Key="AccentForegroundBrush" Color="#FFFFFFFF" />
-    <SolidColorBrush x:Key="SuccessBrush" Color="#FF22C55E" />
-    <SolidColorBrush x:Key="WarningBrush" Color="#FFF59E0B" />
-    <SolidColorBrush x:Key="ErrorBrush" Color="#FFEF4444" />
-    <SolidColorBrush x:Key="InfoBrush" Color="#FF60A5FA" />
-    <SolidColorBrush x:Key="HoverBackgroundBrush" Color="#FF383842" />
-    <SolidColorBrush x:Key="SelectedBackgroundBrush" Color="#FF3B3B46" />
-    <SolidColorBrush x:Key="SelectedForegroundBrush" Color="#FFF0F0F2" />
-    <SolidColorBrush x:Key="ControlTrackBrush" Color="#FF4A4A55" />
-    <SolidColorBrush x:Key="OnAccentForegroundBrush" Color="#FFFFFFFF" />
-    <SolidColorBrush x:Key="WarningForegroundBrush" Color="#FF1E1E22" />
+    <!-- Surfaces, lowest to highest. -->
+    <SolidColorBrush x:Key="CanvasBrush" Color="#FF0D1116" />
+    <SolidColorBrush x:Key="RailBrush" Color="#FF10151B" />
+    <SolidColorBrush x:Key="SurfaceBrush" Color="#FF151B22" />
+    <SolidColorBrush x:Key="SurfaceRaisedBrush" Color="#FF1B222B" />
+    <SolidColorBrush x:Key="SurfaceSunkenBrush" Color="#FF0B0F13" />
+    <SolidColorBrush x:Key="SurfaceHoverBrush" Color="#FF1E262F" />
+    <SolidColorBrush x:Key="SurfacePressedBrush" Color="#FF26303A" />
+    <SolidColorBrush x:Key="SurfaceSelectedBrush" Color="#FF17323E" />
+    <SolidColorBrush x:Key="ScrimBrush" Color="#B3060A0E" />
+
+    <!-- Lines. -->
+    <SolidColorBrush x:Key="LineBrush" Color="#FF232C36" />
+    <SolidColorBrush x:Key="LineStrongBrush" Color="#FF3A4551" />
+    <SolidColorBrush x:Key="HoverLineBrush" Color="#FF55636F" />
+    <SolidColorBrush x:Key="FocusRingBrush" Color="#FF8ADAF7" />
+    <SolidColorBrush x:Key="ChipBorderBrush" Color="#00000000" />
+
+    <!-- Text. -->
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="#FFE9EEF3" />
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="#FFA9B5C1" />
+    <SolidColorBrush x:Key="TextTertiaryBrush" Color="#FF8896A4" />
+    <SolidColorBrush x:Key="TextOnAccentBrush" Color="#FF06212C" />
+    <SolidColorBrush x:Key="TextOnSelectedBrush" Color="#FFE9EEF3" />
+
+    <!-- Accent: interactive, never a status. -->
+    <SolidColorBrush x:Key="AccentBrush" Color="#FF62C6EA" />
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="#FF7FD3F2" />
+    <SolidColorBrush x:Key="AccentPressedBrush" Color="#FF4FB2D6" />
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="#FF14303C" />
+    <SolidColorBrush x:Key="AccentTextBrush" Color="#FF7FD3F2" />
+
+    <!-- Meaning. Each has a solid, a tinted background, readable text on the tint, and text on the solid. -->
+    <SolidColorBrush x:Key="ProtectedBrush" Color="#FF3ECF8E" />
+    <SolidColorBrush x:Key="ProtectedSoftBrush" Color="#FF102C26" />
+    <SolidColorBrush x:Key="ProtectedTextBrush" Color="#FF5FDFA6" />
+    <SolidColorBrush x:Key="OnProtectedBrush" Color="#FF052117" />
+
+    <SolidColorBrush x:Key="AttackBrush" Color="#FFFF6B5E" />
+    <SolidColorBrush x:Key="AttackSoftBrush" Color="#FF371A1C" />
+    <SolidColorBrush x:Key="AttackTextBrush" Color="#FFFF9A90" />
+    <SolidColorBrush x:Key="OnAttackBrush" Color="#FF2A0705" />
+
+    <SolidColorBrush x:Key="WarnBrush" Color="#FFF3B94D" />
+    <SolidColorBrush x:Key="WarnSoftBrush" Color="#FF332812" />
+    <SolidColorBrush x:Key="WarnTextBrush" Color="#FFF6C86F" />
+    <SolidColorBrush x:Key="OnWarnBrush" Color="#FF2A1C02" />
+
+    <SolidColorBrush x:Key="NeutralSoftBrush" Color="#FF222B34" />
+
+    <!-- Charts: one fixed hue per engine, ordered so neighbours in a stack stay apart for colour-blind
+         readers (validated: adjacent CVD delta-E 16, normal vision 19.7 on SurfaceBrush). -->
+    <SolidColorBrush x:Key="ChartSeries0Brush" Color="#FF3987E5" />
+    <SolidColorBrush x:Key="ChartSeries1Brush" Color="#FFB97A3A" />
+    <SolidColorBrush x:Key="ChartSeries2Brush" Color="#FF9085E9" />
+    <SolidColorBrush x:Key="ChartSeries3Brush" Color="#FFD55181" />
+    <SolidColorBrush x:Key="ChartLineBrush" Color="#FFFF6B5E" />
+    <SolidColorBrush x:Key="ChartGridBrush" Color="#FF1F2730" />
+    <SolidColorBrush x:Key="ChartHoverBrush" Color="#2662C6EA" />
+
+    <!-- Scroll bars. -->
+    <SolidColorBrush x:Key="ScrollThumbBrush" Color="#FF333E49" />
+    <SolidColorBrush x:Key="ScrollThumbHoverBrush" Color="#FF4C5966" />
+
+    <!-- Elevation: only overlays (dialog, toast, menus) lift off the page. Cards use hairlines,
+         because shadows are software-rendered and expensive over RDP. -->
+    <DropShadowEffect x:Key="ElevationOverlay" BlurRadius="20" ShadowDepth="4" Direction="270"
+                      Opacity="0.5" Color="#FF000000" RenderingBias="Performance" />
 
 </ResourceDictionary>

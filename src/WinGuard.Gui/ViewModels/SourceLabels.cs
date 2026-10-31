@@ -21,6 +21,9 @@ public static class SourceLabels
     /// <summary>Label for custom log sources.</summary>
     public const string Custom = "Custom";
 
+    /// <summary>Label for bans an administrator placed by hand.</summary>
+    public const string Manual = "Manual";
+
     /// <summary>The label for a source, or an empty string when there is none.</summary>
     public static string For(ProtocolSource? source) => source switch
     {
@@ -28,6 +31,7 @@ public static class SourceLabels
         ProtocolSource.MsSql => MsSql,
         ProtocolSource.Ftp => Ftp,
         ProtocolSource.Custom => Custom,
+        ProtocolSource.Manual => Manual,
         _ => string.Empty,
     };
 }

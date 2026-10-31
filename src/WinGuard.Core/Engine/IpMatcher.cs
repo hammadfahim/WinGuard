@@ -19,8 +19,17 @@ namespace WinGuard.Core.Engine;
 /// </summary>
 public sealed class IpMatcher
 {
+    private static readonly IPNetwork Nat64Prefix = IPNetwork.Parse("64:ff9b::/96");
+
     private readonly List<IPNetwork> _whitelist = [];
     private readonly List<IPNetwork> _blacklist = [];
+
+    /// <summary>The networks <see cref="IsInternal"/> calls internal, as list entries.</summary>
+    public static IReadOnlyList<string> InternalRanges { get; } =
+    [
+        "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10", "198.18.0.0/15",
+        "::1/128", "fe80::/10", "fec0::/10", "fc00::/7",
+    ];
 
     /// <summary>
     /// Creates a matcher from raw list entries. Each entry may be a single IP or a CIDR.
@@ -167,10 +176,46 @@ public sealed class IpMatcher
     }
 
     /// <summary>
+    /// Normalizes a ban target: a single host IP (bare form) or a canonical CIDR range that passes
+    /// <see cref="IsBannableRange"/>. A /32 or /128 "range" folds to the bare host so the same
+    /// address always has one identity. Firewall tokens, hostnames and over-broad prefixes are rejected.
+    /// </summary>
+    /// <param name="value">The raw host or CIDR value.</param>
+    /// <param name="target">The normalized target when the method returns <see langword="true"/>.</param>
+    public static bool TryNormalizeBanTarget(string? value, out string target)
+    {
+        if (TryNormalize(value, out var host))
+        {
+            target = host;
+            return true;
+        }
+
+        if (TryNormalizeRange(value, out var range) && IsBannableRange(range))
+        {
+            // Single-host CIDR forms collapse to the bare host identity. An IPv6 /32 is no single host.
+            var slash = range.IndexOf('/');
+            if (int.TryParse(range[(slash + 1)..], NumberStyles.None, CultureInfo.InvariantCulture, out var prefix)
+                && prefix == (range.Contains(':') ? 128 : 32)
+                && TryNormalize(range[..slash], out var single))
+            {
+                target = single;
+                return true;
+            }
+
+            target = range;
+            return true;
+        }
+
+        target = string.Empty;
+        return false;
+    }
+
+    /// <summary>
     /// Aggregates an IPv6 host address to its /N network prefix in canonical form
     /// (<c>2001:db8:1:2:3:4:5:6</c> with prefix 64 → <c>2001:db8:1:2::/64</c>). IPv4 inputs return
     /// <see langword="false"/> (IPv4 aggregation is not supported; attackers do not rotate /24s the
-    /// way IPv6 clients rotate /64 interface identifiers).
+    /// way IPv6 clients rotate /64 interface identifiers), and so does anything whose prefix would
+    /// take in NAT64: 64:ff9b::/96 is every IPv4 client of a translator, not one network.
     /// </summary>
     /// <param name="normalizedIp">A normalized IPv6 host address.</param>
     /// <param name="prefixLength">Target prefix length, 32..128.</param>
@@ -186,14 +231,32 @@ public sealed class IpMatcher
             return false;
         }
 
-        prefix = new IPNetwork(MaskAddress(address, prefixLength), prefixLength).ToString().ToLowerInvariant();
+        var network = new IPNetwork(MaskAddress(address, prefixLength), prefixLength);
+        if (Nat64Prefix.Contains(address) || network.Contains(Nat64Prefix.BaseAddress))
+        {
+            return false;
+        }
+
+        prefix = network.ToString().ToLowerInvariant();
         return true;
     }
 
+    /// <summary>True when a range takes in any of NAT64, which <see cref="TryAggregateIpv6"/> never produces.</summary>
+    /// <param name="normalizedRange">A CIDR range.</param>
+    public static bool OverlapsNat64(string normalizedRange) =>
+        TryParseCidr(normalizedRange, out var range) && Overlap(range, Nat64Prefix);
+
     /// <summary>
-    /// Returns <see langword="true"/> for non-routable / private addresses: loopback
-    /// (127.0.0.0/8, ::1), RFC1918 (10/8, 172.16/12, 192.168/16), link-local
-    /// (169.254/16, fe80::/10), IPv6 unique-local (fc00::/7) and site-local (fec0::/10).
+    /// Returns <see langword="true"/> for addresses the public internet cannot be the source of:
+    /// loopback (127.0.0.0/8, ::1), RFC1918 (10/8, 172.16/12, 192.168/16), link-local (169.254/16,
+    /// fe80::/10), carrier-grade NAT (100.64/10, RFC 6598: ISP subscribers, Tailscale peers),
+    /// benchmarking (198.18/15, RFC 2544: never routed publicly, so seen only from test labs and
+    /// vendors' internal fabrics), IPv6 unique-local (fc00::/7) and site-local (fec0::/10).
+    /// <para>
+    /// NAT64 (64:ff9b::/96, RFC 6052) is deliberately not internal as a whole: such an address is a
+    /// real IPv4 client seen through a translator, possibly an attacker on the internet. The IPv4
+    /// address embedded in its last 32 bits decides.
+    /// </para>
     /// </summary>
     /// <param name="normalizedIp">An IP literal (normalized or not).</param>
     public static bool IsInternal(string normalizedIp)
@@ -214,7 +277,9 @@ public sealed class IpMatcher
             return bytes[0] == 10
                 || (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31)
                 || (bytes[0] == 192 && bytes[1] == 168)
-                || (bytes[0] == 169 && bytes[1] == 254);
+                || (bytes[0] == 169 && bytes[1] == 254)
+                || (bytes[0] == 100 && bytes[1] >= 64 && bytes[1] <= 127)
+                || (bytes[0] == 198 && bytes[1] is 18 or 19);
         }
 
         if (address.AddressFamily == AddressFamily.InterNetworkV6)
@@ -228,10 +293,19 @@ public sealed class IpMatcher
             {
                 return IsInternal(address.MapToIPv4().ToString());
             }
+
+            if (EmbeddedIpv4(address) is { } embedded)
+            {
+                return IsInternal(embedded.ToString());
+            }
         }
 
         return false;
     }
+
+    /// <summary>The IPv4 client behind a NAT64 address (RFC 6052), null for any other address.</summary>
+    private static IPAddress? EmbeddedIpv4(IPAddress address) =>
+        Nat64Prefix.Contains(address) ? new IPAddress(address.GetAddressBytes()[12..]) : null;
 
     /// <summary>
     /// False for addresses that can never be a remote client and must not reach the ban list or
@@ -380,11 +454,63 @@ public sealed class IpMatcher
         return results;
     }
 
-    /// <summary>True when <paramref name="normalizedIp"/> falls inside any whitelist entry.</summary>
+    /// <summary>
+    /// True when <paramref name="normalizedIp"/> falls inside any whitelist entry. A NAT64 address also
+    /// matches by the IPv4 client it stands for, here and in <see cref="IsBlacklisted"/>.
+    /// </summary>
     public bool IsWhitelisted(string normalizedIp) => Matches(_whitelist, normalizedIp);
 
     /// <summary>True when <paramref name="normalizedIp"/> falls inside any blacklist entry.</summary>
     public bool IsBlacklisted(string normalizedIp) => Matches(_blacklist, normalizedIp);
+
+    /// <summary>
+    /// True when any address of <paramref name="normalizedRange"/> is whitelisted. A firewall block
+    /// rule beats every allow rule, so a range for which this is true would block a whitelisted address.
+    /// </summary>
+    /// <param name="normalizedRange">A CIDR range (or bare IP).</param>
+    public bool OverlapsWhitelist(string normalizedRange) =>
+        TryParseCidr(normalizedRange, out var range) && _whitelist.Any(entry => Overlap(entry, range));
+
+    /// <summary>
+    /// Splits <paramref name="normalizedRange"/> into the smallest set of ban targets that covers
+    /// the range except its whitelisted addresses: the range itself when nothing in it is
+    /// whitelisted, nothing when all of it is. Every target has a longer prefix than the range, so
+    /// it still satisfies <see cref="IsBannableRange"/>, and single addresses come back bare.
+    /// </summary>
+    /// <param name="normalizedRange">A canonical CIDR range.</param>
+    public IReadOnlyList<string> SubtractWhitelist(string normalizedRange)
+    {
+        var targets = new List<string>();
+        if (TryParseCidr(normalizedRange, out var range))
+        {
+            Subtract(range, _whitelist.Where(entry => Overlap(entry, range)).ToList(), targets);
+        }
+
+        return targets;
+    }
+
+    private static void Subtract(IPNetwork network, List<IPNetwork> holes, List<string> targets)
+    {
+        if (holes.Any(hole => hole.PrefixLength <= network.PrefixLength && hole.Contains(network.BaseAddress)))
+        {
+            return;
+        }
+
+        if (!holes.Any(hole => network.Contains(hole.BaseAddress)))
+        {
+            targets.Add(TryNormalizeBanTarget(network.ToString(), out var target) ? target : network.ToString().ToLowerInvariant());
+            return;
+        }
+
+        // Halve the network and keep going on the side(s) that still hold a whitelisted address.
+        var prefix = network.PrefixLength + 1;
+        var upper = network.BaseAddress.GetAddressBytes();
+        upper[network.PrefixLength / 8] |= (byte)(0x80 >> (network.PrefixLength % 8));
+        Subtract(new IPNetwork(network.BaseAddress, prefix), holes, targets);
+        Subtract(new IPNetwork(new IPAddress(upper), prefix), holes, targets);
+    }
+
+    private static bool Overlap(IPNetwork a, IPNetwork b) => a.Contains(b.BaseAddress) || b.Contains(a.BaseAddress);
 
     private static bool Matches(List<IPNetwork> networks, string ip)
     {
@@ -393,9 +519,16 @@ public sealed class IpMatcher
             return false;
         }
 
+        var embedded = EmbeddedIpv4(address);
         foreach (var network in networks)
         {
-            if (network.BaseAddress is { } baseAddress && baseAddress.AddressFamily == address.AddressFamily && network.Contains(address))
+            if (network.BaseAddress is not { } baseAddress)
+            {
+                continue;
+            }
+
+            if ((baseAddress.AddressFamily == address.AddressFamily && network.Contains(address))
+                || (embedded is not null && baseAddress.AddressFamily == embedded.AddressFamily && network.Contains(embedded)))
             {
                 return true;
             }

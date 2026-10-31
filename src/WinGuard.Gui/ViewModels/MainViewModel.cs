@@ -8,25 +8,22 @@ using WinGuard.Gui.Services;
 namespace WinGuard.Gui.ViewModels;
 
 /// <summary>
-/// Shell view-model: owns the pipe client, the status poller and all five view-models, exposes the
-/// navigation entries and drives the dark/light theme toggle.
+/// Shell view-model: owns the pipe client, the status poller and all six page view-models, exposes the
+/// navigation entries and the shared toast and dialog channels, and drives the theme toggle.
 /// </summary>
 public sealed partial class MainViewModel : ObservableObject, IDisposable
 {
+    private const string NotConnectedReason = "The WinGuard service is not connected. It will be picked up as soon as it runs.";
+
     private readonly PipeClient _client;
     private readonly StatusPoller _poller;
-
-    /// <summary>Pauses or resumes background polling (call with false while the window is hidden).</summary>
-    public void SetWindowActive(bool active)
-    {
-        _poller.Paused = !active;
-        if (active)
-        {
-            _poller.ResetEventCursor();
-        }
-    }
-
     private readonly Dispatcher _dispatcher;
+    private readonly DispatcherTimer _clock;
+
+    private NavigationItem? _selectedNavigation;
+    private int _handlingConnection;
+    private bool _reloadRequested;
+    private int _slowTicks;
 
     /// <summary>Creates the shell and starts polling.</summary>
     /// <param name="client">Started pipe client.</param>
@@ -36,38 +33,78 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _client = client;
         _dispatcher = dispatcher;
 
-        Dashboard = new DashboardViewModel(client);
-        BlockedIps = new BlockedIpsViewModel(client);
-        EventLog = new EventLogViewModel();
-        Statistics = new StatisticsViewModel(client);
-        Settings = new SettingsViewModel(client);
-        Lists = new ListsViewModel(client);
+        Dashboard = new DashboardViewModel(client, Toasts, Dialogs);
+        BlockedIps = new BlockedIpsViewModel(client, Toasts, Dialogs);
+        EventLog = new EventLogViewModel(Toasts);
+        Statistics = new StatisticsViewModel(client, Toasts);
+        Settings = new SettingsViewModel(client, Toasts);
+        Lists = new ListsViewModel(client, Toasts, Dialogs);
 
         NavigationItems =
         [
-            new NavigationItem("Dashboard", Dashboard),
-            new NavigationItem("Blocked IPs", BlockedIps),
-            new NavigationItem("Event Log", EventLog),
-            new NavigationItem("Statistics", Statistics),
-            new NavigationItem("Settings", Settings),
-            new NavigationItem("Lists", Lists),
+            new NavigationItem("Dashboard", "", 1, Dashboard),
+            new NavigationItem("Blocked IPs", "", 2, BlockedIps),
+            new NavigationItem("Event Log", "", 3, EventLog),
+            new NavigationItem("Statistics", "", 4, Statistics),
+            new NavigationItem("Lists", "", 5, Lists),
+            new NavigationItem("Settings", "", 6, Settings),
         ];
 
         _poller = new StatusPoller(client);
-        _poller.StatusUpdated += Dashboard.UpdateStatus;
+        _poller.StatusUpdated += OnStatusUpdated;
         _poller.EventsReceived += OnEventsReceived;
-        _poller.BansReceived += BlockedIps.UpdateBans;
+        _poller.BansReceived += OnBansReceived;
+        _poller.SlowTick += OnSlowTick;
         _poller.Start();
 
-        SelectedNavigation = NavigationItems[0];
+        _selectedNavigation = NavigationItems[0];
+        _poller.BansViewActive = true;
 
         // A dashboard toggle changes the settings behind the Settings page's back; reload them so
         // a later Save there does not write the old values over the change.
         Dashboard.SettingsChanged += () => _ = Settings.LoadAsync();
+        Dashboard.ShowBansRequested += search =>
+        {
+            if (search is not null)
+            {
+                BlockedIps.Show(search);
+            }
+
+            SelectedNavigation = NavigationItems[1];
+        };
+        Dashboard.ShowEngineRequested += source =>
+        {
+            EventLog.ShowEngine(source);
+            SelectedNavigation = NavigationItems[2];
+        };
+        Dashboard.ShowAddressRequested += ip =>
+        {
+            EventLog.ShowAddress(ip);
+            SelectedNavigation = NavigationItems[2];
+        };
+        Dashboard.ShowStatisticsRequested += () => SelectedNavigation = NavigationItems[3];
+        Dashboard.ShowSettingsRequested += section =>
+        {
+            Settings.Show(section);
+            SelectedNavigation = NavigationItems[5];
+        };
+
+        Statistics.Loaded += Dashboard.UpdateStatistics;
+        Settings.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(SettingsViewModel.IsDirty))
+            {
+                NavigationItems[5].HasAttention = Settings.IsDirty;
+            }
+        };
 
         _client.StateChanged += OnClientStateChanged;
         _client.ProblemChanged += OnClientProblemChanged;
         Dashboard.ConnectionProblem = client.LastProblem ?? string.Empty;
+
+        _clock = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _clock.Tick += OnClockTick;
+        _clock.Start();
 
         // The client may already be connected: the event for that connection was raised before we
         // subscribed, so run the on-connect work (load settings, lists, prerequisites) now.
@@ -98,12 +135,41 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     /// <summary>Lists view-model.</summary>
     public ListsViewModel Lists { get; }
 
+    /// <summary>In-app notifications.</summary>
+    public ToastCenter Toasts { get; } = new();
+
+    /// <summary>In-app confirmations.</summary>
+    public DialogCenter Dialogs { get; } = new();
+
     /// <summary>Left-navigation entries.</summary>
     public ObservableCollection<NavigationItem> NavigationItems { get; }
 
-    /// <summary>Currently selected navigation entry.</summary>
-    [ObservableProperty]
-    private NavigationItem? _selectedNavigation;
+    /// <summary>
+    /// Currently selected navigation entry. Leaving Settings with unsaved edits asks first, so a
+    /// navigation request may leave this unchanged.
+    /// </summary>
+    public NavigationItem? SelectedNavigation
+    {
+        get => _selectedNavigation;
+        set
+        {
+            if (value is null || ReferenceEquals(value, _selectedNavigation))
+            {
+                return;
+            }
+
+            if (ReferenceEquals(_selectedNavigation?.ViewModel, Settings) && Settings.IsDirty)
+            {
+                _ = GuardedNavigateAsync(value);
+
+                // The list has already moved its own selection: put it back until the user decides.
+                _dispatcher.BeginInvoke(() => OnPropertyChanged(nameof(SelectedNavigation)));
+                return;
+            }
+
+            Commit(value);
+        }
+    }
 
     /// <summary>Whether the service pipe is connected.</summary>
     [ObservableProperty]
@@ -115,31 +181,68 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private ThemeChoice _themeChoice = ThemeChoice.System;
 
     /// <summary>
-    /// Window caption including this console's version, so it is always visible which build is
-    /// on screen (an upgrade can leave an older console running in the tray).
+    /// Window caption including this console's version and the machine, so it is always visible which
+    /// build and which server is on screen (an RDP session often sits next to another one).
     /// </summary>
-    public string WindowTitle { get; } = "WinGuard " + ConsoleVersion;
+    public string WindowTitle { get; } = $"WinGuard {ConsoleVersion} - {Environment.MachineName}";
 
     /// <summary>This console's version, e.g. "0.1.8".</summary>
     public static string ConsoleVersion { get; } =
         typeof(MainViewModel).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
 
+    /// <summary>The machine this console manages, shown in the rail.</summary>
+    public string MachineName { get; } = Environment.MachineName;
+
+    /// <summary>Console version text for the rail.</summary>
+    public string ConsoleVersionText { get; } = "Console " + ConsoleVersion;
+
     /// <summary>Caption of the theme button.</summary>
-    public string ThemeButtonText => "Theme: " + (ThemeChoice switch
+    public string ThemeButtonText => ThemeChoice switch
     {
         ThemeChoice.Light => "Light",
         ThemeChoice.Dark => "Dark",
         _ => "System",
-    });
+    };
 
     /// <summary>View-model currently rendered in the content area.</summary>
     public object? CurrentViewModel => SelectedNavigation?.ViewModel;
+
+    /// <summary>Pauses or resumes background polling (call with false while the window is hidden).</summary>
+    public void SetWindowActive(bool active)
+    {
+        _poller.Paused = !active;
+        if (active)
+        {
+            _clock.Start();
+
+            // The event cursor stayed put, so this reads everything that arrived meanwhile.
+            _ = _poller.PollNowAsync();
+        }
+        else
+        {
+            _clock.Stop();
+        }
+    }
+
+    /// <summary>
+    /// Asks before quitting with unsaved settings. The answer decides whether the application exits.
+    /// </summary>
+    public async Task<bool> ConfirmExitAsync()
+    {
+        if (!Settings.IsDirty)
+        {
+            return true;
+        }
+
+        return await ResolveUnsavedAsync("Quit") != DialogChoice.Cancel;
+    }
 
     /// <summary>Stops polling and unsubscribes.</summary>
     public void Dispose()
     {
         _client.StateChanged -= OnClientStateChanged;
         _client.ProblemChanged -= OnClientProblemChanged;
+        _clock.Stop();
         _poller.Dispose();
     }
 
@@ -156,23 +259,180 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         ThemeChoiceChanged?.Invoke(ThemeChoice);
     }
 
-    partial void OnSelectedNavigationChanged(NavigationItem? value)
+    /// <summary>Opens a page by its Ctrl+N number.</summary>
+    [RelayCommand]
+    private void NavigateTo(string? shortcut)
     {
+        // A dialog is modal: the page behind it must not change.
+        if (Dialogs.Current is null && int.TryParse(shortcut, out var number) && number >= 1 && number <= NavigationItems.Count)
+        {
+            SelectedNavigation = NavigationItems[number - 1];
+        }
+    }
+
+    /// <summary>F5: re-reads everything the visible page shows.</summary>
+    [RelayCommand]
+    private async Task RefreshAsync()
+    {
+        if (!_client.IsConnected)
+        {
+            await RetryConnectionAsync();
+            return;
+        }
+
+        await _poller.PollNowAsync();
+        switch (CurrentViewModel)
+        {
+            case StatisticsViewModel statistics:
+                await statistics.LoadAsync();
+                break;
+            case ListsViewModel lists:
+                await lists.LoadAsync();
+                break;
+            case SettingsViewModel settings:
+                await settings.LoadAsync();
+                break;
+            case DashboardViewModel:
+                await CheckPrereqsAsync();
+                await Statistics.LoadAsync();
+                break;
+        }
+    }
+
+    /// <summary>Ctrl+S: saves settings while they are on screen.</summary>
+    [RelayCommand]
+    private async Task SaveAsync()
+    {
+        if (ReferenceEquals(CurrentViewModel, Settings) && Settings.IsDirty)
+        {
+            await Settings.TrySaveAsync();
+        }
+    }
+
+    /// <summary>Tries the connection and the prerequisites again right now.</summary>
+    [RelayCommand]
+    private async Task RetryConnectionAsync()
+    {
+        if (_client.IsConnected)
+        {
+            await CheckPrereqsAsync();
+            await _poller.PollNowAsync();
+            return;
+        }
+
+        if (!await _client.TryReconnectNowAsync())
+        {
+            Toasts.Warning("Still not connected", _client.LastProblem ?? "The WinGuard service is not running.");
+        }
+    }
+
+    private void Commit(NavigationItem value)
+    {
+        _selectedNavigation = value;
+        OnPropertyChanged(nameof(SelectedNavigation));
         OnPropertyChanged(nameof(CurrentViewModel));
-        _poller.BansViewActive = value?.ViewModel is BlockedIpsViewModel;
+        _poller.BansViewActive = value.ViewModel is BlockedIpsViewModel or DashboardViewModel;
+        if (value.ViewModel is BlockedIpsViewModel)
+        {
+            BlockedIps.Tick();
+        }
     }
 
-    private void OnEventsReceived(IReadOnlyList<EventDto> events)
+    private async Task GuardedNavigateAsync(NavigationItem target)
     {
-        Dashboard.AddRecentEvents(events);
-        EventLog.AddEvents(events);
+        if (await ResolveUnsavedAsync("Leave") != DialogChoice.Cancel)
+        {
+            Commit(target);
+        }
     }
 
-    private int _handlingConnection;
-    private bool _reloadRequested;
+    /// <summary>Save, discard or stay. Cancel means stay; a failed save counts as staying.</summary>
+    private async Task<DialogChoice> ResolveUnsavedAsync(string verb)
+    {
+        var choice = await Dialogs.ShowAsync(new DialogRequest(
+            Tone.Warn,
+            "Save your changes?",
+            "Some settings have not been saved. They are lost if you continue without saving.",
+            "Save and continue")
+        {
+            AlternateText = "Discard changes",
+            CancelText = verb == "Quit" ? "Keep editing" : "Stay here",
+        });
+
+        switch (choice)
+        {
+            case DialogChoice.Confirm:
+                return await Settings.TrySaveAsync() ? DialogChoice.Confirm : DialogChoice.Cancel;
+            case DialogChoice.Alternate:
+                await Settings.DiscardAsync();
+                return DialogChoice.Alternate;
+            default:
+                return DialogChoice.Cancel;
+        }
+    }
+
+    private void OnClockTick(object? sender, EventArgs e)
+    {
+        Toasts.Prune(DateTime.UtcNow);
+        Dashboard.Tick();
+        if (ReferenceEquals(CurrentViewModel, BlockedIps))
+        {
+            BlockedIps.Tick();
+        }
+    }
+
+    private void OnStatusUpdated(ServiceStatusDto status)
+    {
+        Dashboard.UpdateStatus(status);
+        BlockedIps.IsReportOnly = status.ReportOnly || status.Disarmed;
+        Settings.UpdateBlocklists(status.Blocklists);
+        NavigationItems[1].Badge = status.ActiveBans > 0 ? status.ActiveBans.ToString("N0") : string.Empty;
+    }
+
+    private void OnEventsReceived(EventBatch batch)
+    {
+        Dashboard.AddEvents(batch.Events);
+        EventLog.AddEvents(batch);
+    }
+
+    private void OnBansReceived(IReadOnlyList<BanDto> bans)
+    {
+        Dashboard.UpdateBans(bans);
+        BlockedIps.UpdateBans(bans);
+    }
+
+    private void OnSlowTick()
+    {
+        _ = Statistics.LoadAsync();
+        if (++_slowTicks % 2 == 0)
+        {
+            _ = CheckPrereqsAsync();
+        }
+    }
+
+    private async Task CheckPrereqsAsync()
+    {
+        try
+        {
+            var prereqs = await _client.CheckPrereqsAsync();
+            if (prereqs is not null)
+            {
+                Dashboard.UpdatePrereqs(prereqs);
+                Settings.UpdatePrereqs(prereqs);
+            }
+        }
+        catch
+        {
+            // Warnings are best-effort.
+        }
+    }
 
     private void OnClientProblemChanged(string? problem) =>
-        _dispatcher.InvokeAsync(() => Dashboard.ConnectionProblem = problem ?? string.Empty);
+        _dispatcher.InvokeAsync(() =>
+        {
+            Dashboard.ConnectionProblem = problem ?? string.Empty;
+            Dashboard.ConnectionSettled = true;
+        });
 
     private void OnClientStateChanged(bool connected) =>
         _dispatcher.InvokeAsync(() => _ = HandleConnectionChangedAsync(connected));
@@ -181,9 +441,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         IsConnected = connected;
         Dashboard.IsConnected = connected;
+        Dashboard.ConnectionSettled = true;
 
         if (!connected)
         {
+            MarkDisconnected(NotConnectedReason);
             return;
         }
 
@@ -199,20 +461,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         try
         {
-            _poller.ResetEventCursor();
-
-            try
-            {
-                var prereqs = await _client.CheckPrereqsAsync();
-                if (prereqs is not null)
-                {
-                    Dashboard.UpdatePrereqs(prereqs);
-                }
-            }
-            catch
-            {
-                // Warnings are best-effort.
-            }
+            EventLog.SetConnected();
+            BlockedIps.SetConnecting();
+            await _poller.PollNowAsync();
+            await CheckPrereqsAsync();
 
             try
             {
@@ -222,7 +474,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             }
             catch
             {
-                // Surfaces as the disconnected pill; the next state change retries.
+                // Surfaces in the banner; the next state change retries.
             }
         }
         finally
@@ -236,5 +488,16 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             _reloadRequested = false;
             await HandleConnectionChangedAsync(true);
         }
+    }
+
+    /// <summary>Shows the shared error state on pages that have nothing to show yet.</summary>
+    /// <param name="reason">Why nothing is available.</param>
+    public void MarkDisconnected(string reason)
+    {
+        BlockedIps.SetDisconnected(reason);
+        EventLog.SetDisconnected(reason);
+        Statistics.SetDisconnected(reason);
+        Lists.SetDisconnected(reason);
+        Settings.SetDisconnected(reason);
     }
 }

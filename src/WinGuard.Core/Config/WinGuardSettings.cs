@@ -16,6 +16,12 @@ public sealed class WinGuardSettings
     public TimeSpan ExpireTime { get; set; } = Defaults.ExpireTime;
     public TimeSpan[] BanTiers { get; set; } = (TimeSpan[])Defaults.BanTiers.Clone();
     public TimeSpan MaxBanDuration { get; set; } = Defaults.MaxBanDuration;
+
+    /// <summary>
+    /// How long after its last ban ended an IP's offense count is remembered. Within this time a
+    /// returning attacker continues at the next ban tier; after it they start again at the first.
+    /// </summary>
+    public TimeSpan OffenseMemory { get; set; } = Defaults.OffenseMemory;
     public TimeSpan HousekeepingInterval { get; set; } = Defaults.HousekeepingInterval;
     public bool ClearBansOnStartup { get; set; }
     public bool ProcessInternalIPs { get; set; }
@@ -43,19 +49,41 @@ public sealed class WinGuardSettings
     public int Ipv6AggregatePrefixLength { get; set; }
 
     /// <summary>Days of event history kept before housekeeping prunes it.</summary>
-    public int EventRetentionDays { get; set; } = 30;
+    public int EventRetentionDays { get; set; } = Defaults.EventRetentionDays;
+
+    /// <summary>Days of ban history kept before housekeeping prunes it; top attackers count only what is kept.</summary>
+    public int BanHistoryRetentionDays { get; set; } = Defaults.BanHistoryRetentionDays;
     public int MaxAddressesPerRule { get; set; } = Defaults.MaxAddressesPerRule;
 
     /// <summary>Out-of-band notifications (webhook / Telegram / e-mail / Windows Event Log).</summary>
     public NotificationSettings Notifications { get; set; } = new();
 
-    /// <summary>Empty = block all ports (1 firewall condition per IP; cheapest). Non-empty = block only these ports.</summary>
+    /// <summary>
+    /// A <c>.prom</c> file on a local drive that housekeeping keeps up to date, for the textfile
+    /// collector of windows_exporter. Empty (the default) writes nothing; WinGuard opens no port.
+    /// </summary>
+    public string PrometheusTextfilePath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Empty = block all ports (1 firewall condition per IP; cheapest). Non-empty = block only these
+    /// ports. Applies to every engine without a profile of its own; manual bans, blacklist bans and
+    /// blacklisted ranges always block all ports.
+    /// </summary>
     public string[] BlockedPorts { get; set; } = [];
 
     public RdpSettings Rdp { get; set; } = new();
     public MsSqlSettings MsSql { get; set; } = new();
     public FtpSettings Ftp { get; set; } = new();
     public List<CustomLogSource> CustomSources { get; set; } = [];
+
+    /// <summary>Honeypot names, spraying, slow brute force and logon alerts; all off by default.</summary>
+    public DetectionRuleSettings Rules { get; set; } = new();
+
+    /// <summary>
+    /// Local blocklist files (one IP or CIDR per line) blocked on all ports without waiting for a
+    /// failed login. Empty = off. WinGuard never fetches a list: the administrator downloads it.
+    /// </summary>
+    public string[] BlocklistFiles { get; set; } = [];
 
     /// <summary>Effective threshold for a protocol (per-protocol override wins).</summary>
     public int ThresholdFor(ProtocolSource source) => source switch
@@ -105,6 +133,20 @@ public sealed class WinGuardSettings
         BlockedPorts ??= [];
         BanTiers ??= [];
         Notifications.Smtp ??= new();
+        Rules ??= new();
+        Rules.Normalize();
+        Notifications.Syslog ??= new();
+        Notifications.Syslog.Normalize();
+        PrometheusTextfilePath = PrometheusTextfilePath?.Trim() ?? string.Empty;
+
+        foreach (var source in CustomSources)
+        {
+            if (source?.Regex is not null)
+            {
+                source.Regex = CustomSourceRecipes.UpgradeRegex(source.Regex);
+                source.PathGlob = CustomSourceRecipes.UpgradePathGlob(source.PathGlob ?? string.Empty, source.Regex);
+            }
+        }
 
         // Backlog replay: negative values make no sense; clamp to a sane upper bound (24 h).
         EventBacklogReplayMinutes = Math.Clamp(EventBacklogReplayMinutes < 0 ? 0 : EventBacklogReplayMinutes, 0, 1440);
@@ -116,7 +158,8 @@ public sealed class WinGuardSettings
             Ipv6AggregatePrefixLength = Math.Clamp(Ipv6AggregatePrefixLength, 32, 64);
         }
 
-        // DateTime + TimeSpan overflows past year 9999, which would abort the ban; cap durations.
+        // DateTime +/- TimeSpan overflows at either end of the calendar, which would abort a ban or
+        // a whole housekeeping pass; cap durations.
         var maxSane = TimeSpan.FromDays(3650);
         if (MaxBanDuration <= TimeSpan.Zero)
         {
@@ -129,22 +172,30 @@ public sealed class WinGuardSettings
         }
 
         FailedLoginThreshold = Math.Max(1, FailedLoginThreshold);
-        EventRetentionDays = Math.Clamp(EventRetentionDays <= 0 ? 30 : EventRetentionDays, 1, 3650);
+        EventRetentionDays = Math.Clamp(EventRetentionDays <= 0 ? Defaults.EventRetentionDays : EventRetentionDays, 1, 3650);
+        BanHistoryRetentionDays = Math.Clamp(BanHistoryRetentionDays <= 0 ? Defaults.BanHistoryRetentionDays : BanHistoryRetentionDays, 1, 3650);
         MaxAddressesPerRule = Math.Clamp(MaxAddressesPerRule, 1, Defaults.MaxAddressesPerRule);
-        if (CountWindow <= TimeSpan.Zero)
-        {
-            CountWindow = Defaults.CountWindow;
-        }
 
-        if (ExpireTime <= TimeSpan.Zero)
-        {
-            ExpireTime = Defaults.ExpireTime;
-        }
+        CountWindow = CountWindow <= TimeSpan.Zero ? Defaults.CountWindow : Min(CountWindow, maxSane);
+        Rdp.CountWindow = NormalizeWindow(Rdp.CountWindow, maxSane);
+        MsSql.CountWindow = NormalizeWindow(MsSql.CountWindow, maxSane);
+        Ftp.CountWindow = NormalizeWindow(Ftp.CountWindow, maxSane);
 
-        if (HousekeepingInterval < TimeSpan.FromSeconds(1))
-        {
-            HousekeepingInterval = Defaults.HousekeepingInterval;
-        }
+        // Housekeeping forgets failures older than ExpireTime, so an ExpireTime shorter than a count
+        // window would silently shorten that window: attempts would vanish before they added up.
+        ExpireTime = ExpireTime <= TimeSpan.Zero ? Defaults.ExpireTime : Min(ExpireTime, maxSane);
+        ExpireTime = Max(ExpireTime, CountWindow);
+        ExpireTime = Max(ExpireTime, Rdp.CountWindow ?? TimeSpan.Zero);
+        ExpireTime = Max(ExpireTime, MsSql.CountWindow ?? TimeSpan.Zero);
+        ExpireTime = Max(ExpireTime, Ftp.CountWindow ?? TimeSpan.Zero);
+        ExpireTime = Max(ExpireTime, Rules.LongestFailureWindow());
+
+        OffenseMemory = OffenseMemory <= TimeSpan.Zero ? Defaults.OffenseMemory : Min(OffenseMemory, maxSane);
+
+        // Task.Delay throws for anything past about 49 days, which would end the polling loop.
+        var maxInterval = TimeSpan.FromDays(1);
+        HousekeepingInterval = HousekeepingInterval < TimeSpan.FromSeconds(1) ? Defaults.HousekeepingInterval : Min(HousekeepingInterval, maxInterval);
+        Ftp.PollInterval = Ftp.PollInterval <= TimeSpan.Zero ? Defaults.FtpPollInterval : Min(Ftp.PollInterval, maxInterval);
 
         BanTiers = BanTiers is { Length: > 0 } ? BanTiers : (TimeSpan[])Defaults.BanTiers.Clone();
 
@@ -152,12 +203,21 @@ public sealed class WinGuardSettings
         var positiveTiers = BanTiers.Where(t => t > TimeSpan.Zero).Select(t => t > maxSane ? maxSane : t).ToArray();
         BanTiers = positiveTiers.Length > 0 ? positiveTiers : (TimeSpan[])Defaults.BanTiers.Clone();
 
-        // BlockedPorts tokens reach the firewall LocalPorts property: keep only "port" or
-        // "start-end" numeric forms so garbage can't break rule creation.
-        BlockedPorts = BlockedPorts
-            .Where(p => !string.IsNullOrWhiteSpace(p))
-            .Select(p => p.Trim())
-            .Where(p => System.Text.RegularExpressions.Regex.IsMatch(p, @"^\d+(-\d+)?$"))
+        // Port tokens reach the firewall LocalPorts property: keep only valid "port" or "start-end"
+        // numeric forms so garbage can't break rule creation, and with it every block.
+        BlockedPorts = NormalizePorts(BlockedPorts);
+        Rdp.BlockedPorts = NormalizePorts(Rdp.BlockedPorts);
+        MsSql.BlockedPorts = NormalizePorts(MsSql.BlockedPorts);
+        Ftp.BlockedPorts = NormalizePorts(Ftp.BlockedPorts);
+        Ftp.PassivePortRange = NormalizePorts([Ftp.PassivePortRange]).FirstOrDefault() ?? string.Empty;
+        foreach (var source in CustomSources.Where(source => source is not null))
+        {
+            source.BlockedPorts = NormalizePorts(source.BlockedPorts);
+        }
+
+        BlocklistFiles = (BlocklistFiles ?? [])
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => path.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
@@ -165,6 +225,20 @@ public sealed class WinGuardSettings
         Notifications.RateLimitPerMinute = Math.Clamp(
             Notifications.RateLimitPerMinute <= 0 ? 20 : Notifications.RateLimitPerMinute, 1, 1000);
     }
+
+    private static TimeSpan? NormalizeWindow(TimeSpan? window, TimeSpan max) =>
+        window is { } value && value > TimeSpan.Zero ? Min(value, max) : null;
+
+    private static string[] NormalizePorts(string?[]? ports) => (ports ?? [])
+        .Where(p => !string.IsNullOrWhiteSpace(p))
+        .Select(p => p!.Trim())
+        .Where(p => PortSet.TryParseRange(p, out _, out _))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;
+
+    private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
 }
 
 /// <summary>Shared per-protocol knobs.</summary>
@@ -177,6 +251,9 @@ public abstract class ProtocolSettings
 
     /// <summary>Overrides the global CountWindow when set.</summary>
     public TimeSpan? CountWindow { get; set; }
+
+    /// <summary>Ports a ban from this engine blocks. Empty = use the global BlockedPorts.</summary>
+    public string[] BlockedPorts { get; set; } = [];
 }
 
 public sealed class RdpSettings : ProtocolSettings
@@ -225,6 +302,13 @@ public sealed class FtpSettings : ProtocolSettings
     public TimeSpan PollInterval { get; set; } = Defaults.FtpPollInterval;
 
     public List<FtpLogSource> Sources { get; set; } = [];
+
+    /// <summary>
+    /// The FTP server's passive data range, e.g. 50000-50100, blocked along with
+    /// <see cref="ProtocolSettings.BlockedPorts"/> when that is set. Empty = none: every FTP server
+    /// picks its own range, so WinGuard never assumes one.
+    /// </summary>
+    public string PassivePortRange { get; set; } = string.Empty;
 }
 
 /// <summary>Generic log source (PLAN.md §4.5): tail files, match a regex with named groups.</summary>
@@ -239,6 +323,9 @@ public sealed class CustomLogSource
 
     /// <summary>Regex with named groups (?&lt;ipaddress&gt;...) and optional (?&lt;username&gt;...). A match = one failed login.</summary>
     public string Regex { get; set; } = string.Empty;
+
+    /// <summary>Ports a ban from this source blocks. Empty = use the global BlockedPorts.</summary>
+    public string[] BlockedPorts { get; set; } = [];
 }
 
 /// <summary>
@@ -273,6 +360,9 @@ public sealed class NotificationSettings
     /// <summary>Also write WinGuard events to the Windows Application event log (source "WinGuard")
     /// so SIEM/Windows-Event-Forwarding setups can consume them without polling WinGuard's pipe.</summary>
     public bool WriteToWindowsEventLog { get; set; } = true;
+
+    /// <summary>Syslog output; has its own switch and is not rate limited, like the Windows Event Log.</summary>
+    public SyslogSettings Syslog { get; set; } = new();
 }
 
 /// <summary>Minimal SMTP relay configuration for notifications.</summary>
@@ -287,7 +377,7 @@ public sealed class SmtpSettings
     /// <summary>Username; empty = anonymous relay (typical for an internal smarthost).</summary>
     public string Username { get; set; } = string.Empty;
 
-    /// <summary>Password; stored in the settings blob like the rest of the configuration.</summary>
+    /// <summary>Password; encrypted in the store like the webhook URL and Telegram token (see <see cref="SettingsSecrets"/>).</summary>
     public string Password { get; set; } = string.Empty;
 
     /// <value>Display/sender address, e.g. winguard@example.com.</value>

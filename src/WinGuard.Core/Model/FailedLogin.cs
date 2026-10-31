@@ -32,6 +32,22 @@ public sealed class FailedLogin
     /// </summary>
     public bool IsExcluded { get; set; }
 
+    /// <summary>
+    /// True when this failure comes from the start-up backlog replay rather than a live event. The
+    /// engine counts it only if it happened after the previous run stopped processing events.
+    /// </summary>
+    public bool IsReplayed { get; set; }
+
+    /// <summary>
+    /// True when this is a successful logon (Security 4624) on its way to the engine rather than a
+    /// failure. Sharing the channel keeps it in order with the failures around it. It is never
+    /// counted and never reaches failed_logins.
+    /// </summary>
+    public bool IsSuccess { get; set; }
+
+    /// <summary>The Windows logon type of a successful logon (3 network, 10 RDP); 0 otherwise. Not persisted.</summary>
+    public int LogonType { get; set; }
+
     /// <summary>The matched raw log/event text, for diagnostics. Not persisted.</summary>
     public string RawLog { get; set; } = string.Empty;
 }

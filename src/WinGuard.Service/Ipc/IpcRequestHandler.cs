@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using WinGuard.Core.Abstractions;
 using WinGuard.Core.Config;
 using WinGuard.Core.Engine;
+using WinGuard.Core.Firewall;
 using WinGuard.Core.Ipc;
 using WinGuard.Core.Model;
 
@@ -21,6 +22,7 @@ public sealed partial class IpcRequestHandler
     private readonly BanEngine _engine;
     private readonly SettingsHolder _settings;
     private readonly IFirewall _firewall;
+    private readonly IFirewallPolicyReader _firewallPolicy;
     private readonly DetectorRuntimeState _state;
     private readonly ILogger<IpcRequestHandler> _logger;
     private readonly TimeProvider _timeProvider;
@@ -34,6 +36,7 @@ public sealed partial class IpcRequestHandler
     /// <param name="state">Shared detector running flags.</param>
     /// <param name="timeProvider">Clock used for the reported service start time and statistics windows.</param>
     /// <param name="logger">Diagnostic logger.</param>
+    /// <param name="firewallPolicy">Reads the firewall policy for the prerequisites; the real one when null.</param>
     public IpcRequestHandler(
         IStore store,
         BanEngine engine,
@@ -41,8 +44,10 @@ public sealed partial class IpcRequestHandler
         IFirewall firewall,
         DetectorRuntimeState state,
         TimeProvider timeProvider,
-        ILogger<IpcRequestHandler> logger)
+        ILogger<IpcRequestHandler> logger,
+        IFirewallPolicyReader? firewallPolicy = null)
     {
+        _firewallPolicy = firewallPolicy ?? new ComFirewallPolicyReader();
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _engine = engine ?? throw new ArgumentNullException(nameof(engine));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -132,6 +137,7 @@ public sealed partial class IpcRequestHandler
             });
         }
 
+        var disarmedUntil = _engine.DisarmedUntilUtc;
         return new ServiceStatusDto
         {
             ServiceRunning = true,
@@ -141,30 +147,38 @@ public sealed partial class IpcRequestHandler
             ActiveBans = bans.Count,
             Engines = engines,
             ReportOnly = settings.ReportOnly,
+            Disarmed = disarmedUntil is not null,
+            DisarmedUntilUtc = disarmedUntil,
+            Blocklists = BlocklistStatusDto.From(_engine.GetBlocklistStatus()),
         };
     }
 
     private async Task<List<BanDto>> ListBansAsync(CancellationToken ct)
     {
+        var settings = _settings.Current;
         var bans = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
-        return bans.Select(BanDto.From).ToList();
+        return bans.Select(ban => BanDto.From(ban, settings)).ToList();
     }
 
     private async Task<List<EventDto>> ListEventsAsync(ListEventsParams parameters, CancellationToken ct)
     {
         var limit = Math.Clamp(parameters.Limit <= 0 ? 200 : parameters.Limit, 1, 1000);
-        var events = await _store.GetEventsAsync(limit, parameters.SinceUtc, parameters.AfterId, ct).ConfigureAwait(false);
+        var events = parameters.OldestFirst
+            ? await _store.GetEventsAfterAsync(parameters.AfterId ?? 0, limit, ct).ConfigureAwait(false)
+            : await _store.GetEventsAsync(limit, parameters.SinceUtc, parameters.AfterId, ct).ConfigureAwait(false);
         return events.Select(EventDto.From).ToList();
     }
 
     private async Task<StatisticsDto> GetStatisticsAsync(GetStatisticsParams parameters, CancellationToken ct)
     {
         var days = Math.Clamp(parameters.Days <= 0 ? 30 : parameters.Days, 1, 365);
-        var since = _timeProvider.GetUtcNow().UtcDateTime.Date.AddDays(-(days - 1));
+
+        // The engine buckets the daily rows by local calendar day, so the window counts local days too.
+        var since = _timeProvider.GetLocalNow().Date.AddDays(-(days - 1));
 
         var daily = await _store.GetDailyStatsAsync(since, ct).ConfigureAwait(false);
         var topOffenders = await _store.GetTopOffendersAsync(10, ct).ConfigureAwait(false);
-        var history = await _store.GetBanHistoryAsync(1000, ct).ConfigureAwait(false);
+        var historyRows = await _store.CountBanHistoryAsync(ct).ConfigureAwait(false);
         var bans = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
 
         return new StatisticsDto
@@ -172,7 +186,7 @@ public sealed partial class IpcRequestHandler
             Daily = daily.Select(DailyStatDto.From).ToList(),
             TopOffenders = topOffenders.Select(TopOffenderDto.From).ToList(),
             TotalActiveBans = bans.Count,
-            HistoryRows = history.Count,
+            HistoryRows = historyRows,
         };
     }
 
@@ -196,8 +210,9 @@ public sealed partial class IpcRequestHandler
 
     private async Task<IpcResponse> UnblockAsync(IpcRequest request, CancellationToken ct)
     {
+        // A ban can be a range: IPv6 aggregate bans are stored under their prefix.
         var parameters = Params<UnblockParams>(request);
-        if (!IpMatcher.TryNormalize(parameters.Ip, out var ip))
+        if (!IpMatcher.TryNormalizeBanTarget(parameters.Ip, out var ip))
         {
             return IpcResponse.Fail(request.Id, "Invalid IP address.");
         }
@@ -211,20 +226,26 @@ public sealed partial class IpcRequestHandler
             await _engine.HousekeepOnceAsync(ct).ConfigureAwait(false);
         }
 
-        await _engine.UnbanAsync(ip, ct).ConfigureAwait(false);
-        return IpcResponse.Success(request.Id, null);
+        return await LiftBansAsync(request, [ip], ct).ConfigureAwait(false);
     }
 
     private async Task<IpcResponse> BlockNowAsync(IpcRequest request, CancellationToken ct)
     {
+        // A range is accepted only when it is already banned (promoting an IPv6 aggregate ban to
+        // permanent); blocking a new subnet is what the blacklist is for.
         var parameters = Params<BlockNowParams>(request);
-        if (!IpMatcher.TryNormalize(parameters.Ip, out var ip))
+        if (!IpMatcher.TryNormalizeBanTarget(parameters.Ip, out var ip)
+            || (ip.Contains('/') && await _store.GetBanAsync(ip, ct).ConfigureAwait(false) is null))
         {
             return IpcResponse.Fail(request.Id, "Invalid IP address.");
         }
 
         await _engine.BanNowAsync(ip, parameters.Duration, parameters.Permanent, parameters.Note, ct).ConfigureAwait(false);
-        return IpcResponse.Success(request.Id, null);
+
+        // The answer is what was recorded: the engine picks the duration when none is given and
+        // caps the ones it is given.
+        var ban = await _store.GetBanAsync(ip, ct).ConfigureAwait(false);
+        return IpcResponse.Success(request.Id, ban is null ? null : BanDto.From(ban, _settings.Current));
     }
 
     private async Task<IpcResponse> WhitelistAddAsync(IpcRequest request, CancellationToken ct)
@@ -243,22 +264,14 @@ public sealed partial class IpcRequestHandler
         // A whitelisted single host should immediately stop being blocked.
         if (IpMatcher.TryNormalize(value, out var ip))
         {
-            await _engine.UnbanAsync(ip, ct).ConfigureAwait(false);
-        }
-        else
-        {
-            // CIDR range: unban every active ban that falls inside it.
-            var range = new IpMatcher([value], []);
-            foreach (var ban in await _store.GetActiveBansAsync(ct).ConfigureAwait(false))
-            {
-                if (range.IsWhitelisted(ban.IpAddress))
-                {
-                    await _engine.UnbanAsync(ban.IpAddress, ct).ConfigureAwait(false);
-                }
-            }
+            return await LiftBansAsync(request, [ip], ct).ConfigureAwait(false);
         }
 
-        return IpcResponse.Success(request.Id, null);
+        // CIDR range: unban every active ban that falls inside it.
+        var range = new IpMatcher([value], []);
+        var bans = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
+        var inside = bans.Select(ban => ban.IpAddress).Where(range.IsWhitelisted).ToList();
+        return await LiftBansAsync(request, inside, ct).ConfigureAwait(false);
     }
 
     private async Task<IpcResponse> BlacklistAddAsync(IpcRequest request, CancellationToken ct)
@@ -274,16 +287,17 @@ public sealed partial class IpcRequestHandler
         // Reload the engine's in-memory matcher so the new entry takes effect immediately.
         await _engine.HousekeepOnceAsync(ct).ConfigureAwait(false);
 
-        // A blacklisted single host is blocked right away (RdpGuard-style). CIDR ranges
-        // take effect at detection time via PLAN §5 step 3. A whitelisted IP is refused
-        // by the engine (whitelist always wins) — expected, not an error.
+        // A blacklisted single host is blocked right away (RdpGuard-style). CIDR ranges were
+        // enforced as range rules by the pass above. A whitelisted IP or a non-host address is
+        // refused by the engine (whitelist always wins) — expected, not an error. A database
+        // failure is not one either: the engine blocks first and saves the ban when it can.
         if (IpMatcher.TryNormalize(value, out var ip))
         {
             try
             {
                 await _engine.BanNowAsync(ip, null, permanent: true, BlacklistNote, ct).ConfigureAwait(false);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
             {
                 _logger.LogInformation(ex, "Blacklisted IP {Ip} was not banned immediately.", ip);
             }
@@ -294,10 +308,13 @@ public sealed partial class IpcRequestHandler
 
     private async Task<IpcResponse> ListRemoveAsync(IpcRequest request, CancellationToken ct)
     {
+        // Removal goes by what is stored, not by what may be added today: an entry from an older
+        // version, however broad or malformed, must not become impossible to take off the list.
         var parameters = Params<ListRemoveParams>(request);
-        if (!TryNormalizeListValue(request, parameters.Value, out var value, out var failure))
+        var value = await FindListEntryAsync(parameters.Kind, parameters.Value, ct).ConfigureAwait(false);
+        if (value is null)
         {
-            return failure!;
+            return IpcResponse.Fail(request.Id, "Invalid IP or CIDR value.");
         }
 
         await _store.RemoveFromListAsync(parameters.Kind, value, ct).ConfigureAwait(false);
@@ -311,16 +328,17 @@ public sealed partial class IpcRequestHandler
         {
             var removed = new IpMatcher([], [value]);
             var remaining = new IpMatcher([], await _store.GetListAsync(ListKind.Blacklist, ct).ConfigureAwait(false));
-            foreach (var ban in await _store.GetActiveBansAsync(ct).ConfigureAwait(false))
-            {
-                if (ban.IsPermanent
+            var bans = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
+            var created = bans
+                .Where(ban => ban.IsPermanent
                     && string.Equals(ban.Note, BlacklistNote, StringComparison.OrdinalIgnoreCase)
                     && removed.IsBlacklisted(ban.IpAddress)
                     && !remaining.IsBlacklisted(ban.IpAddress))
-                {
-                    await _engine.UnbanAsync(ban.IpAddress, ct).ConfigureAwait(false);
-                }
-            }
+                .Select(ban => ban.IpAddress)
+                .ToList();
+
+            // Only what the entry created: an aggregate ban around one of these has its own reason.
+            return await LiftBansAsync(request, created, ct, exact: true).ConfigureAwait(false);
         }
 
         return IpcResponse.Success(request.Id, null);
@@ -383,6 +401,67 @@ public sealed partial class IpcRequestHandler
         typeof(IpcRequestHandler).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
 
     /// <summary>
+    /// Lifts each ban. One that cannot be lifted does not stop the rest, and the caller is told
+    /// exactly which remain: the store is asked, because the engine logs a removal the store refused
+    /// and carries on, and the firewall would block that address again at the next reconcile.
+    /// </summary>
+    private async Task<IpcResponse> LiftBansAsync(IpcRequest request, IReadOnlyList<string> ips, CancellationToken ct, bool exact = false)
+    {
+        foreach (var ip in ips)
+        {
+            try
+            {
+                await (exact ? _engine.UnbanExactAsync(ip, ct) : _engine.UnbanAsync(ip, ct)).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Could not lift the ban of {Ip}.", ip);
+            }
+        }
+
+        var active = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
+
+        // An address is not free while a range ban that should have gone with it still holds it.
+        var remaining = ips
+            .Where(ip => active.Any(ban => string.Equals(ban.IpAddress, ip, StringComparison.OrdinalIgnoreCase)
+                || (!exact && ban.IpAddress.Contains('/') && new IpMatcher([ban.IpAddress], []).IsWhitelisted(ip))))
+            .ToList();
+        if (remaining.Count == 0)
+        {
+            return IpcResponse.Success(request.Id, null);
+        }
+
+        return IpcResponse.Fail(
+            request.Id,
+            $"{remaining.Count} of {ips.Count} ban(s) could not be lifted: {string.Join(", ", remaining.Take(5))}. " +
+            "Everything else in this request was applied; see the service log, then try again.");
+    }
+
+    /// <summary>
+    /// Finds the stored entry a removal request means: the same text, or the same network written
+    /// differently. A valid value that is not stored comes back as is, so a removal can be repeated
+    /// after a partial failure; null when the value is neither stored nor valid.
+    /// </summary>
+    private async Task<string?> FindListEntryAsync(ListKind kind, string? raw, CancellationToken ct)
+    {
+        var text = raw?.Trim();
+        if (string.IsNullOrEmpty(text))
+        {
+            return null;
+        }
+
+        var stored = await _store.GetListAsync(kind, ct).ConfigureAwait(false);
+        var isNetwork = IpMatcher.TryParseCidr(text, out var network);
+        return stored.FirstOrDefault(entry => string.Equals(entry.Trim(), text, StringComparison.OrdinalIgnoreCase))
+            ?? stored.FirstOrDefault(entry => isNetwork && IpMatcher.TryParseCidr(entry, out var other) && other.Equals(network))
+            ?? (isNetwork ? text : null);
+    }
+
+    /// <summary>
     /// Validates and normalizes a whitelist/blacklist entry (single IP or CIDR). Rejects
     /// prefixes shorter than /8: e.g. 0.0.0.0/0 would disable all banning (whitelist) or
     /// ban the entire internet at detection time (blacklist).
@@ -408,8 +487,9 @@ public sealed partial class IpcRequestHandler
             return false;
         }
 
-        // Persist the canonical form so remove/lookups match what was added.
-        value = IpMatcher.TryNormalize(raw, out var single) ? single : network.ToString();
+        // Persist the canonical form so remove/lookups match what was added. A single-host CIDR is
+        // that host, which also gets a blacklisted one banned at once.
+        value = IpMatcher.TryNormalizeBanTarget(raw, out var target) ? target : network.ToString();
         return true;
     }
 }

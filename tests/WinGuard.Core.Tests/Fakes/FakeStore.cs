@@ -25,6 +25,27 @@ public sealed class FakeStore : IStore
     /// <summary>Number of times <see cref="InitializeAsync"/> was called.</summary>
     public int InitializeCallCount { get; private set; }
 
+    /// <summary>When true, ban and failed-login writes throw, as a locked or full database would.</summary>
+    public bool FailWrites { get; set; }
+
+    /// <summary>When true, offense-count writes throw.</summary>
+    public bool FailOffenseWrites { get; set; }
+
+    /// <summary>When true, daily-statistics writes throw.</summary>
+    public bool FailStatsWrites { get; set; }
+
+    /// <summary>When true, reading the active bans throws, as an unreadable database would.</summary>
+    public bool FailActiveBansRead { get; set; }
+
+    /// <summary>When true, reading the whitelist or blacklist throws.</summary>
+    public bool FailListRead { get; set; }
+
+    /// <summary>When true, removing a ban throws.</summary>
+    public bool FailBanRemoval { get; set; }
+
+    /// <summary>When true, saving a setting throws.</summary>
+    public bool FailSettingWrites { get; set; }
+
     /// <summary>Snapshot of stored failed logins (oldest first).</summary>
     public List<FailedLogin> FailedLogins
     {
@@ -55,6 +76,7 @@ public sealed class FakeStore : IStore
 
     public Task AddFailedLoginAsync(FailedLogin failed, CancellationToken ct = default)
     {
+        ThrowIfFailingWrites();
         lock (_gate)
         {
             _failedLogins.Add(Clone(failed));
@@ -65,8 +87,14 @@ public sealed class FakeStore : IStore
 
     public Task<int> CountFailedLoginsAsync(string ip, DateTime sinceUtc, ProtocolSource? source = null, CancellationToken ct = default)
     {
+        if (FailFailureReads)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
         lock (_gate)
         {
+            FailureReads++;
             var count = _failedLogins.Count(f =>
                 string.Equals(f.IpAddress, ip, StringComparison.Ordinal)
                 && f.TimestampUtc >= sinceUtc
@@ -78,7 +106,13 @@ public sealed class FakeStore : IStore
     public async Task<int> AddFailedLoginAndCountAsync(FailedLogin failed, DateTime sinceUtc, CancellationToken ct = default)
     {
         await AddFailedLoginAsync(failed, ct);
-        return await CountFailedLoginsAsync(failed.IpAddress, sinceUtc, failed.Source, ct);
+        lock (_gate)
+        {
+            return _failedLogins.Count(f =>
+                string.Equals(f.IpAddress, failed.IpAddress, StringComparison.Ordinal)
+                && f.TimestampUtc >= sinceUtc
+                && f.Source == failed.Source);
+        }
     }
 
     public Task RemoveLatestFailedLoginAsync(string ip, ProtocolSource source, CancellationToken ct = default)
@@ -89,6 +123,51 @@ public sealed class FakeStore : IStore
             if (index >= 0)
             {
                 _failedLogins.RemoveAt(index);
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Number of per-IP reads of failed_logins: the queries the detection rules add per event.</summary>
+    public int FailureReads { get; private set; }
+
+    /// <summary>Number of <see cref="GetBanAsync"/> calls.</summary>
+    public int BanReads { get; private set; }
+
+    /// <summary>When true, per-IP reads of failed_logins throw.</summary>
+    public bool FailFailureReads { get; set; }
+
+    public Task<IReadOnlyList<string>> GetFailedLoginUsersAsync(string ip, DateTime sinceUtc, CancellationToken ct = default)
+    {
+        if (FailFailureReads)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
+        lock (_gate)
+        {
+            FailureReads++;
+            IReadOnlyList<string> users = _failedLogins
+                .Where(f => string.Equals(f.IpAddress, ip, StringComparison.Ordinal) && f.TimestampUtc >= sinceUtc && f.UserName is not null)
+                .Select(f => f.UserName!)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            return Task.FromResult(users);
+        }
+    }
+
+    public Task SetFailedLoginUserAsync(string ip, ProtocolSource source, string user, DateTime sinceUtc, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            var row = _failedLogins
+                .Where(f => string.Equals(f.IpAddress, ip, StringComparison.Ordinal) && f.Source == source && f.TimestampUtc >= sinceUtc && f.UserName is null)
+                .OrderBy(f => f.TimestampUtc)
+                .LastOrDefault();
+            if (row is not null)
+            {
+                row.UserName = user;
             }
         }
 
@@ -125,24 +204,51 @@ public sealed class FakeStore : IStore
         }
     }
 
+    /// <summary>When true, reading single bans and due bans throws, as a locked or corrupt database would.</summary>
+    public bool FailBanRead { get; set; }
+
+    /// <summary>
+    /// When set, <see cref="GetActiveBansAsync"/> leaves out what has expired by this clock, as
+    /// SqliteStore does with the wall clock. Null returns every row.
+    /// </summary>
+    public Func<DateTime>? ActiveClock { get; set; }
+
+    /// <summary>Runs at the start of <see cref="UpsertBanAsync"/>, with the token the engine passed.</summary>
+    public Action<CancellationToken>? BeforeUpsert { get; set; }
+
     public Task<BanEntry?> GetBanAsync(string ip, CancellationToken ct = default)
     {
+        if (FailBanRead)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
         lock (_gate)
         {
+            BanReads++;
             return Task.FromResult(_bans.TryGetValue(ip, out var ban) ? Clone(ban) : null);
         }
     }
 
     /// <summary>
-    /// Returns every ban, including expired ones: the engine applies its own clock
-    /// (<c>TimeProvider</c>) to decide which bans are due, so the fake must not filter
-    /// using the wall clock.
+    /// Returns every ban, including expired ones, unless <see cref="ActiveClock"/> says otherwise:
+    /// the engine applies its own clock (<c>TimeProvider</c>) to decide which bans are due, so the
+    /// fake must not filter using the wall clock.
     /// </summary>
     public Task<IReadOnlyList<BanEntry>> GetActiveBansAsync(CancellationToken ct = default)
     {
+        if (FailActiveBansRead)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
         lock (_gate)
         {
-            IReadOnlyList<BanEntry> result = _bans.Values.Select(Clone).ToList();
+            var nowUtc = ActiveClock?.Invoke();
+            IReadOnlyList<BanEntry> result = _bans.Values
+                .Where(b => nowUtc is null || b.IsPermanent || b.ExpiresUtc > nowUtc)
+                .Select(Clone)
+                .ToList();
             return Task.FromResult(result);
         }
     }
@@ -150,6 +256,11 @@ public sealed class FakeStore : IStore
     /// <summary>Due bans by the caller's clock (mirrors SqliteStore semantics).</summary>
     public Task<IReadOnlyList<BanEntry>> GetDueBansAsync(DateTime nowUtc, CancellationToken ct = default)
     {
+        if (FailBanRead)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
         lock (_gate)
         {
             IReadOnlyList<BanEntry> result = _bans.Values
@@ -162,6 +273,8 @@ public sealed class FakeStore : IStore
 
     public Task UpsertBanAsync(BanEntry ban, CancellationToken ct = default)
     {
+        BeforeUpsert?.Invoke(ct);
+        ThrowIfFailingWrites();
         lock (_gate)
         {
             _bans[ban.IpAddress] = Clone(ban);
@@ -170,8 +283,21 @@ public sealed class FakeStore : IStore
         return Task.CompletedTask;
     }
 
+    private void ThrowIfFailingWrites()
+    {
+        if (FailWrites)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+    }
+
     public Task RemoveBanAsync(string ip, CancellationToken ct = default)
     {
+        if (FailBanRemoval)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
         lock (_gate)
         {
             _bans.Remove(ip);
@@ -180,8 +306,63 @@ public sealed class FakeStore : IStore
         return Task.CompletedTask;
     }
 
+    // ---- offense counts ----
+
+    private readonly Dictionary<string, OffenseCountEntry> _offenseCounts = new(StringComparer.Ordinal);
+
+    /// <summary>Snapshot of the persisted offense counts by IP.</summary>
+    public Dictionary<string, OffenseCountEntry> OffenseCounts
+    {
+        get { lock (_gate) { return _offenseCounts.ToDictionary(pair => pair.Key, pair => Clone(pair.Value), StringComparer.Ordinal); } }
+    }
+
+    /// <summary>Number of rows written or deleted through <see cref="SaveOffenseCountsAsync"/>, successful or not.</summary>
+    public int OffenseRowsWritten { get; private set; }
+
+    public Task<IReadOnlyList<OffenseCountEntry>> GetOffenseCountsAsync(CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            IReadOnlyList<OffenseCountEntry> result = _offenseCounts.Values.Select(Clone).ToList();
+            return Task.FromResult(result);
+        }
+    }
+
+    public Task SaveOffenseCountsAsync(IReadOnlyCollection<OffenseCountEntry> changed, IReadOnlyCollection<string> removed, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            OffenseRowsWritten += changed.Count + removed.Count;
+        }
+
+        if (FailOffenseWrites)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
+        lock (_gate)
+        {
+            foreach (var entry in changed)
+            {
+                _offenseCounts[entry.IpAddress] = Clone(entry);
+            }
+
+            foreach (var ip in removed)
+            {
+                _offenseCounts.Remove(ip);
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
     public Task<IReadOnlyList<string>> GetListAsync(ListKind kind, CancellationToken ct = default)
     {
+        if (FailListRead)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
         lock (_gate)
         {
             IReadOnlyList<string> values = _lists[kind].ToList();
@@ -250,6 +431,28 @@ public sealed class FakeStore : IStore
         }
     }
 
+    public Task<int> CountBanHistoryAsync(CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult(_banHistory.Count);
+        }
+    }
+
+    public Task<int> PruneBanHistoryAsync(DateTime olderThanUtc, int maxRows, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            var doomed = _banHistory
+                .Where(entry => entry.TimestampUtc < olderThanUtc)
+                .OrderBy(entry => entry.TimestampUtc)
+                .Take(maxRows)
+                .ToHashSet();
+            _banHistory.RemoveAll(doomed.Contains);
+            return Task.FromResult(doomed.Count);
+        }
+    }
+
     // ---- daily statistics ----
 
     private readonly Dictionary<(DateTime Day, ProtocolSource Source), (int Detections, int Bans)> _dailyStats = new();
@@ -268,6 +471,11 @@ public sealed class FakeStore : IStore
 
     public Task AddDailyStatsAsync(DateTime dayUtc, ProtocolSource source, int detectionsDelta, int bansDelta, CancellationToken ct = default)
     {
+        if (FailStatsWrites)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
         lock (_gate)
         {
             var key = (dayUtc.Date, source);
@@ -347,6 +555,20 @@ public sealed class FakeStore : IStore
         }
     }
 
+    public Task<IReadOnlyList<LogEvent>> GetEventsAfterAsync(long afterId, int limit, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            IReadOnlyList<LogEvent> result = _events
+                .Where(e => e.Id > afterId)
+                .OrderBy(e => e.Id)
+                .Take(limit)
+                .Select(Clone)
+                .ToList();
+            return Task.FromResult(result);
+        }
+    }
+
     public Task PruneEventsAsync(DateTime olderThanUtc, CancellationToken ct = default)
     {
         lock (_gate)
@@ -369,6 +591,11 @@ public sealed class FakeStore : IStore
 
     public Task SetSettingAsync(string key, string value, CancellationToken ct = default)
     {
+        if (FailSettingWrites)
+        {
+            throw new IOException("Simulated settings write failure.");
+        }
+
         lock (_gate)
         {
             _settings[key] = value;
@@ -395,6 +622,14 @@ public sealed class FakeStore : IStore
         OffenseCount = source.OffenseCount,
         IsPermanent = source.IsPermanent,
         Note = source.Note,
+        PortScope = source.PortScope,
+    };
+
+    private static OffenseCountEntry Clone(OffenseCountEntry source) => new()
+    {
+        IpAddress = source.IpAddress,
+        Count = source.Count,
+        LastUtc = source.LastUtc,
     };
 
     private static LogEvent Clone(LogEvent source) => new()

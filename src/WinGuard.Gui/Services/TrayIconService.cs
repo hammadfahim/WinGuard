@@ -17,6 +17,8 @@ public sealed class TrayIconService : IDisposable
     private readonly IntPtr _iconHandle;
     private readonly Icon _offlineIcon;
     private readonly IntPtr _offlineHandle;
+    private readonly Icon _alertIcon;
+    private readonly IntPtr _alertHandle;
     private bool _disposed;
 
     /// <summary>Raised when the user asks to show the main window.</summary>
@@ -32,6 +34,8 @@ public sealed class TrayIconService : IDisposable
         _icon = Icon.FromHandle(_iconHandle);
         _offlineHandle = CreateShieldIconHandle(Color.FromArgb(120, 120, 130));
         _offlineIcon = Icon.FromHandle(_offlineHandle);
+        _alertHandle = CreateShieldIconHandle(Color.FromArgb(207, 58, 51));
+        _alertIcon = Icon.FromHandle(_alertHandle);
 
         var menu = new ContextMenuStrip();
         var showItem = new ToolStripMenuItem("Show WinGuard");
@@ -53,16 +57,23 @@ public sealed class TrayIconService : IDisposable
         _notifyIcon.DoubleClick += (_, _) => ShowRequested?.Invoke(this, EventArgs.Empty);
     }
 
-    /// <summary>Switches the icon and tooltip between connected (blue) and service-offline (grey).</summary>
-    public void SetConnected(bool connected)
+    /// <summary>
+    /// Shows the console's overall state: the blue icon while connected, grey otherwise, and red while
+    /// bans have no effect, with the same words as the banner, so the tray never says "protecting"
+    /// while nothing is being enforced.
+    /// </summary>
+    /// <param name="connected">Whether the service is answering.</param>
+    /// <param name="status">The state in words.</param>
+    /// <param name="notEnforcing">Bans are doing nothing right now, which outranks the connection.</param>
+    public void SetStatus(bool connected, string status, bool notEnforcing = false)
     {
         if (_disposed)
         {
             return;
         }
 
-        _notifyIcon.Icon = connected ? _icon : _offlineIcon;
-        _notifyIcon.Text = connected ? "WinGuard - protecting" : "WinGuard - service not running";
+        _notifyIcon.Icon = notEnforcing ? _alertIcon : connected ? _icon : _offlineIcon;
+        _notifyIcon.Text = "WinGuard - " + status;
     }
 
     /// <inheritdoc />
@@ -80,6 +91,8 @@ public sealed class TrayIconService : IDisposable
         DestroyIcon(_iconHandle);
         _offlineIcon.Dispose();
         DestroyIcon(_offlineHandle);
+        _alertIcon.Dispose();
+        DestroyIcon(_alertHandle);
     }
 
     private static IntPtr CreateShieldIconHandle(Color fill)
