@@ -136,6 +136,7 @@ which are stable across releases. An id is never reassigned; new event types get
 | 1004 | Warning | An administrator unblocked an address. |
 | 1005 | Warning | A range ban was lifted because it came to overlap the whitelist. |
 | 1006 | Warning | Notifications were dropped by the rate limit or a full queue; the message gives the count. |
+| 1007 | Warning | `POSSIBLE COMPROMISE`: a logon succeeded from an address with recent failures or an active ban. |
 | 1020 | Warning | Break-glass: enforcement was disarmed and all WinGuard firewall rules removed, or an open window was changed. |
 | 1021 | Warning | Break-glass: a disarm ended and enforcement resumed. |
 | 1022 | Warning | Break-glass: a disarm file was ignored (expired, corrupt or untrusted); the message gives the reason. |

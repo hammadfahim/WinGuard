@@ -18,15 +18,21 @@ internal sealed record BlocklistRefresh(bool EntriesChanged, bool CountsChanged,
 /// <para>
 /// Losing a file must not unblock what it listed, so each file keeps its last good entries until a
 /// new version of it can be read, or until it is taken off the settings. A file that turns up with
-/// nothing valid in it counts as losing it: that is what an interrupted download or an error page
-/// saved in its place looks like. <see cref="ExportLastGood"/> and <see cref="Seed"/> carry the
-/// entries across a restart, when a data drive may come up after the service.
+/// nothing valid in it counts as losing it: that is what an error page saved in its place looks
+/// like. So does one that shrank to under half, which is what an interrupted download looks like;
+/// taking the file off the list and adding it back accepts it. <see cref="ExportLastGood"/> and
+/// <see cref="Seed"/> carry the entries across a restart, when a data drive may come up after the
+/// service.
 /// </para>
 /// </summary>
 internal sealed class BlocklistLoader
 {
     // Far above any published list; refuses a file that is not one before it is read into memory.
     private const long MaxFileBytes = 64L * 1024 * 1024;
+
+    // A new version under half of a list this size looks cut off rather than cleaned up. Small lists
+    // swing by that much in the normal course of things.
+    private const int MinEntriesForTruncationCheck = 100;
 
     private readonly object _sync = new();
     private readonly int _maxEntries;
@@ -168,16 +174,17 @@ internal sealed class BlocklistLoader
             using var stream = new FileStream(info.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
             var blocks = BlocklistParser.Parse(reader, out var skipped);
-            if (blocks.Count == 0 && (skipped > 0 || file.Blocks.Length > 0))
+            var collapsed = BlocklistParser.Collapse(blocks, _maxEntries, out var capped);
+            if (Refusal(blocks.Count, skipped, collapsed.Count, file.Blocks.Length) is { } refusal)
             {
                 // Nothing new can come of reading this version again.
-                var changed = file.Fail("the file holds no valid entry", warnings) || file.Skipped != skipped;
+                var changed = file.Fail(refusal, warnings) || file.Skipped != skipped;
                 file.Skipped = skipped;
                 file.Stamp = stamp;
                 return changed;
             }
 
-            file.Blocks = BlocklistParser.Collapse(blocks, _maxEntries, out var capped).ToArray();
+            file.Blocks = collapsed.ToArray();
             file.Capped = capped;
             file.Loaded = blocks.Count;
             file.Skipped = skipped;
@@ -190,6 +197,19 @@ internal sealed class BlocklistLoader
         {
             return file.Fail("the file cannot be read: " + ex.Message, warnings);
         }
+    }
+
+    /// <summary>Why a readable new version must not replace the last good one, or null.</summary>
+    private static string? Refusal(int parsed, int skipped, int entries, int lastGoodEntries)
+    {
+        if (parsed == 0 && (skipped > 0 || lastGoodEntries > 0))
+        {
+            return "the file holds no valid entry";
+        }
+
+        return lastGoodEntries >= MinEntriesForTruncationCheck && entries < lastGoodEntries / 2
+            ? $"the file holds {entries} entries where the last good version held {lastGoodEntries}, so it looks cut off; if it is meant to be this short, take it off the list and add it back"
+            : null;
     }
 
     private sealed class FileRecord(string path)

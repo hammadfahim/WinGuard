@@ -183,6 +183,9 @@ internal sealed class SocketSyslogTransport : ISyslogTransport
 {
     private const byte LineFeed = (byte)'\n';
 
+    // Receivers have nothing to say here. This bounds the reads for one that will not stop.
+    private const int MaxDiscardReads = 16;
+
     // Only the sender's loop calls in, one message at a time.
     private TcpClient? _client;
     private string? _endpoint;
@@ -256,12 +259,24 @@ internal sealed class SocketSyslogTransport : ISyslogTransport
         return _client.GetStream();
     }
 
-    /// <summary>A receiver that went away: the first write would still appear to work, and lose its message.</summary>
+    /// <summary>
+    /// A receiver that went away: the first write would still appear to work, and lose its message.
+    /// Whatever it sent is read and dropped, or those bytes would hide the end of the stream.
+    /// </summary>
     private static bool IsClosedByPeer(TcpClient client)
     {
         try
         {
-            return client.Client.Poll(0, SelectMode.SelectRead) && client.Client.Available == 0;
+            var socket = client.Client;
+            for (var read = 0; read < MaxDiscardReads && socket.Poll(0, SelectMode.SelectRead); read++)
+            {
+                if (socket.Available == 0 || socket.Receive(new byte[Math.Min(socket.Available, 4096)]) == 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
         catch (Exception)
         {

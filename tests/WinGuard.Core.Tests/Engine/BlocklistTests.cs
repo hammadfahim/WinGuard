@@ -265,6 +265,72 @@ public sealed class BlocklistTests : IDisposable
         Assert.Equal(1, loader.Current.Skipped);
     }
 
+    /// <summary>A list of that many entries, none of which merge.</summary>
+    private static string ListOf(int entries) =>
+        string.Concat(Enumerable.Range(0, entries).Select(i => $"20.{i / 200}.{i % 200}.0/25\n"));
+
+    [Fact]
+    public void A_list_cut_to_under_half_keeps_the_last_good_entries_and_warns_once()
+    {
+        // An interrupted download: what is there parses, and the rest must not get unblocked.
+        var path = Write("drop.txt", ListOf(200));
+        var loader = new BlocklistLoader(1000);
+        loader.Refresh([path], Now);
+
+        Rewrite(path, ListOf(50));
+        var refresh = loader.Refresh([path], Now.AddMinutes(1));
+        var second = loader.Refresh([path], Now.AddMinutes(2));
+
+        Assert.Contains("cut off", Assert.Single(refresh.Warnings));
+        Assert.Empty(second.Warnings);
+        Assert.Equal(200, loader.Current.Entries.Count);
+        Assert.Contains("cut off", Assert.Single(loader.Current.Files).Problem);
+    }
+
+    [Fact]
+    public void A_list_that_loses_less_than_half_replaces_the_old_one()
+    {
+        var path = Write("drop.txt", ListOf(200));
+        var loader = new BlocklistLoader(1000);
+        loader.Refresh([path], Now);
+
+        Rewrite(path, ListOf(100));
+        var refresh = loader.Refresh([path], Now.AddMinutes(1));
+
+        Assert.Empty(refresh.Warnings);
+        Assert.Equal(100, loader.Current.Entries.Count);
+    }
+
+    [Fact]
+    public void A_short_list_may_shrink_as_it_likes()
+    {
+        var path = Write("drop.txt", ListOf(99));
+        var loader = new BlocklistLoader(1000);
+        loader.Refresh([path], Now);
+
+        Rewrite(path, ListOf(1));
+        var refresh = loader.Refresh([path], Now.AddMinutes(1));
+
+        Assert.Empty(refresh.Warnings);
+        Assert.Single(loader.Current.Entries);
+    }
+
+    [Fact]
+    public void Taking_a_list_off_and_adding_it_back_accepts_a_short_version()
+    {
+        var path = Write("drop.txt", ListOf(200));
+        var loader = new BlocklistLoader(1000);
+        loader.Refresh([path], Now);
+        Rewrite(path, ListOf(50));
+        loader.Refresh([path], Now.AddMinutes(1));
+
+        loader.Refresh([], Now.AddMinutes(2));
+        var refresh = loader.Refresh([path], Now.AddMinutes(3));
+
+        Assert.Empty(refresh.Warnings);
+        Assert.Equal(50, loader.Current.Entries.Count);
+    }
+
     [Fact]
     public void A_file_too_large_to_be_a_list_is_refused_before_it_is_read()
     {
@@ -706,6 +772,20 @@ public sealed class BlocklistTests : IDisposable
         Assert.Contains(Range, sync);
         Assert.Contains("192.0.2.7", sync);
         Assert.NotNull(Assert.Single(restarted.Engine.GetBlocklistStatus().Files).Problem);
+    }
+
+    [Fact]
+    public async Task A_failed_save_of_the_entries_is_tried_again_on_the_next_pass()
+    {
+        var path = Write("drop.txt", $"{Range}\n");
+        var store = new FakeStore { FailSettingWrites = true };
+        await using var h = await EngineHarness.StartAsync(T0, s => s.BlocklistFiles = [path], store: store);
+        Assert.DoesNotContain("blocklist_last_good", store.SettingValues.Keys);
+
+        store.FailSettingWrites = false;
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Contains(Range, store.SettingValues["blocklist_last_good"]);
     }
 
     [Fact]

@@ -59,6 +59,7 @@ public sealed class BanEngineLogonTests
         Assert.Equal(LogEventLevel.Warning, alert.Level);
         Assert.Equal(ip, alert.IpAddress);
         Assert.True(WinGuardEventIds.IsNotifiable(alert));
+        Assert.Equal(WinGuardEventIds.PossibleCompromise, WinGuardEventIds.For(alert));
     }
 
     [Fact]
