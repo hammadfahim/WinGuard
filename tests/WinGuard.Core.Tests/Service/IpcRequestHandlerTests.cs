@@ -225,8 +225,9 @@ public sealed class IpcRequestHandlerTests
 
         var response = await h.CallAsync(IpcMethods.WhitelistAdd, new ListValueParams { Value = "198.51.100.0/24" });
 
+        // Housekeeping lifted the other two on the way, so only this one is left to report.
         Assert.False(response.Ok);
-        Assert.Contains("1 of 3", response.Error);
+        Assert.Contains("1 of 1", response.Error);
         Assert.Contains("198.51.100.11", response.Error);
         Assert.Equal(new[] { "198.51.100.11" }, (await h.GetAsync<List<BanDto>>(IpcMethods.ListBans)).Select(b => b.IpAddress));
 

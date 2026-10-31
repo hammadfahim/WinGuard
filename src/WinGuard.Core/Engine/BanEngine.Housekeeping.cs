@@ -93,12 +93,36 @@ public sealed partial class BanEngine
         }
     }
 
-    /// <summary>Saves bans the store refused earlier and lifts the ones that have run out meanwhile.</summary>
+    /// <summary>
+    /// Saves bans the store refused earlier and lifts the ones that have run out meanwhile. A blind
+    /// ban first gets merged with the row it was made without. Until the store can say what that
+    /// row is, the ban is neither saved nor lifted: both could only take something away from it.
+    /// </summary>
     private async Task RetryUnsavedBansAsync(DateTime now, CancellationToken ct)
     {
         var storeDown = false;
-        foreach (var ban in _unsavedBans.Values.ToList())
+        foreach (var held in _unsavedBans.Values.ToList())
         {
+            var ban = held;
+            if (_blindBans.Contains(ban.IpAddress))
+            {
+                if (storeDown)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    ban = SettleBlindBan(ban, await _store.GetBanAsync(ban.IpAddress, ct).ConfigureAwait(false), now);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+                {
+                    storeDown = true;
+                    _logger.LogWarning(ex, "Still cannot read the bans the unsaved ones were made without; they stay enforced on all ports.");
+                    continue;
+                }
+            }
+
             if (!ban.IsPermanent && ban.ExpiresUtc <= now)
             {
                 _unsavedBans.Remove(ban.IpAddress);
@@ -126,18 +150,39 @@ public sealed partial class BanEngine
     }
 
     /// <summary>
-    /// Lifts range bans that hold a whitelisted address, however they got that way: a whitelist entry
-    /// added later, a server address that changed, or a ban from a version without this check.
+    /// Lifts bans that block a whitelisted address, however they got that way: a whitelist entry added
+    /// later, a server address that changed, a ban made while the lists could not be read, or one
+    /// from a version without this check.
     /// </summary>
-    private async Task LiftWhitelistedRangeBansAsync(IReadOnlyList<BanEntry> activeBans, CancellationToken ct)
+    private async Task LiftWhitelistedBansAsync(IReadOnlyList<BanEntry> activeBans, CancellationToken ct)
     {
         foreach (var ban in activeBans)
         {
-            if (ban.IpAddress.Contains('/') && _matcher.OverlapsWhitelist(ban.IpAddress))
+            var whitelisted = ban.IpAddress.Contains('/') ? _matcher.OverlapsWhitelist(ban.IpAddress) : _matcher.IsWhitelisted(ban.IpAddress);
+            if (whitelisted)
             {
-                _logger.LogWarning("Lifting range ban {Range}: it overlaps the whitelist.", ban.IpAddress);
+                _logger.LogWarning("Lifting ban {Target}: it overlaps the whitelist.", ban.IpAddress);
                 await UnbanCoreAsync(ban.IpAddress, $"UNBLOCKED {ban.IpAddress} (overlaps the whitelist)", ct).ConfigureAwait(false);
             }
+        }
+    }
+
+    /// <summary>
+    /// Empties what the de-dup no longer needs. First in a pass, as an outage fails what comes later
+    /// and a flood of attackers would then grow these for as long as it lasts.
+    /// </summary>
+    private void TrimRdpDedup(DateTime now)
+    {
+        _rdpDedup.Trim(now);
+        if (now - _startedUtc > ReplayDedupLifetime)
+        {
+            _replayDedup.Clear();
+        }
+
+        var resets = _rdpDedup.TakeResets() + _replayDedup.TakeResets();
+        if (resets > 0)
+        {
+            _logger.LogWarning("The RDP de-dup reached its limit {Count} time(s) since the last pass and was emptied: attempts may have been counted twice, or an excluded one once.", resets);
         }
     }
 
@@ -150,6 +195,7 @@ public sealed partial class BanEngine
         await CheckDisarmCoreAsync(ct).ConfigureAwait(false);
 
         _fallbackCounts.Trim(now - settings.ExpireTime);
+        TrimRdpDedup(now);
         await RetryUnsavedBansAsync(now, ct).ConfigureAwait(false);
 
         var dueBans = await _store.GetDueBansAsync(now, ct).ConfigureAwait(false);
@@ -158,6 +204,14 @@ public sealed partial class BanEngine
         foreach (var ban in dueBans)
         {
             if (ban.IsPermanent || ban.ExpiresUtc > now)
+            {
+                continue;
+            }
+
+            // A newer ban the store has not taken yet is what counts for this address. It replaces
+            // the row when the store recovers; should it run out first, the retry above drops it
+            // and this row expires normally on that same pass.
+            if (_unsavedBans.ContainsKey(ban.IpAddress))
             {
                 continue;
             }
@@ -235,13 +289,6 @@ public sealed partial class BanEngine
             _logger.LogError(ex, "Housekeeping failed to prune old ban history.");
         }
 
-        // Trim the in-memory RDP de-dup window.
-        _rdpDedup.Trim(now);
-        if (now - _startedUtc > ReplayDedupLifetime)
-        {
-            _replayDedup.Clear();
-        }
-
         await HousekeepLogonsAsync(now, ct).ConfigureAwait(false);
 
         // Prune stale offense counts (review E-M2): no active ban and nothing within OffenseMemory.
@@ -264,7 +311,7 @@ public sealed partial class BanEngine
 
         if (activeForPrune is not null)
         {
-            await LiftWhitelistedRangeBansAsync(activeForPrune, ct).ConfigureAwait(false);
+            await LiftWhitelistedBansAsync(activeForPrune, ct).ConfigureAwait(false);
         }
 
         // Persist the buffered per-day statistics deltas.

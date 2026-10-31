@@ -107,7 +107,8 @@ public sealed partial class BanEngine
         }
 
         var (failures, complete) = await CountAllFailuresAsync(identity, now - rules.CompromiseWindow, ct).ConfigureAwait(false);
-        var ban = await GetActiveBanAsync(identity, now, ct).ConfigureAwait(false);
+        var (ban, banKnown) = await GetActiveBanAsync(identity, now, ct).ConfigureAwait(false);
+        complete &= banKnown;
         var suspicious = ban is not null || failures >= rules.CompromiseMinFailures;
         if (rules.CompromiseAlerts && suspicious)
         {
@@ -138,10 +139,11 @@ public sealed partial class BanEngine
     private bool ReplayMayBeRunning(DateTime now) =>
         _replayCutoffUtc < _startedUtc && now - _startedUtc < ReplaySettleDelay;
 
-    private async Task<BanEntry?> GetActiveBanAsync(string identity, DateTime now, CancellationToken ct)
+    /// <summary>The ban in force for this identity. <c>Known</c> is false when the store could not say.</summary>
+    private async Task<(BanEntry? Ban, bool Known)> GetActiveBanAsync(string identity, DateTime now, CancellationToken ct)
     {
-        var ban = _unsavedBans.GetValueOrDefault(identity) ?? await SafeGetBanAsync(identity, ct).ConfigureAwait(false);
-        return ban is not null && (ban.IsPermanent || ban.ExpiresUtc > now) ? ban : null;
+        var (ban, known) = await FindBanAsync(identity, ct).ConfigureAwait(false);
+        return (ban is not null && (ban.IsPermanent || ban.ExpiresUtc > now) ? ban : null, known);
     }
 
     /// <summary>Remembers how many failures led to a ban: the ban deletes the rows that say so.</summary>
@@ -287,7 +289,7 @@ public sealed partial class BanEngine
         var (afterLogon, _) = await CountAllFailuresAsync(replayed.Identity, loggedOn.AddTicks(1), ct).ConfigureAwait(false);
         var failures = upToNow - afterLogon;
 
-        var ban = await GetActiveBanAsync(replayed.Identity, now, ct).ConfigureAwait(false);
+        var (ban, _) = await GetActiveBanAsync(replayed.Identity, now, ct).ConfigureAwait(false);
         if (ban is not null || failures >= rules.CompromiseMinFailures)
         {
             await AlertCompromiseAsync(replayed.Logon, replayed.Ip, replayed.Identity, failures, ban, now, ct).ConfigureAwait(false);

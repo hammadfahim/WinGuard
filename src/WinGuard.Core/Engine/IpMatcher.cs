@@ -214,7 +214,8 @@ public sealed class IpMatcher
     /// Aggregates an IPv6 host address to its /N network prefix in canonical form
     /// (<c>2001:db8:1:2:3:4:5:6</c> with prefix 64 → <c>2001:db8:1:2::/64</c>). IPv4 inputs return
     /// <see langword="false"/> (IPv4 aggregation is not supported; attackers do not rotate /24s the
-    /// way IPv6 clients rotate /64 interface identifiers).
+    /// way IPv6 clients rotate /64 interface identifiers), and so does anything whose prefix would
+    /// take in NAT64: 64:ff9b::/96 is every IPv4 client of a translator, not one network.
     /// </summary>
     /// <param name="normalizedIp">A normalized IPv6 host address.</param>
     /// <param name="prefixLength">Target prefix length, 32..128.</param>
@@ -230,7 +231,13 @@ public sealed class IpMatcher
             return false;
         }
 
-        prefix = new IPNetwork(MaskAddress(address, prefixLength), prefixLength).ToString().ToLowerInvariant();
+        var network = new IPNetwork(MaskAddress(address, prefixLength), prefixLength);
+        if (Nat64Prefix.Contains(address) || network.Contains(Nat64Prefix.BaseAddress))
+        {
+            return false;
+        }
+
+        prefix = network.ToString().ToLowerInvariant();
         return true;
     }
 
@@ -282,14 +289,18 @@ public sealed class IpMatcher
                 return IsInternal(address.MapToIPv4().ToString());
             }
 
-            if (Nat64Prefix.Contains(address))
+            if (EmbeddedIpv4(address) is { } embedded)
             {
-                return IsInternal(new IPAddress(address.GetAddressBytes()[12..]).ToString());
+                return IsInternal(embedded.ToString());
             }
         }
 
         return false;
     }
+
+    /// <summary>The IPv4 client behind a NAT64 address (RFC 6052), null for any other address.</summary>
+    private static IPAddress? EmbeddedIpv4(IPAddress address) =>
+        Nat64Prefix.Contains(address) ? new IPAddress(address.GetAddressBytes()[12..]) : null;
 
     /// <summary>
     /// False for addresses that can never be a remote client and must not reach the ban list or
@@ -438,7 +449,10 @@ public sealed class IpMatcher
         return results;
     }
 
-    /// <summary>True when <paramref name="normalizedIp"/> falls inside any whitelist entry.</summary>
+    /// <summary>
+    /// True when <paramref name="normalizedIp"/> falls inside any whitelist entry. A NAT64 address also
+    /// matches by the IPv4 client it stands for, here and in <see cref="IsBlacklisted"/>.
+    /// </summary>
     public bool IsWhitelisted(string normalizedIp) => Matches(_whitelist, normalizedIp);
 
     /// <summary>True when <paramref name="normalizedIp"/> falls inside any blacklist entry.</summary>
@@ -500,9 +514,16 @@ public sealed class IpMatcher
             return false;
         }
 
+        var embedded = EmbeddedIpv4(address);
         foreach (var network in networks)
         {
-            if (network.BaseAddress is { } baseAddress && baseAddress.AddressFamily == address.AddressFamily && network.Contains(address))
+            if (network.BaseAddress is not { } baseAddress)
+            {
+                continue;
+            }
+
+            if ((baseAddress.AddressFamily == address.AddressFamily && network.Contains(address))
+                || (embedded is not null && baseAddress.AddressFamily == embedded.AddressFamily && network.Contains(embedded)))
             {
                 return true;
             }

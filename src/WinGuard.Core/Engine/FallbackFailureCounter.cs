@@ -26,6 +26,38 @@ internal sealed class FallbackFailureCounter
             ? failures.Count(failure => failure.TimestampUtc >= sinceUtc)
             : 0;
 
+    /// <summary>Failures held here for this IP and source from <paramref name="fromUtc"/> to <paramref name="toUtc"/>, both included.</summary>
+    public int Count(string ip, ProtocolSource source, DateTime fromUtc, DateTime toUtc) =>
+        _recent.TryGetValue(ip, out var failures)
+            ? failures.Count(failure => failure.Source == source && failure.TimestampUtc >= fromUtc && failure.TimestampUtc <= toUtc)
+            : 0;
+
+    /// <summary>
+    /// Takes back one failure of this IP and source within <paramref name="tolerance"/> of
+    /// <paramref name="timestampUtc"/>, the newest such one. False when none is held here.
+    /// </summary>
+    public bool TryRemoveNear(string ip, ProtocolSource source, DateTime timestampUtc, TimeSpan tolerance)
+    {
+        if (!_recent.TryGetValue(ip, out var failures))
+        {
+            return false;
+        }
+
+        var index = failures.FindLastIndex(failure => failure.Source == source && (failure.TimestampUtc - timestampUtc).Duration() <= tolerance);
+        if (index < 0)
+        {
+            return false;
+        }
+
+        failures.RemoveAt(index);
+        if (failures.Count == 0)
+        {
+            _recent.Remove(ip);
+        }
+
+        return true;
+    }
+
     /// <summary>Records one failure the store refused.</summary>
     public void Record(string ip, ProtocolSource source, DateTime timestampUtc)
     {

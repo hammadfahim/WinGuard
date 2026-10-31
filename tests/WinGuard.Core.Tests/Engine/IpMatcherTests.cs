@@ -6,6 +6,47 @@ namespace WinGuard.Core.Tests;
 /// <summary>Tests for IP/CIDR parsing, validation and list matching (PLAN.md §5).</summary>
 public sealed class IpMatcherTests
 {
+    // ---------- NAT64 ----------
+
+    [Theory]
+    [InlineData("64:ff9b::cb00:7101", 64)]
+    [InlineData("64:ff9b::cb00:7101", 96)]
+    [InlineData("64:ff9b::cb00:7101", 128)]
+    [InlineData("64:ff9b:0:1::5", 32)] // outside the /96, but this prefix would take it in
+    public void TryAggregateIpv6_never_takes_in_the_nat64_prefix(string ip, int prefixLength)
+    {
+        Assert.False(IpMatcher.TryAggregateIpv6(ip, prefixLength, out _));
+    }
+
+    [Fact]
+    public void TryAggregateIpv6_leaves_the_rest_of_64_ff9b_alone()
+    {
+        Assert.True(IpMatcher.TryAggregateIpv6("64:ff9b:0:1::5", 64, out var prefix));
+        Assert.Equal("64:ff9b:0:1::/64", prefix);
+    }
+
+    [Theory]
+    [InlineData("203.0.113.1", true)]
+    [InlineData("203.0.113.0/24", true)]
+    [InlineData("64:ff9b::/96", true)]
+    [InlineData("203.0.113.2", false)]
+    public void A_nat64_address_matches_the_lists_by_the_ipv4_client_inside_it(string entry, bool expected)
+    {
+        var matcher = new IpMatcher([entry], [entry]);
+
+        Assert.Equal(expected, matcher.IsWhitelisted("64:ff9b::cb00:7101"));
+        Assert.Equal(expected, matcher.IsBlacklisted("64:ff9b::cb00:7101"));
+    }
+
+    [Fact]
+    public void An_address_outside_the_nat64_prefix_does_not_match_by_its_last_bits()
+    {
+        var matcher = new IpMatcher(["203.0.113.1"], []);
+
+        Assert.False(matcher.IsWhitelisted("64:ff9b:0:1::cb00:7101"));
+        Assert.False(matcher.IsWhitelisted("2001:db8::cb00:7101"));
+    }
+
     // ---------- TryNormalize ----------
 
     [Theory]
