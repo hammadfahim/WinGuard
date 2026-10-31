@@ -93,12 +93,36 @@ public sealed partial class BanEngine
         }
     }
 
-    /// <summary>Saves bans the store refused earlier and lifts the ones that have run out meanwhile.</summary>
+    /// <summary>
+    /// Saves bans the store refused earlier and lifts the ones that have run out meanwhile. A blind
+    /// ban first gets merged with the row it was made without. Until the store can say what that
+    /// row is, the ban is neither saved nor lifted: both could only take something away from it.
+    /// </summary>
     private async Task RetryUnsavedBansAsync(DateTime now, CancellationToken ct)
     {
         var storeDown = false;
-        foreach (var ban in _unsavedBans.Values.ToList())
+        foreach (var held in _unsavedBans.Values.ToList())
         {
+            var ban = held;
+            if (_blindBans.Contains(ban.IpAddress))
+            {
+                if (storeDown)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    ban = SettleBlindBan(ban, await _store.GetBanAsync(ban.IpAddress, ct).ConfigureAwait(false), now);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+                {
+                    storeDown = true;
+                    _logger.LogWarning(ex, "Still cannot read the bans the unsaved ones were made without; they stay enforced on all ports.");
+                    continue;
+                }
+            }
+
             if (!ban.IsPermanent && ban.ExpiresUtc <= now)
             {
                 _unsavedBans.Remove(ban.IpAddress);

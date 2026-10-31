@@ -204,8 +204,25 @@ public sealed class FakeStore : IStore
         }
     }
 
+    /// <summary>When true, reading single bans and due bans throws, as a locked or corrupt database would.</summary>
+    public bool FailBanRead { get; set; }
+
+    /// <summary>
+    /// When set, <see cref="GetActiveBansAsync"/> leaves out what has expired by this clock, as
+    /// SqliteStore does with the wall clock. Null returns every row.
+    /// </summary>
+    public Func<DateTime>? ActiveClock { get; set; }
+
+    /// <summary>Runs at the start of <see cref="UpsertBanAsync"/>, with the token the engine passed.</summary>
+    public Action<CancellationToken>? BeforeUpsert { get; set; }
+
     public Task<BanEntry?> GetBanAsync(string ip, CancellationToken ct = default)
     {
+        if (FailBanRead)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
         lock (_gate)
         {
             BanReads++;
@@ -214,9 +231,9 @@ public sealed class FakeStore : IStore
     }
 
     /// <summary>
-    /// Returns every ban, including expired ones: the engine applies its own clock
-    /// (<c>TimeProvider</c>) to decide which bans are due, so the fake must not filter
-    /// using the wall clock.
+    /// Returns every ban, including expired ones, unless <see cref="ActiveClock"/> says otherwise:
+    /// the engine applies its own clock (<c>TimeProvider</c>) to decide which bans are due, so the
+    /// fake must not filter using the wall clock.
     /// </summary>
     public Task<IReadOnlyList<BanEntry>> GetActiveBansAsync(CancellationToken ct = default)
     {
@@ -227,7 +244,11 @@ public sealed class FakeStore : IStore
 
         lock (_gate)
         {
-            IReadOnlyList<BanEntry> result = _bans.Values.Select(Clone).ToList();
+            var nowUtc = ActiveClock?.Invoke();
+            IReadOnlyList<BanEntry> result = _bans.Values
+                .Where(b => nowUtc is null || b.IsPermanent || b.ExpiresUtc > nowUtc)
+                .Select(Clone)
+                .ToList();
             return Task.FromResult(result);
         }
     }
@@ -235,6 +256,11 @@ public sealed class FakeStore : IStore
     /// <summary>Due bans by the caller's clock (mirrors SqliteStore semantics).</summary>
     public Task<IReadOnlyList<BanEntry>> GetDueBansAsync(DateTime nowUtc, CancellationToken ct = default)
     {
+        if (FailBanRead)
+        {
+            throw new IOException("Simulated database failure.");
+        }
+
         lock (_gate)
         {
             IReadOnlyList<BanEntry> result = _bans.Values
@@ -247,6 +273,7 @@ public sealed class FakeStore : IStore
 
     public Task UpsertBanAsync(BanEntry ban, CancellationToken ct = default)
     {
+        BeforeUpsert?.Invoke(ct);
         ThrowIfFailingWrites();
         lock (_gate)
         {

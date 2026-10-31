@@ -60,6 +60,11 @@ public sealed partial class BanEngine
     // not lift them as orphans, and saved by housekeeping once the store recovers (under _gate).
     private readonly Dictionary<string, BanEntry> _unsavedBans = new(StringComparer.Ordinal);
 
+    // The unsaved bans made while the store could not say what it holds for the address. Its row may
+    // be stronger (permanent, other ports), so until housekeeping can merge them these stay on all
+    // ports and out of the store: a blind block or save could only take something away (under _gate).
+    private readonly HashSet<string> _blindBans = new(StringComparer.Ordinal);
+
     // Counts failures while the store refuses them (accessed under _gate).
     private readonly FallbackFailureCounter _fallbackCounts = new();
 
@@ -397,7 +402,7 @@ public sealed partial class BanEngine
             ForgetLogonState(normalized);
             var settings = _settingsAccessor();
             var now = NowUtc();
-            var existing = _unsavedBans.GetValueOrDefault(normalized) ?? await SafeGetBanAsync(normalized, ct).ConfigureAwait(false);
+            var (existing, rowKnown) = await FindBanAsync(normalized, ct).ConfigureAwait(false);
 
             // Re-banning an IP that is still banned (e.g. "promote to permanent") is not a new
             // offense; only a fresh ban moves the escalation tier.
@@ -433,6 +438,17 @@ public sealed partial class BanEngine
                     expiresUtc = isPermanent ? DateTime.MaxValue : existing.ExpiresUtc;
                     effectiveDuration = isPermanent ? null : expiresUtc - now;
                 }
+            }
+
+            // What the administrator spelled out stands whatever the store holds; the default does
+            // not, so it must not replace a row nobody could read.
+            if (permanent || requested is not null)
+            {
+                _blindBans.Remove(normalized);
+            }
+            else if (!rowKnown)
+            {
+                _blindBans.Add(normalized);
             }
 
             var ban = new BanEntry
@@ -601,8 +617,9 @@ public sealed partial class BanEngine
     /// </summary>
     private async Task UnbanCoreAsync(string normalized, string eventMessage, CancellationToken ct)
     {
-        var existing = _unsavedBans.GetValueOrDefault(normalized) ?? await SafeGetBanAsync(normalized, ct).ConfigureAwait(false);
+        var (existing, _) = await FindBanAsync(normalized, ct).ConfigureAwait(false);
         _unsavedBans.Remove(normalized);
+        _blindBans.Remove(normalized);
         _fallbackCounts.Remove(normalized);
         _failuresAtBan.Remove(normalized);
 
@@ -779,7 +796,9 @@ public sealed partial class BanEngine
             RecordDetection(failed.Source);
         }
 
-        var current = _unsavedBans.GetValueOrDefault(ip) ?? await SafeGetBanAsync(ip, ct).ConfigureAwait(false);
+        // A row that cannot be read is not a row that is not there: an attacker still gets banned
+        // during an outage, but as a blind ban, which can only add to whatever the row says.
+        var (current, rowKnown) = await FindBanAsync(ip, ct).ConfigureAwait(false);
         var now = NowUtc();
 
         // 3. Blacklist -> ensure a permanent ban.
@@ -789,6 +808,11 @@ public sealed partial class BanEngine
             {
                 await EnsureAllPortsAsync(current, ct).ConfigureAwait(false);
                 return;
+            }
+
+            if (!rowKnown)
+            {
+                _blindBans.Add(ip);
             }
 
             var offense = ComputeOffense(ip, current);
@@ -885,6 +909,11 @@ public sealed partial class BanEngine
             return;
         }
 
+        if (!rowKnown)
+        {
+            _blindBans.Add(ip);
+        }
+
         var expiresUtc = now + duration;
         var ban = new BanEntry
         {
@@ -899,7 +928,7 @@ public sealed partial class BanEngine
         };
 
         // Enforce first: a database problem must never leave an attacker unblocked.
-        var ports = PortProfiles.Resolve(ban.PortScope, settings);
+        var ports = EnforcedPorts(ban, settings);
         TryBlock(ip, ports);
         await SaveBanAsync(ban, ct).ConfigureAwait(false);
         _offenses.Set(ip, nextOffense, now);
@@ -971,9 +1000,15 @@ public sealed partial class BanEngine
         }
     }
 
-    /// <summary>Saves a ban already enforced in the firewall, keeping it in memory when the store refuses it.</summary>
+    /// <summary>Saves a ban already enforced in the firewall, keeping it in memory when the store refuses it or must not be trusted with it.</summary>
     private async Task SaveBanAsync(BanEntry ban, CancellationToken ct)
     {
+        if (_blindBans.Contains(ban.IpAddress))
+        {
+            _unsavedBans[ban.IpAddress] = ban;
+            return;
+        }
+
         try
         {
             await _store.UpsertBanAsync(ban, ct).ConfigureAwait(false);
@@ -1163,16 +1198,25 @@ public sealed partial class BanEngine
         ApplyBlocklist(whitelist);
     }
 
-    private async Task<BanEntry?> SafeGetBanAsync(string ip, CancellationToken ct)
+    /// <summary>
+    /// The ban of this address, the unsaved one first as it is the newer. <c>Known</c> is false when
+    /// the store could not be read: no ban is then all that can be said, not that there is none.
+    /// </summary>
+    private async Task<(BanEntry? Ban, bool Known)> FindBanAsync(string ip, CancellationToken ct)
     {
+        if (_unsavedBans.TryGetValue(ip, out var unsaved))
+        {
+            return (unsaved, true);
+        }
+
         try
         {
-            return await _store.GetBanAsync(ip, ct).ConfigureAwait(false);
+            return (await _store.GetBanAsync(ip, ct).ConfigureAwait(false), true);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             _logger.LogError(ex, "BanEngine failed to read the existing ban for {Ip}.", ip);
-            return null;
+            return (null, false);
         }
     }
 
