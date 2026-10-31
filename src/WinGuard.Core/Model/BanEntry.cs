@@ -21,6 +21,12 @@ public sealed class BanEntry
     public bool IsPermanent { get; set; }
 
     public string? Note { get; set; }
+
+    /// <summary>
+    /// Which engines' ports this ban blocks; see <see cref="Config.PortProfiles"/>. Null on a ban from
+    /// before port profiles, which follows the global BlockedPorts as it always did.
+    /// </summary>
+    public string? PortScope { get; set; }
 }
 
 /// <summary>How many times one IP (or IPv6 prefix) has offended, which picks its next ban tier.</summary>

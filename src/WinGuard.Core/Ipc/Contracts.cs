@@ -18,7 +18,8 @@ public static class PipeConstants
     /// <see cref="ServiceStatusDto.ProtocolVersion"/> so a GUI from another release can say so
     /// instead of misbehaving. v3: statistics + ban history + report-only. v4: BlockNow answers
     /// with the ban it recorded. v5: settings carry the detection rules, which a client that does
-    /// not know them would reset on save; disarm status, firewall policy prerequisites.
+    /// not know them would reset on save; disarm status, firewall policy prerequisites; bans report
+    /// their ports, status reports blocklist files.
     /// </summary>
     public const int ProtocolVersion = 5;
 }
@@ -96,6 +97,57 @@ public sealed class ServiceStatusDto
 
     /// <summary>When the break-glass window ends and enforcement resumes by itself; null when <see cref="Disarmed"/> is false.</summary>
     public DateTime? DisarmedUntilUtc { get; set; }
+
+    /// <summary>What the local blocklist files contributed.</summary>
+    public BlocklistStatusDto Blocklists { get; set; } = new();
+}
+
+/// <summary>The blocklist files as a whole. All counts are zero when none is configured.</summary>
+public sealed class BlocklistStatusDto
+{
+    /// <summary>Firewall entries taken from the files, after collapsing and the cap.</summary>
+    public int Loaded { get; set; }
+
+    /// <summary>Lines refused: not an IP or CIDR, or a prefix too broad to block.</summary>
+    public int Skipped { get; set; }
+
+    /// <summary>Entries left out because of the cap of <see cref="Defaults.MaxBlocklistEntries"/>.</summary>
+    public int Capped { get; set; }
+
+    public List<BlocklistFileStatusDto> Files { get; set; } = [];
+
+    public static BlocklistStatusDto From(BlocklistSnapshot snapshot) => new()
+    {
+        Loaded = snapshot.Entries.Count,
+        Skipped = snapshot.Skipped,
+        Capped = snapshot.Capped,
+        Files = snapshot.Files.Select(file => new BlocklistFileStatusDto
+        {
+            Path = file.Path,
+            Loaded = file.Loaded,
+            Skipped = file.Skipped,
+            LastLoadedUtc = file.LastLoadedUtc,
+            Problem = file.Problem,
+        }).ToList(),
+    };
+}
+
+/// <summary>One blocklist file.</summary>
+public sealed class BlocklistFileStatusDto
+{
+    public string Path { get; set; } = string.Empty;
+
+    /// <summary>Valid entries in the file when it was last read.</summary>
+    public int Loaded { get; set; }
+
+    /// <summary>Lines refused when it was last read.</summary>
+    public int Skipped { get; set; }
+
+    /// <summary>When it was last read successfully; null if it never was.</summary>
+    public DateTime? LastLoadedUtc { get; set; }
+
+    /// <summary>Why the file is not being read, in which case its last good entries stay in force.</summary>
+    public string? Problem { get; set; }
 }
 
 public sealed class EngineStatusDto
@@ -118,7 +170,10 @@ public sealed class BanDto
     public bool IsPermanent { get; set; }
     public string? Note { get; set; }
 
-    public static BanDto From(BanEntry b) => new()
+    /// <summary>The ports this ban blocks, e.g. <c>1433,3389</c>. Empty = all ports.</summary>
+    public string Ports { get; set; } = string.Empty;
+
+    public static BanDto From(BanEntry b, WinGuardSettings settings) => new()
     {
         IpAddress = b.IpAddress,
         Source = b.Source,
@@ -127,6 +182,7 @@ public sealed class BanDto
         OffenseCount = b.OffenseCount,
         IsPermanent = b.IsPermanent,
         Note = b.Note,
+        Ports = PortProfiles.Resolve(b.PortScope, settings).Text,
     };
 }
 

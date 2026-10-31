@@ -24,6 +24,13 @@ public sealed class IpMatcher
     private readonly List<IPNetwork> _whitelist = [];
     private readonly List<IPNetwork> _blacklist = [];
 
+    /// <summary>The networks <see cref="IsInternal"/> calls internal, as list entries.</summary>
+    public static IReadOnlyList<string> InternalRanges { get; } =
+    [
+        "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10", "198.18.0.0/15",
+        "::1/128", "fe80::/10", "fec0::/10", "fc00::/7",
+    ];
+
     /// <summary>
     /// Creates a matcher from raw list entries. Each entry may be a single IP or a CIDR.
     /// Entries that are not valid IP/CIDR tokens are silently ignored.
@@ -185,10 +192,10 @@ public sealed class IpMatcher
 
         if (TryNormalizeRange(value, out var range) && IsBannableRange(range))
         {
-            // Single-host CIDR forms collapse to the bare host identity.
+            // Single-host CIDR forms collapse to the bare host identity. An IPv6 /32 is no single host.
             var slash = range.IndexOf('/');
             if (int.TryParse(range[(slash + 1)..], NumberStyles.None, CultureInfo.InvariantCulture, out var prefix)
-                && (prefix == 32 || prefix == 128)
+                && prefix == (range.Contains(':') ? 128 : 32)
                 && TryNormalize(range[..slash], out var single))
             {
                 target = single;

@@ -95,6 +95,14 @@ public static class SettingsValidator
             }
         }
 
+        foreach (var path in settings.BlocklistFiles ?? [])
+        {
+            if (!string.IsNullOrWhiteSpace(path) && !LogFileTailer.IsLocalPath(path))
+            {
+                errors.Add($"Blocklist file '{path.Trim()}': network (UNC) and device paths are not allowed; use a path on a local drive.");
+            }
+        }
+
         return errors;
     }
 

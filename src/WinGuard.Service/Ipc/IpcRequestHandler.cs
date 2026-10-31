@@ -149,13 +149,15 @@ public sealed partial class IpcRequestHandler
             ReportOnly = settings.ReportOnly,
             Disarmed = disarmedUntil is not null,
             DisarmedUntilUtc = disarmedUntil,
+            Blocklists = BlocklistStatusDto.From(_engine.GetBlocklistStatus()),
         };
     }
 
     private async Task<List<BanDto>> ListBansAsync(CancellationToken ct)
     {
+        var settings = _settings.Current;
         var bans = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
-        return bans.Select(BanDto.From).ToList();
+        return bans.Select(ban => BanDto.From(ban, settings)).ToList();
     }
 
     private async Task<List<EventDto>> ListEventsAsync(ListEventsParams parameters, CancellationToken ct)
@@ -241,7 +243,7 @@ public sealed partial class IpcRequestHandler
         // The answer is what was recorded: the engine picks the duration when none is given and
         // caps the ones it is given.
         var ban = await _store.GetBanAsync(ip, ct).ConfigureAwait(false);
-        return IpcResponse.Success(request.Id, ban is null ? null : BanDto.From(ban));
+        return IpcResponse.Success(request.Id, ban is null ? null : BanDto.From(ban, _settings.Current));
     }
 
     private async Task<IpcResponse> WhitelistAddAsync(IpcRequest request, CancellationToken ct)

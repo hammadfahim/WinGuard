@@ -28,6 +28,9 @@ public static class Defaults
     /// <summary>Windows Firewall practical limit of addresses per rule; batch into WinGuard_Block_0001, ...</summary>
     public const int MaxAddressesPerRule = 1000;
 
+    /// <summary>Most firewall entries taken from blocklist files together: 50 rules of the size above.</summary>
+    public const int MaxBlocklistEntries = 50_000;
+
     public const string RuleNamePrefix = "WinGuard_Block_";
     public const string ServiceName = "WinGuardService";
     public const string ServiceDisplayName = "WinGuard Service";

@@ -85,7 +85,7 @@ public class SqliteMigrationTests
                 await check.OpenAsync();
                 await using var cmd = check.CreateCommand();
                 cmd.CommandText = "PRAGMA user_version;";
-                Assert.Equal(4L, (long)(await cmd.ExecuteScalarAsync())!);
+                Assert.Equal(5L, (long)(await cmd.ExecuteScalarAsync())!);
                 cmd.CommandText = "SELECT COUNT(*) FROM failed_logins WHERE raw IS NOT NULL;";
                 Assert.Equal(0L, (long)(await cmd.ExecuteScalarAsync())!);
             }
@@ -124,7 +124,7 @@ public class SqliteMigrationTests
                 Assert.Equal(2, (await store.GetOffenseCountsAsync()).Count);
             }
 
-            Assert.Equal(4L, await ReadUserVersionAsync(path));
+            Assert.Equal(5L, await ReadUserVersionAsync(path));
         }
         finally
         {
@@ -145,7 +145,7 @@ public class SqliteMigrationTests
 
             Assert.Empty(await store.GetOffenseCountsAsync());
             Assert.False((await store.GetAllSettingsAsync()).ContainsKey("offense_counts"));
-            Assert.Equal(4L, await ReadUserVersionAsync(path));
+            Assert.Equal(5L, await ReadUserVersionAsync(path));
         }
         finally
         {
@@ -162,12 +162,120 @@ public class SqliteMigrationTests
             await using var store = new SqliteStore(path, NullLogger<SqliteStore>.Instance);
 
             Assert.Empty(await store.GetOffenseCountsAsync());
-            Assert.Equal(4L, await ReadUserVersionAsync(path));
+            Assert.Equal(5L, await ReadUserVersionAsync(path));
         }
         finally
         {
             DeleteDirectory(Path.GetDirectoryName(path)!);
         }
+    }
+
+    [Fact]
+    public async Task A_version_4_ban_keeps_working_and_has_no_port_scope()
+    {
+        var path = await CreateVersion3DatabaseAsync(blob: null);
+        await SetUpBanRowAsync(path, version: 4);
+        try
+        {
+            await using (var store = new SqliteStore(path, NullLogger<SqliteStore>.Instance))
+            {
+                var ban = await store.GetBanAsync("203.0.113.5");
+
+                Assert.NotNull(ban);
+                Assert.Equal(ProtocolSource.MsSql, ban.Source);
+                Assert.Equal(2, ban.OffenseCount);
+                Assert.Equal("old", ban.Note);
+                Assert.Null(ban.PortScope); // follows BlockedPorts, as it always did
+                Assert.Single(await store.GetActiveBansAsync());
+                Assert.Single(await store.GetDueBansAsync(new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Utc)));
+            }
+
+            Assert.Equal(5L, await ReadUserVersionAsync(path));
+        }
+        finally
+        {
+            DeleteDirectory(Path.GetDirectoryName(path)!);
+        }
+    }
+
+    [Fact]
+    public async Task Opening_an_upgraded_database_again_adds_nothing()
+    {
+        var path = await CreateVersion3DatabaseAsync(blob: null);
+        await SetUpBanRowAsync(path, version: 4);
+        try
+        {
+            await using (var store = new SqliteStore(path, NullLogger<SqliteStore>.Instance))
+            {
+                await store.InitializeAsync();
+            }
+
+            // An interrupted upgrade: the column is there, the version says it is not.
+            await using (var interrupted = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString()))
+            {
+                await interrupted.OpenAsync();
+                await using var cmd = interrupted.CreateCommand();
+                cmd.CommandText = "PRAGMA user_version = 4;";
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            await using (var store = new SqliteStore(path, NullLogger<SqliteStore>.Instance))
+            {
+                Assert.NotNull(await store.GetBanAsync("203.0.113.5"));
+            }
+
+            Assert.Equal(5L, await ReadUserVersionAsync(path));
+        }
+        finally
+        {
+            DeleteDirectory(Path.GetDirectoryName(path)!);
+        }
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("*")]
+    [InlineData("MsSql\nRdp")]
+    [InlineData("Custom:a, b\nRdp")]
+    public async Task A_port_scope_round_trips_through_the_store(string? scope)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "winguard-mig-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            await using var store = new SqliteStore(Path.Combine(dir, "new.db"), NullLogger<SqliteStore>.Instance);
+            var ban = new BanEntry
+            {
+                IpAddress = "203.0.113.5",
+                BannedAtUtc = DateTime.UtcNow,
+                ExpiresUtc = DateTime.UtcNow.AddDays(1),
+                PortScope = "Rdp",
+            };
+            await store.UpsertBanAsync(ban);
+
+            ban.PortScope = scope; // an update has to carry it too
+            await store.UpsertBanAsync(ban);
+
+            Assert.Equal(scope, (await store.GetBanAsync(ban.IpAddress))!.PortScope);
+            Assert.Equal(scope, Assert.Single(await store.GetActiveBansAsync()).PortScope);
+        }
+        finally
+        {
+            DeleteDirectory(dir);
+        }
+    }
+
+    private static async Task SetUpBanRowAsync(string path, int version)
+    {
+        await using var legacy = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
+        await legacy.OpenAsync();
+        await using var cmd = legacy.CreateCommand();
+        cmd.CommandText = $"""
+            INSERT INTO bans (ip, source, banned_at_utc, expires_utc, offense_count, is_permanent, note)
+            VALUES ('203.0.113.5', 1, '2026-01-01T00:00:00.0000000Z', '2098-01-01T00:00:00.0000000Z', 2, 0, 'old');
+            PRAGMA user_version = {version};
+            """;
+        await cmd.ExecuteNonQueryAsync();
     }
 
     /// <summary>The schema as release 0.2.0 left it, with the offense counts in a settings row.</summary>

@@ -1,8 +1,10 @@
 using System.Runtime.Versioning;
 using System.Security.Principal;
 using Microsoft.Extensions.Logging.Abstractions;
+using WinGuard.Core.Abstractions;
 using WinGuard.Core.Engine;
 using WinGuard.Core.Firewall;
+using WinGuard.Core.Model;
 using Xunit;
 
 namespace WinGuard.Core.Tests;
@@ -49,6 +51,35 @@ public sealed class WindowsFirewallIntegrationTests
 
             firewall.ClearAll();
             Assert.DoesNotContain(TestIp, firewall.ListBlocked()!);
+        }
+        finally
+        {
+            firewall.ClearAll();
+        }
+    }
+
+    [ElevatedFact]
+    public void A_port_scoped_target_reads_back_moves_and_is_cleared()
+    {
+        var ports = PortSet.Parse(["3389", "50000-50100"]);
+        var firewall = new WindowsFirewall(NullLogger<WindowsFirewall>.Instance);
+        try
+        {
+            firewall.ClearAll();
+
+            firewall.Block(TestIp, ports);
+
+            // A fresh instance knows the family from the rule names alone.
+            var fresh = new WindowsFirewall(NullLogger<WindowsFirewall>.Instance);
+            Assert.Equal(new BlockedTarget(TestIp, ports.RuleFamily), Assert.Single(fresh.ListBlockedTargets()!));
+
+            fresh.Block(TestIp);
+            var widened = new WindowsFirewall(NullLogger<WindowsFirewall>.Instance);
+            Assert.Equal(new BlockedTarget(TestIp, string.Empty), Assert.Single(widened.ListBlockedTargets()!));
+
+            widened.Block(TestIp, ports);
+            Assert.True(widened.TryClearAll(out var error), error);
+            Assert.Empty(new WindowsFirewall(NullLogger<WindowsFirewall>.Instance).ListBlocked()!);
         }
         finally
         {

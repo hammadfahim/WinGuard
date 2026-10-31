@@ -304,15 +304,15 @@ public sealed partial class BanEngine
             return;
         }
 
-        List<string> expected;
-        IReadOnlyList<string>? blocked;
+        List<FirewallTarget> expected;
+        IReadOnlyList<BlockedTarget>? blocked;
         try
         {
             // Blacklisted CIDR entries are enforced as whole-subnet range rules: they belong to the
             // expected state just like active bans (a blacklisted range is blocked as a whole, not
             // address-by-address on first contact).
             expected = FirewallTargets(await _store.GetActiveBansAsync(ct).ConfigureAwait(false));
-            blocked = _firewall.ListBlocked();
+            blocked = _firewall.ListBlockedTargets();
         }
         catch (Exception ex)
         {
@@ -328,8 +328,10 @@ public sealed partial class BanEngine
             return;
         }
 
-        var expectedSet = new HashSet<string>(expected, StringComparer.OrdinalIgnoreCase);
-        var blockedSet = new HashSet<string>(blocked, StringComparer.OrdinalIgnoreCase);
+        // A target compares with its rule family, so one blocked on the wrong ports counts as both
+        // missing and orphaned. That is how a changed profile or BlockedPorts reaches active bans.
+        var expectedSet = expected.Select(target => (Address: target.Address.ToLowerInvariant(), target.Ports.RuleFamily)).ToHashSet();
+        var blockedSet = blocked.Select(target => (Address: target.Address.ToLowerInvariant(), target.RuleFamily)).ToHashSet();
         var missing = expectedSet.Count(target => !blockedSet.Contains(target));
         var orphans = blockedSet.Count(target => !expectedSet.Contains(target));
         if (missing == 0 && orphans == 0)
@@ -337,8 +339,8 @@ public sealed partial class BanEngine
             return;
         }
 
-        // Self-heal after a reboot or firewall reset, enforce newly blacklisted subnets and remove
-        // orphan rules, all in one go: one write per rule, not one per address.
+        // Self-heal after a reboot or firewall reset, enforce newly blacklisted subnets, apply changed
+        // port settings and remove orphan rules, all in one go: one write per rule, not one per address.
         _logger.LogInformation("Reconciling firewall rules: {Missing} target(s) missing, {Orphans} orphan(s).", missing, orphans);
         TryFirewall(() => _firewall.SyncRules(expected), "reconcile", $"{expected.Count} target(s)");
     }

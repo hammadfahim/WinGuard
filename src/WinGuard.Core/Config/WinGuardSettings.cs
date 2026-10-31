@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text.Json;
 using WinGuard.Core.Model;
 
@@ -65,7 +64,11 @@ public sealed class WinGuardSettings
     /// </summary>
     public string PrometheusTextfilePath { get; set; } = string.Empty;
 
-    /// <summary>Empty = block all ports (1 firewall condition per IP; cheapest). Non-empty = block only these ports.</summary>
+    /// <summary>
+    /// Empty = block all ports (1 firewall condition per IP; cheapest). Non-empty = block only these
+    /// ports. Applies to every engine without a profile of its own; manual bans, blacklist bans and
+    /// blacklisted ranges always block all ports.
+    /// </summary>
     public string[] BlockedPorts { get; set; } = [];
 
     public RdpSettings Rdp { get; set; } = new();
@@ -75,6 +78,12 @@ public sealed class WinGuardSettings
 
     /// <summary>Honeypot names, spraying, slow brute force and logon alerts; all off by default.</summary>
     public DetectionRuleSettings Rules { get; set; } = new();
+
+    /// <summary>
+    /// Local blocklist files (one IP or CIDR per line) blocked on all ports without waiting for a
+    /// failed login. Empty = off. WinGuard never fetches a list: the administrator downloads it.
+    /// </summary>
+    public string[] BlocklistFiles { get; set; } = [];
 
     /// <summary>Effective threshold for a protocol (per-protocol override wins).</summary>
     public int ThresholdFor(ProtocolSource source) => source switch
@@ -194,12 +203,21 @@ public sealed class WinGuardSettings
         var positiveTiers = BanTiers.Where(t => t > TimeSpan.Zero).Select(t => t > maxSane ? maxSane : t).ToArray();
         BanTiers = positiveTiers.Length > 0 ? positiveTiers : (TimeSpan[])Defaults.BanTiers.Clone();
 
-        // BlockedPorts tokens reach the firewall LocalPorts property: keep only valid "port" or
-        // "start-end" numeric forms so garbage can't break rule creation, and with it every block.
-        BlockedPorts = BlockedPorts
-            .Where(p => !string.IsNullOrWhiteSpace(p))
-            .Select(p => p.Trim())
-            .Where(IsPortOrPortRange)
+        // Port tokens reach the firewall LocalPorts property: keep only valid "port" or "start-end"
+        // numeric forms so garbage can't break rule creation, and with it every block.
+        BlockedPorts = NormalizePorts(BlockedPorts);
+        Rdp.BlockedPorts = NormalizePorts(Rdp.BlockedPorts);
+        MsSql.BlockedPorts = NormalizePorts(MsSql.BlockedPorts);
+        Ftp.BlockedPorts = NormalizePorts(Ftp.BlockedPorts);
+        Ftp.PassivePortRange = NormalizePorts([Ftp.PassivePortRange]).FirstOrDefault() ?? string.Empty;
+        foreach (var source in CustomSources.Where(source => source is not null))
+        {
+            source.BlockedPorts = NormalizePorts(source.BlockedPorts);
+        }
+
+        BlocklistFiles = (BlocklistFiles ?? [])
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => path.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
@@ -211,14 +229,12 @@ public sealed class WinGuardSettings
     private static TimeSpan? NormalizeWindow(TimeSpan? window, TimeSpan max) =>
         window is { } value && value > TimeSpan.Zero ? Min(value, max) : null;
 
-    private static bool IsPortOrPortRange(string token)
-    {
-        var ports = token.Split('-');
-        return ports.Length <= 2
-            && ushort.TryParse(ports[0], NumberStyles.None, CultureInfo.InvariantCulture, out var first)
-            && ushort.TryParse(ports[^1], NumberStyles.None, CultureInfo.InvariantCulture, out var last)
-            && first <= last;
-    }
+    private static string[] NormalizePorts(string?[]? ports) => (ports ?? [])
+        .Where(p => !string.IsNullOrWhiteSpace(p))
+        .Select(p => p!.Trim())
+        .Where(p => PortSet.TryParseRange(p, out _, out _))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
 
     private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;
 
@@ -235,6 +251,9 @@ public abstract class ProtocolSettings
 
     /// <summary>Overrides the global CountWindow when set.</summary>
     public TimeSpan? CountWindow { get; set; }
+
+    /// <summary>Ports a ban from this engine blocks. Empty = use the global BlockedPorts.</summary>
+    public string[] BlockedPorts { get; set; } = [];
 }
 
 public sealed class RdpSettings : ProtocolSettings
@@ -283,6 +302,13 @@ public sealed class FtpSettings : ProtocolSettings
     public TimeSpan PollInterval { get; set; } = Defaults.FtpPollInterval;
 
     public List<FtpLogSource> Sources { get; set; } = [];
+
+    /// <summary>
+    /// The FTP server's passive data range, e.g. 50000-50100, blocked along with
+    /// <see cref="ProtocolSettings.BlockedPorts"/> when that is set. Empty = none: every FTP server
+    /// picks its own range, so WinGuard never assumes one.
+    /// </summary>
+    public string PassivePortRange { get; set; } = string.Empty;
 }
 
 /// <summary>Generic log source (PLAN.md §4.5): tail files, match a regex with named groups.</summary>
@@ -297,6 +323,9 @@ public sealed class CustomLogSource
 
     /// <summary>Regex with named groups (?&lt;ipaddress&gt;...) and optional (?&lt;username&gt;...). A match = one failed login.</summary>
     public string Regex { get; set; } = string.Empty;
+
+    /// <summary>Ports a ban from this source blocks. Empty = use the global BlockedPorts.</summary>
+    public string[] BlockedPorts { get; set; } = [];
 }
 
 /// <summary>

@@ -366,6 +366,116 @@ public sealed class IpcRequestHandlerTests
     }
 
     [Fact]
+    public async Task A_blocklist_on_the_network_is_refused()
+    {
+        await using var h = await Harness.StartAsync();
+        var settings = await h.GetAsync<WinGuardSettings>(IpcMethods.GetSettings);
+        settings.BlocklistFiles = [@"\\fileserver\lists\drop.txt"];
+
+        var response = await h.CallAsync(IpcMethods.UpdateSettings, new UpdateSettingsParams { Settings = settings });
+
+        Assert.False(response.Ok);
+        Assert.Contains("UNC", response.Error);
+        Assert.Empty((await h.GetAsync<WinGuardSettings>(IpcMethods.GetSettings)).BlocklistFiles);
+    }
+
+    [Fact]
+    public async Task Port_profiles_round_trip_and_bans_report_their_ports()
+    {
+        await using var h = await Harness.StartAsync();
+        var settings = await h.GetAsync<WinGuardSettings>(IpcMethods.GetSettings);
+        settings.MsSql.BlockedPorts = ["1433", "bogus"];
+        settings.Ftp.PassivePortRange = "50000-50100";
+        settings.CustomSources.Add(new CustomLogSource { Name = "app", PathGlob = @"C:\logs\*.log", Regex = @"from (?<ipaddress>\S+)", BlockedPorts = ["8443"] });
+
+        var stored = await h.GetAsync<WinGuardSettings>(IpcMethods.UpdateSettings, new UpdateSettingsParams { Settings = settings });
+
+        Assert.Equal(["1433"], stored.MsSql.BlockedPorts);
+        Assert.Equal("50000-50100", stored.Ftp.PassivePortRange);
+        Assert.Equal(["8443"], Assert.Single(stored.CustomSources).BlockedPorts);
+
+        for (var i = 0; i < stored.ThresholdFor(ProtocolSource.MsSql); i++)
+        {
+            await h.Engine.ProcessAsync(new FailedLogin { IpAddress = "203.0.113.7", Source = ProtocolSource.MsSql, TimestampUtc = T0.UtcDateTime });
+        }
+
+        var ban = await h.GetAsync<BanDto>(IpcMethods.BlockNow, new BlockNowParams { Ip = "203.0.113.8" });
+        Assert.Equal(string.Empty, ban.Ports);
+        var bans = await h.GetAsync<List<BanDto>>(IpcMethods.ListBans);
+        Assert.Equal("1433", bans.Single(b => b.IpAddress == "203.0.113.7").Ports);
+        Assert.Equal(string.Empty, bans.Single(b => b.IpAddress == "203.0.113.8").Ports);
+    }
+
+    [Fact]
+    public async Task Status_reports_the_blocklist_files()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "winguard-ipc-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var path = Path.Combine(dir, "drop.txt");
+            await File.WriteAllTextAsync(path, "198.51.100.0/24\nnonsense\n");
+            await using var h = await Harness.StartAsync();
+            Assert.Empty((await h.GetAsync<ServiceStatusDto>(IpcMethods.GetStatus)).Blocklists.Files);
+
+            var settings = await h.GetAsync<WinGuardSettings>(IpcMethods.GetSettings);
+            settings.BlocklistFiles = [path];
+            await h.SendAsync(IpcMethods.UpdateSettings, new UpdateSettingsParams { Settings = settings });
+            await h.Engine.HousekeepOnceAsync();
+
+            var status = (await h.GetAsync<ServiceStatusDto>(IpcMethods.GetStatus)).Blocklists;
+            Assert.Equal(1, status.Loaded);
+            Assert.Equal(1, status.Skipped);
+            Assert.Equal(0, status.Capped);
+            var file = Assert.Single(status.Files);
+            Assert.Equal(path, file.Path);
+            Assert.Equal(1, file.Loaded);
+            Assert.Equal(1, file.Skipped);
+            Assert.Equal(T0.UtcDateTime, file.LastLoadedUtc);
+            Assert.Null(file.Problem);
+
+            File.Delete(path);
+            await h.Engine.HousekeepOnceAsync();
+
+            status = (await h.GetAsync<ServiceStatusDto>(IpcMethods.GetStatus)).Blocklists;
+            Assert.Equal(1, status.Loaded);
+            Assert.NotNull(Assert.Single(status.Files).Problem);
+            Assert.Contains("198.51.100.0/24", h.Firewall.Blocked);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Whitelisting_an_address_releases_it_from_a_blocklist_right_away()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "winguard-ipc-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var path = Path.Combine(dir, "drop.txt");
+            await File.WriteAllTextAsync(path, "198.51.100.0/30\n");
+            await using var h = await Harness.StartAsync();
+            var settings = await h.GetAsync<WinGuardSettings>(IpcMethods.GetSettings);
+            settings.BlocklistFiles = [path];
+            await h.SendAsync(IpcMethods.UpdateSettings, new UpdateSettingsParams { Settings = settings });
+            await h.Engine.HousekeepOnceAsync();
+            Assert.Contains("198.51.100.0/30", h.Firewall.Blocked);
+
+            await h.SendAsync(IpcMethods.WhitelistAdd, new ListValueParams { Value = "198.51.100.1" });
+
+            Assert.DoesNotContain("198.51.100.0/30", h.Firewall.Blocked);
+            Assert.DoesNotContain("198.51.100.1", h.Firewall.Blocked);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Events_are_listed_newest_first_and_by_cursor()
     {
         await using var h = await Harness.StartAsync();
