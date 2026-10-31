@@ -165,6 +165,25 @@ public sealed partial class BanEngine
         }
     }
 
+    /// <summary>
+    /// Empties what the de-dup no longer needs. First in a pass, as an outage fails what comes later
+    /// and a flood of attackers would then grow these for as long as it lasts.
+    /// </summary>
+    private void TrimRdpDedup(DateTime now)
+    {
+        _rdpDedup.Trim(now);
+        if (now - _startedUtc > ReplayDedupLifetime)
+        {
+            _replayDedup.Clear();
+        }
+
+        var resets = _rdpDedup.TakeResets() + _replayDedup.TakeResets();
+        if (resets > 0)
+        {
+            _logger.LogWarning("The RDP de-dup reached its limit {Count} time(s) since the last pass and was emptied: attempts may have been counted twice, or an excluded one once.", resets);
+        }
+    }
+
     private async Task HousekeepCoreAsync(bool forceReconcile, CancellationToken ct)
     {
         var settings = _settingsAccessor();
@@ -174,6 +193,7 @@ public sealed partial class BanEngine
         await CheckDisarmCoreAsync(ct).ConfigureAwait(false);
 
         _fallbackCounts.Trim(now - settings.ExpireTime);
+        TrimRdpDedup(now);
         await RetryUnsavedBansAsync(now, ct).ConfigureAwait(false);
 
         var dueBans = await _store.GetDueBansAsync(now, ct).ConfigureAwait(false);
@@ -265,13 +285,6 @@ public sealed partial class BanEngine
         catch (Exception ex)
         {
             _logger.LogError(ex, "Housekeeping failed to prune old ban history.");
-        }
-
-        // Trim the in-memory RDP de-dup window.
-        _rdpDedup.Trim(now);
-        if (now - _startedUtc > ReplayDedupLifetime)
-        {
-            _replayDedup.Clear();
         }
 
         await HousekeepLogonsAsync(now, ct).ConfigureAwait(false);

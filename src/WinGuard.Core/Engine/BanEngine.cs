@@ -65,6 +65,12 @@ public sealed partial class BanEngine
     // ports and out of the store: a blind block or save could only take something away (under _gate).
     private readonly HashSet<string> _blindBans = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// How many unsaved bans are held at most, so a flood of attackers during a long outage cannot
+    /// grow memory without limit. Past that the one closest to its end goes, and that is logged.
+    /// </summary>
+    internal int MaxUnsavedBans { get; set; } = 50_000;
+
     // Counts failures while the store refuses them (accessed under _gate).
     private readonly FallbackFailureCounter _fallbackCounts = new();
 
@@ -1005,7 +1011,7 @@ public sealed partial class BanEngine
     {
         if (_blindBans.Contains(ban.IpAddress))
         {
-            _unsavedBans[ban.IpAddress] = ban;
+            HoldUnsavedBan(ban);
             return;
         }
 
@@ -1019,14 +1025,33 @@ public sealed partial class BanEngine
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             // The service is stopping with the block in place: the stop pass saves it.
-            _unsavedBans[ban.IpAddress] = ban;
+            HoldUnsavedBan(ban);
             throw;
         }
         catch (Exception ex)
         {
-            _unsavedBans[ban.IpAddress] = ban;
+            HoldUnsavedBan(ban);
             _logger.LogError(ex, "Could not save the ban of {Ip}; it stays enforced and will be saved when the store recovers.", ban.IpAddress);
         }
+    }
+
+    /// <summary>Keeps a ban the store does not have yet. At the limit the ban closest to its end makes room, and that is logged.</summary>
+    private void HoldUnsavedBan(BanEntry ban)
+    {
+        if (!_unsavedBans.ContainsKey(ban.IpAddress) && _unsavedBans.Count >= MaxUnsavedBans)
+        {
+            var dropped = _unsavedBans.Values.MinBy(held => held.ExpiresUtc)!;
+            _unsavedBans.Remove(dropped.IpAddress);
+            _blindBans.Remove(dropped.IpAddress);
+            _logger.LogError(
+                "Holding {Limit} unsaved bans: dropped the one of {Ip} (ends {Expires:u}) for {New}. Its firewall rule goes at the next reconcile unless the store has a ban for it.",
+                MaxUnsavedBans,
+                dropped.IpAddress,
+                dropped.ExpiresUtc,
+                ban.IpAddress);
+        }
+
+        _unsavedBans[ban.IpAddress] = ban;
     }
 
     // ---- detection statistics ----

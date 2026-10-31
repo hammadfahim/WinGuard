@@ -1,4 +1,5 @@
 using System.Reflection;
+using Microsoft.Extensions.Logging;
 using WinGuard.Core.Config;
 using WinGuard.Core.Engine;
 using WinGuard.Core.Model;
@@ -421,5 +422,145 @@ public sealed class BanEngineResilienceTests
         var row = (await h.Store.GetBanAsync(Attacker))!;
         Assert.False(row.IsPermanent);
         Assert.Equal(T0.UtcDateTime.AddHours(1), row.ExpiresUtc);
+    }
+
+    // ---------- the unsaved bans and the RDP de-dup stay bounded ----------
+
+    [Fact]
+    public async Task At_its_limit_the_unsaved_ban_closest_to_its_end_goes_and_that_is_logged()
+    {
+        var store = new FakeStore();
+        var firewall = new FakeFirewall();
+        var logger = new RecordingLogger();
+        var settings = new WinGuardSettings { HousekeepingInterval = TimeSpan.FromHours(6) };
+        var engine = new BanEngine(store, firewall, () => settings, logger, new FakeTimeProvider(T0)) { MaxUnsavedBans = 2 };
+        await engine.StartAsync(CancellationToken.None);
+
+        store.FailWrites = true;
+        await engine.BanNowAsync("203.0.113.1", null, permanent: true, null);
+        await engine.BanNowAsync("203.0.113.2", TimeSpan.FromHours(1), permanent: false, null);
+        await engine.BanNowAsync("203.0.113.3", TimeSpan.FromHours(2), permanent: false, null);
+
+        Assert.Contains(logger.Lines, line => line.Level == LogLevel.Error && line.Text.Contains("dropped the one of 203.0.113.2", StringComparison.Ordinal));
+
+        store.FailWrites = false;
+        await engine.HousekeepOnceAsync();
+        await engine.StopAsync();
+
+        Assert.Equal(["203.0.113.1", "203.0.113.3"], (await store.GetActiveBansAsync()).Select(ban => ban.IpAddress).Order(StringComparer.Ordinal));
+        Assert.DoesNotContain("203.0.113.2", firewall.Blocked);
+    }
+
+    [Fact]
+    public void The_dedup_empties_itself_at_its_limit_and_reports_it_once()
+    {
+        var dedup = new RdpDeduplicator(maxTrackedIps: 2);
+        var at = T0.UtcDateTime;
+
+        dedup.IsDuplicateAndRecord("203.0.113.1", "4625", at);
+        dedup.IsDuplicateAndRecord("203.0.113.2", "4625", at);
+        Assert.Equal(0, dedup.TakeResets());
+
+        dedup.IsDuplicateAndRecord("203.0.113.3", "4625", at);
+
+        Assert.Equal(1, dedup.TrackedIps);
+        Assert.Equal(1, dedup.TakeResets());
+        Assert.Equal(0, dedup.TakeResets());
+    }
+
+    [Fact]
+    public void At_its_limit_the_dedup_drops_what_is_stale_first()
+    {
+        var dedup = new RdpDeduplicator(maxTrackedIps: 2);
+        var at = T0.UtcDateTime;
+
+        dedup.IsDuplicateAndRecord("203.0.113.1", "4625", at);
+        dedup.IsDuplicateAndRecord("203.0.113.2", "4625", at.AddSeconds(30));
+        dedup.IsDuplicateAndRecord("203.0.113.3", "4625", at.AddSeconds(31));
+
+        Assert.Equal(2, dedup.TrackedIps);
+        Assert.Equal(0, dedup.TakeResets());
+    }
+
+    [Fact]
+    public void The_replay_dedup_is_bounded_too()
+    {
+        var dedup = new RdpDeduplicator(trimByEventTime: false, maxTrackedIps: 2);
+        var at = T0.UtcDateTime;
+
+        foreach (var ip in new[] { "203.0.113.1", "203.0.113.2", "203.0.113.3" })
+        {
+            dedup.RecordExcluded(ip, "4625", at);
+        }
+
+        Assert.Equal(1, dedup.TrackedIps);
+        Assert.Equal(1, dedup.TakeResets());
+    }
+
+    private static readonly FieldInfo RdpDedupField =
+        typeof(BanEngine).GetField("_rdpDedup", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+    [Fact]
+    public async Task An_outage_does_not_stop_housekeeping_from_trimming_the_dedup()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        Locked(h, true);
+        for (var i = 1; i <= 3; i++)
+        {
+            await h.ProcessAsync(h.Fail($"203.0.113.{i}", ProtocolSource.Rdp, detector: "140"));
+        }
+
+        var dedup = (RdpDeduplicator)RdpDedupField.GetValue(h.Engine)!;
+        Assert.Equal(3, dedup.TrackedIps);
+
+        h.Time.Advance(TimeSpan.FromSeconds(15));
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Equal(0, dedup.TrackedIps);
+    }
+
+    [Fact]
+    public async Task Housekeeping_logs_that_the_dedup_reached_its_limit()
+    {
+        var store = new FakeStore();
+        var logger = new RecordingLogger();
+        var settings = new WinGuardSettings { HousekeepingInterval = TimeSpan.FromHours(6) };
+        var time = new FakeTimeProvider(T0);
+        var engine = new BanEngine(store, new FakeFirewall(), () => settings, logger, time);
+        await engine.StartAsync(CancellationToken.None);
+        RdpDedupField.SetValue(engine, new RdpDeduplicator(maxTrackedIps: 1));
+
+        foreach (var ip in new[] { "203.0.113.1", "203.0.113.2" })
+        {
+            await engine.ProcessAsync(new FailedLogin { IpAddress = ip, Source = ProtocolSource.Rdp, Detector = "140", TimestampUtc = T0.UtcDateTime });
+        }
+
+        await engine.HousekeepOnceAsync();
+        await engine.StopAsync();
+
+        Assert.Contains(logger.Lines, line => line.Level == LogLevel.Warning && line.Text.Contains("de-dup reached its limit", StringComparison.Ordinal));
+    }
+
+    private sealed class RecordingLogger : ILogger<BanEngine>
+    {
+        private readonly object _gate = new();
+        private readonly List<(LogLevel Level, string Text)> _lines = [];
+
+        public IReadOnlyList<(LogLevel Level, string Text)> Lines
+        {
+            get { lock (_gate) { return _lines.ToList(); } }
+        }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            lock (_gate)
+            {
+                _lines.Add((logLevel, formatter(state, exception)));
+            }
+        }
     }
 }
