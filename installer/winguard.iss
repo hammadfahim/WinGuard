@@ -5,7 +5,7 @@
 
 #define MyAppName "WinGuard"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.0"
+  #define MyAppVersion "0.3.0"
 #endif
 #define MyAppPublisher "WinGuard contributors"
 #define MyAppUrl "https://github.com/hammadfahim/WinGuard"

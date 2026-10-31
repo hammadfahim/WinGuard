@@ -5,6 +5,8 @@ All notable changes to WinGuard are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-31
+
 ### Added
 
 - **Per-engine port profiles**: ban an attacker on the attacked service's ports only, with presets
