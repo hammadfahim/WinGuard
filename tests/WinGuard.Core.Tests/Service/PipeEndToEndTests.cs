@@ -479,7 +479,23 @@ public sealed class PipeEndToEndTests
                 },
                 identify: identify);
             await service._server.StartAsync(CancellationToken.None);
+            await WaitUntilListeningAsync(service.PipeName);
             return service;
+        }
+
+        /// <summary>
+        /// The accept loop runs on the thread pool, so on a busy machine a client can use up its
+        /// two-second connect before the pipe exists. Listing pipes connects to none of them, so
+        /// tests that count clients or identity checks see only their own.
+        /// </summary>
+        private static async Task WaitUntilListeningAsync(string pipeName)
+        {
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+            while (!Directory.EnumerateFiles(@"\\.\pipe\").Any(path => string.Equals(Path.GetFileName(path), pipeName, StringComparison.OrdinalIgnoreCase)))
+            {
+                Assert.True(DateTime.UtcNow < deadline, "The test service never started listening.");
+                await Task.Delay(20);
+            }
         }
 
         public async ValueTask DisposeAsync()
