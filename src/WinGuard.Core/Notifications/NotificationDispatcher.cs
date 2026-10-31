@@ -41,6 +41,9 @@ public static class WinGuardEventIds
     /// <summary>Notifications were dropped by the rate limit or a full queue.</summary>
     public const int NotificationsSuppressed = 1006;
 
+    /// <summary>A logon succeeded from an address with recent failures or an active ban.</summary>
+    public const int PossibleCompromise = 1007;
+
     /// <summary>Break-glass: enforcement was disarmed and the firewall rules removed.</summary>
     public const int Disarmed = 1020;
 
@@ -60,6 +63,7 @@ public static class WinGuardEventIds
     public const int OtherInformation = 1902;
 
     internal const string SuppressedPrefix = "SUPPRESSED ";
+    internal const string CompromisePrefix = "POSSIBLE COMPROMISE: ";
     internal const string DisarmedPrefix = "DISARMED ";
     internal const string RearmedPrefix = "REARMED ";
     internal const string DisarmRefusedPrefix = "DISARM REFUSED ";
@@ -106,6 +110,11 @@ public static class WinGuardEventIds
         if (message.StartsWith(SuppressedPrefix, StringComparison.Ordinal))
         {
             return NotificationsSuppressed;
+        }
+
+        if (message.StartsWith(CompromisePrefix, StringComparison.Ordinal))
+        {
+            return PossibleCompromise;
         }
 
         if (message.StartsWith(DisarmedPrefix, StringComparison.Ordinal))
@@ -760,6 +769,9 @@ public sealed class WindowsEventLogWriter : IEventPublisher
     // cached for the process lifetime (0 = unknown, 1 = ready, 2 = failed).
     private int _sourceState;
 
+    // 1 while writes fail. An outage is reported when it starts and when it ends.
+    private int _writesFailing;
+
     /// <summary>Creates the writer.</summary>
     /// <param name="logger">Diagnostic logger.</param>
     public WindowsEventLogWriter(ILogger logger)
@@ -790,23 +802,13 @@ public sealed class WindowsEventLogWriter : IEventPublisher
             return;
         }
 
+        if (_sink is null && !EnsureSource())
+        {
+            return;
+        }
+
         try
         {
-            if (_sink is null && Volatile.Read(ref _sourceState) == 0)
-            {
-                if (!System.Diagnostics.EventLog.SourceExists(SourceName))
-                {
-                    System.Diagnostics.EventLog.CreateEventSource(SourceName, "Application");
-                    _logger.LogInformation("Created the '{Source}' event source in the Application log.", SourceName);
-                }
-
-                Volatile.Write(ref _sourceState, 1);
-            }
-            else if (Volatile.Read(ref _sourceState) == 2)
-            {
-                return;
-            }
-
             var entryType = logEvent.Level switch
             {
                 LogEventLevel.Error => System.Diagnostics.EventLogEntryType.Error,
@@ -824,12 +826,49 @@ public sealed class WindowsEventLogWriter : IEventPublisher
             {
                 System.Diagnostics.EventLog.WriteEntry(SourceName, message, entryType, eventId);
             }
+
+            if (Interlocked.Exchange(ref _writesFailing, 0) == 1)
+            {
+                _logger.LogInformation("Writing to the Windows Application event log works again.");
+            }
+        }
+        catch (Exception ex)
+        {
+            // A full log says nothing about the next event: a SIEM depends on this output, so one
+            // failed write must not end it. Each event simply tries again.
+            if (Interlocked.Exchange(ref _writesFailing, 1) == 0)
+            {
+                _logger.LogWarning(ex, "Could not write to the Windows Application event log. Not reported again until it works.");
+            }
+        }
+    }
+
+    /// <summary>True when the source is there. Without one nothing can be written, so that ends the output for this run.</summary>
+    private bool EnsureSource()
+    {
+        var state = Volatile.Read(ref _sourceState);
+        if (state != 0)
+        {
+            return state == 1;
+        }
+
+        try
+        {
+            if (!System.Diagnostics.EventLog.SourceExists(SourceName))
+            {
+                System.Diagnostics.EventLog.CreateEventSource(SourceName, "Application");
+                _logger.LogInformation("Created the '{Source}' event source in the Application log.", SourceName);
+            }
+
+            Volatile.Write(ref _sourceState, 1);
+            return true;
         }
         catch (Exception ex)
         {
             // A locked-down Application log must never break delivery; complain once and stop.
             Volatile.Write(ref _sourceState, 2);
-            _logger.LogWarning(ex, "Could not write to the Windows Application event log; Windows Event Log output is disabled for this run.");
+            _logger.LogWarning(ex, "Could not set up the Windows Application event log source; Windows Event Log output is disabled for this run.");
+            return false;
         }
     }
 

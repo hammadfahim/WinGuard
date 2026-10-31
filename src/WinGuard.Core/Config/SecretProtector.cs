@@ -273,6 +273,7 @@ public sealed class SettingsSecrets
         var sealedCopy = settings.Clone();
         var next = new Dictionary<string, FieldState>(StringComparer.Ordinal);
         var undecryptable = new List<string>();
+        var tiedToThisAccount = new List<string>();
         foreach (var field in Fields)
         {
             var value = field.Get(settings) ?? string.Empty;
@@ -285,13 +286,21 @@ public sealed class SettingsSecrets
             {
                 undecryptable.Add(field.Name);
             }
+
+            if (!ReferenceEquals(state, current) && SecretValue.IsProtected(state.Raw) && !_protector.RunsAsServiceAccount)
+            {
+                tiedToThisAccount.Add(field.Name);
+            }
         }
 
-        return new SealedSettings(sealedCopy, () =>
-        {
-            _stored = next;
-            Undecryptable = undecryptable;
-        });
+        return new SealedSettings(
+            sealedCopy,
+            () =>
+            {
+                _stored = next;
+                Undecryptable = undecryptable;
+            },
+            tiedToThisAccount);
     }
 
     private FieldState SealField(string value, FieldState current)
@@ -333,4 +342,8 @@ public sealed class SettingsSecrets
 /// <summary>Settings ready to store, and what to do once the store has them.</summary>
 /// <param name="Settings">The copy to serialize.</param>
 /// <param name="Commit">Call after the store accepted the copy.</param>
-public sealed record SealedSettings(WinGuardSettings Settings, Action Commit);
+/// <param name="TiedToThisAccount">
+/// New secrets encrypted by a <c>--console</c> run. DPAPI cannot encrypt for another account, so this
+/// administrator can read them and the Windows service cannot.
+/// </param>
+public sealed record SealedSettings(WinGuardSettings Settings, Action Commit, IReadOnlyList<string> TiedToThisAccount);

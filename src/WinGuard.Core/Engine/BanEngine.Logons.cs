@@ -2,6 +2,7 @@ using System.Net;
 using Microsoft.Extensions.Logging;
 using WinGuard.Core.Config;
 using WinGuard.Core.Model;
+using WinGuard.Core.Notifications;
 
 namespace WinGuard.Core.Engine;
 
@@ -166,7 +167,7 @@ public sealed partial class BanEngine
 
         var attempts = failures + (ban is not null && _failuresAtBan.TryGetValue(identity, out var atBan) ? atBan.Failures : 0);
         var user = DisplayUser(logon.UserName);
-        var message = $"POSSIBLE COMPROMISE: {user} logged on from {ip} after {attempts} failed attempt(s)";
+        var message = $"{WinGuardEventIds.CompromisePrefix}{user} logged on from {ip} after {attempts} failed attempt(s)";
         _logger.LogWarning("{Message}", message);
 
         await AddBanHistoryCoreAsync(new BanHistoryEntry
