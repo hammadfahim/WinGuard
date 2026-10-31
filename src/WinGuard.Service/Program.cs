@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Principal;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -22,6 +23,8 @@ namespace WinGuard.Service;
 ///   <item><c>--install</c> — register the service via <c>sc.exe</c> (delayed-auto, description,
 ///   restart-on-failure) and start it.</item>
 ///   <item><c>--uninstall</c> — stop and delete the service.</item>
+///   <item><c>--harden-data</c> — hidden, for the setup: secure the data folder (exit 3 when
+///   something had to be moved aside).</item>
 ///   <item><c>--console</c> — run the host in the current console.</item>
 ///   <item><c>--clear-firewall</c> — delete every <c>WinGuard_Block_*</c> rule and exit 0.</item>
 ///   <item><c>--disarm</c> / <c>--rearm</c> — break-glass: stop enforcing for a bounded time, and end
@@ -46,6 +49,8 @@ internal static class Program
                         return InstallService();
                     case "--uninstall":
                         return UninstallService();
+                    case "--harden-data":
+                        return HardenDataFolder();
                     case "--clear-firewall":
                         return ClearFirewall();
                     case "--disarm":
@@ -257,10 +262,9 @@ internal static class Program
 
         // A portable install gets the same data-folder protection as the setup, before anything
         // runs as LocalSystem on top of a folder a standard user may have prepared.
-        if (SecureDataFolder(Defaults.DataFolder) is { } problem)
+        if (Report(new DataFolderHardener().Harden(Defaults.DataFolder)) == ExitFailure)
         {
-            Console.Error.WriteLine($"Failed to secure the data folder: {problem}");
-            return 1;
+            return ExitFailure;
         }
 
         // The path is passed WITH its quotes so the stored ImagePath is quoted; an unquoted path
@@ -357,63 +361,54 @@ internal static class Program
         return 0;
     }
 
+    /// <summary>
+    /// The hidden verb the setup runs, from a copy of this program it unpacks first: the installed
+    /// one may be an older version, or not there at all. A portable <c>--install</c> does the same
+    /// thing itself, so the two cannot drift apart. Takes no path: the one folder it is for is the
+    /// one the service uses.
+    /// </summary>
+    private static int HardenDataFolder()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
+        {
+            Console.Error.WriteLine("Securing the data folder needs an elevated prompt.");
+            return ExitFailure;
+        }
+
+        return Report(new DataFolderHardener().Harden(Defaults.DataFolder));
+    }
+
+    /// <summary>Says what happened; the setup shows this text and goes by the exit code.</summary>
+    internal static int Report(HardeningReport report)
+    {
+        foreach (var item in report.Quarantined)
+        {
+            Console.WriteLine($"Moved aside, not deleted: {item.OriginalPath} -> {item.MovedTo} ({item.Reason}).");
+        }
+
+        if (report.Failure is not null)
+        {
+            Console.Error.WriteLine($"Failed to secure the data folder: {report.Failure}");
+            return ExitFailure;
+        }
+
+        return report.Quarantined.Count > 0 ? ExitSecuredWithContentMovedAside : 0;
+    }
+
     private const int ServiceStopWaitSeconds = 30;
+
+    private const int ExitFailure = 1;
+
+    /// <summary>The data folder is secure, and something an administrator should look at was moved out of it.</summary>
+    private const int ExitSecuredWithContentMovedAside = 3;
 
     /// <summary>Full path, so a file named sc.exe next to this executable can never be run instead.</summary>
     private static string ScExe => Path.Combine(Environment.SystemDirectory, "sc.exe");
 
-    private static string IcaclsExe => Path.Combine(Environment.SystemDirectory, "icacls.exe");
-
     /// <summary>Reads <c>sc query</c>: a service that no longer exists has stopped too.</summary>
     internal static bool IsServiceStopped(int exitCode, string output) =>
         exitCode != 0 || output.Contains("STOPPED", StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>
-    /// The icacls calls that leave a folder to SYSTEM + Administrators alone, whoever created it
-    /// (same steps as the installer). Ownership goes first, because an owner can always grant
-    /// itself access again; only then can the ACLs be replaced, and explicit entries have to be
-    /// reset because <c>/grant:r</c> leaves those of other accounts in place. The second ownership
-    /// pass also catches what was created meanwhile. The accounts are given as SIDs because their
-    /// names are localized. No <c>/C</c>: with it icacls exits 0 even when it failed.
-    /// </summary>
-    internal static IReadOnlyList<string[]> DataFolderHardeningSteps(string folder) =>
-    [
-        [folder, "/setowner", "*S-1-5-32-544"],
-        [folder, "/reset"],
-        [folder, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"],
-        [folder, "/setowner", "*S-1-5-32-544", "/T", "/L"],
-        [Path.Combine(folder, "*"), "/reset", "/T", "/L"],
-    ];
-
-    /// <summary>Applies <see cref="DataFolderHardeningSteps"/>; returns why it could not, or null.</summary>
-    internal static string? SecureDataFolder(string folder)
-    {
-        try
-        {
-            var info = new DirectoryInfo(folder);
-            if (info.Exists && info.Attributes.HasFlag(FileAttributes.ReparsePoint))
-            {
-                // Hardening would change the link's target, and the service would write through it.
-                return $"{folder} is a link, not a folder. Remove it and try again.";
-            }
-
-            Directory.CreateDirectory(folder);
-            foreach (var step in DataFolderHardeningSteps(folder))
-            {
-                var result = RunProcess(IcaclsExe, step);
-                if (result.ExitCode != 0)
-                {
-                    return result.Output;
-                }
-            }
-
-            return null;
-        }
-        catch (Exception ex)
-        {
-            return ex.Message;
-        }
-    }
 
     internal static (int ExitCode, string Output) RunProcess(string fileName, params string[] arguments)
     {

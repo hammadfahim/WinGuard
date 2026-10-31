@@ -41,9 +41,21 @@ Public disclosure is coordinated with you after a fix is released.
 - Over-broad list entries (`0.0.0.0/0`-style) are rejected by the IPC layer; the machine's own
   addresses are auto-whitelisted to prevent self-lockout.
 - The data directory under `%ProgramData%\WinGuard` is ACL-hardened to SYSTEM + Administrators by
-  the setup and by `--install`. A folder a standard user created first loses that user as owner, so
-  they cannot grant themselves access again, and setup stops if the folder cannot be secured or
-  turns out to be a link. A portable `--console` run does not touch the folder's ACL.
+  the setup and by `--install`, which run the same tested routine. It walks the folder without
+  following a link, through handles, so nothing can be swapped under it. A standard user cannot
+  make the Administrators group an owner, so the owner is what tells planted content from WinGuard's
+  own, and it is read before anything changes: whatever is a link, has more than one hard link, or
+  is not owned by SYSTEM or Administrators is **moved aside, never deleted and never made
+  trustworthy**, into a `Quarantine-*` folder inside the data folder, with a `quarantine.txt` saying
+  what came from where. A data folder that is itself foreign moves as a whole to a
+  `WinGuard.quarantine-*` folder next to it, and a new one takes its place. What stays gets
+  Administrators as owner and a protected DACL, each item on its own. Setup reports what it moved
+  and carries on, because setup that stops at a stray file leaves a machine unprotected. It stops
+  only if the folder is a link, or if something cannot be secured or moved; the service is then
+  started again as it was. A portable `--console` run does not touch the folder's ACL.
+- That check cannot look back. Content an older setup already made Administrators-owned stays
+  trusted. Files an administrator's own account created, as opposed to the group, count as foreign;
+  to keep one, give it to the group (`icacls <file> /setowner *S-1-5-32-544`) and move it back.
 - **Break-glass** (`--disarm [--minutes N]`, `--rearm`) needs no service: it is a drop file,
   `disarm.json` in the data folder, plus an immediate clear of the firewall rules by the command
   itself. Both verbs refuse a prompt that is not elevated. While a window is open the service holds
