@@ -19,6 +19,7 @@ public sealed class BanEngineResilienceTests
     private static readonly DateTimeOffset T0 = new(2026, 5, 1, 12, 0, 0, TimeSpan.Zero);
     private const string Attacker = "203.0.113.50";
     private const string Nat64Client = "64:ff9b::cb00:7101"; // 203.0.113.1
+    private const string Aggregate = "2001:db8:1:2::/64";
 
     private static readonly PortSet Rdp = PortSet.Parse(["3389"]);
     private static readonly PortSet Sql = PortSet.Parse(["1433"]);
@@ -732,6 +733,52 @@ public sealed class BanEngineResilienceTests
         Assert.False(counter.TryRemoveNear(Attacker, ProtocolSource.Rdp, at.AddSeconds(3), tolerance));
         Assert.True(counter.TryRemoveNear(Attacker, ProtocolSource.Rdp, at.AddSeconds(1), tolerance));
         Assert.Equal(0, counter.Count(Attacker, DateTime.MinValue));
+    }
+
+    // ---------- unbanning a member of an aggregate ban ----------
+
+    private static async Task BanAggregateAsync(EngineHarness h)
+    {
+        await Threshold(h, "2001:db8:1:2::5", ProtocolSource.MsSql);
+        Assert.Contains(Aggregate, h.Firewall.Blocked);
+    }
+
+    [Fact]
+    public async Task Unbanning_an_address_inside_an_aggregate_ban_lifts_the_range_and_says_so()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, s => s.Ipv6AggregatePrefixLength = 64);
+        await BanAggregateAsync(h);
+
+        await h.Engine.UnbanAsync("2001:db8:1:2::5");
+
+        Assert.DoesNotContain(Aggregate, h.Firewall.Blocked);
+        Assert.Null(await h.Store.GetBanAsync(Aggregate));
+        Assert.Contains(h.Store.Events, e => e.Message == $"MANUAL UNBLOCK {Aggregate} (it held 2001:db8:1:2::5)");
+        Assert.Contains(h.Store.BanHistory, row => row.Action == BanHistoryAction.Unbanned && row.IpAddress == Aggregate);
+    }
+
+    [Fact]
+    public async Task Unbanning_an_address_inside_an_unsaved_aggregate_ban_lifts_it_too()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, s => s.Ipv6AggregatePrefixLength = 64);
+        h.Store.FailWrites = true;
+        await BanAggregateAsync(h);
+
+        await h.Engine.UnbanAsync("2001:db8:1:2::5");
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Empty(h.Firewall.Blocked);
+    }
+
+    [Fact]
+    public async Task Unbanning_an_address_leaves_ranges_that_do_not_hold_it()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, s => s.Ipv6AggregatePrefixLength = 64);
+        await BanAggregateAsync(h);
+
+        await h.Engine.UnbanAsync("2001:db8:1:3::5");
+
+        Assert.Contains(Aggregate, h.Firewall.Blocked);
     }
 
     // ---------- the unsaved bans and the RDP de-dup stay bounded ----------

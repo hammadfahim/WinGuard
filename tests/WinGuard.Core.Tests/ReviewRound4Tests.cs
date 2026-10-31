@@ -277,6 +277,18 @@ public sealed class ReviewRound4Tests
     }
 
     [Fact]
+    public async Task Unblocking_an_address_inside_an_aggregate_ban_answers_with_the_truth()
+    {
+        await using var h = await IpcHarness.StartAsync();
+        await BanAggregateAsync(h.Engine, h);
+
+        await h.SendAsync(IpcMethods.Unblock, new UnblockParams { Ip = "2001:db8:1:2::101" });
+
+        Assert.Empty(await h.Store.GetActiveBansAsync());
+        Assert.Empty(h.Firewall.Blocked);
+    }
+
+    [Fact]
     public async Task An_aggregate_ban_can_be_unblocked_and_whitelisted()
     {
         await using var h = await IpcHarness.StartAsync();

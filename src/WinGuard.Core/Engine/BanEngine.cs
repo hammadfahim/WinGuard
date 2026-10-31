@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using WinGuard.Core.Abstractions;
@@ -515,7 +516,12 @@ public sealed partial class BanEngine
         }
     }
 
-    /// <summary>Manually unblocks an IP or a range ban (IPC <c>Unblock</c>). Idempotent; invalid values throw.</summary>
+    /// <summary>
+    /// Manually unblocks an IP or a range ban (IPC <c>Unblock</c>). Idempotent; invalid values throw.
+    /// A range ban holding the address, such as an IPv6 aggregate ban, is lifted with it: there is no
+    /// way to free one address of a block rule, and a success that left it blocked would be a lie.
+    /// The event and the history name the range.
+    /// </summary>
     public async Task UnbanAsync(string ip, CancellationToken ct = default)
     {
         if (!IpMatcher.TryNormalizeBanTarget(ip, out var normalized))
@@ -526,6 +532,12 @@ public sealed partial class BanEngine
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            foreach (var range in await FindRangeBansHoldingAsync(normalized, ct).ConfigureAwait(false))
+            {
+                _logger.LogWarning("Lifting range ban {Range}: unblocking {Ip} was asked for, and the range holds it.", range, normalized);
+                await UnbanCoreAsync(range, $"MANUAL UNBLOCK {range} (it held {normalized})", ct).ConfigureAwait(false);
+            }
+
             await UnbanCoreAsync(normalized, $"MANUAL UNBLOCK {normalized}", ct).ConfigureAwait(false);
         }
         finally
@@ -1325,6 +1337,31 @@ public sealed partial class BanEngine
             _logger.LogError(ex, "BanEngine failed to read the existing ban for {Ip}.", ip);
             return (null, false);
         }
+    }
+
+    /// <summary>The range bans whose block holds this address. Saved or not; an unreadable store leaves only the unsaved.</summary>
+    private async Task<List<string>> FindRangeBansHoldingAsync(string ip, CancellationToken ct)
+    {
+        if (ip.Contains('/') || !IPAddress.TryParse(ip, out var address))
+        {
+            return [];
+        }
+
+        var targets = _unsavedBans.Keys.ToList();
+        try
+        {
+            var active = await _store.GetActiveBansAsync(ct).ConfigureAwait(false);
+            targets.AddRange(active.Select(ban => ban.IpAddress));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Could not look for a range ban holding {Ip}.", ip);
+        }
+
+        return targets
+            .Where(target => target.Contains('/') && IpMatcher.TryParseCidr(target, out var network) && network.Contains(address))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
     }
 
     private int ComputeOffense(string ip, BanEntry? existing)
