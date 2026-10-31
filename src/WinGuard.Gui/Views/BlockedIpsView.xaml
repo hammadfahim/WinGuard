@@ -21,7 +21,7 @@
                 <TextBlock Style="{StaticResource TextTitle}" Text="Blocked IPs" VerticalAlignment="Center" />
                 <TextBlock Style="{StaticResource TextMuted}" Text="{Binding CountText}" Margin="12,5,0,0" VerticalAlignment="Center" />
                 <ContentControl Style="{StaticResource Chip}" ui:Ui.Tone="Warn" Content="Recorded, not enforced" Margin="12,4,0,0"
-                                ToolTip="Report-only mode: these bans are not in the firewall yet"
+                                ToolTip="Report-only or disarmed: these bans are not in the firewall right now"
                                 Visibility="{Binding IsReportOnly, Converter={StaticResource BoolToVis}}" />
             </StackPanel>
             <StackPanel Grid.Column="2" Orientation="Horizontal">

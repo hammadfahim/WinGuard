@@ -378,7 +378,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private void OnStatusUpdated(ServiceStatusDto status)
     {
         Dashboard.UpdateStatus(status);
-        BlockedIps.IsReportOnly = status.ReportOnly;
+        BlockedIps.IsReportOnly = status.ReportOnly || status.Disarmed;
+        Settings.UpdateBlocklists(status.Blocklists);
         NavigationItems[1].Badge = status.ActiveBans > 0 ? status.ActiveBans.ToString("N0") : string.Empty;
     }
 
@@ -411,6 +412,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             if (prereqs is not null)
             {
                 Dashboard.UpdatePrereqs(prereqs);
+                Settings.UpdatePrereqs(prereqs);
             }
         }
         catch
