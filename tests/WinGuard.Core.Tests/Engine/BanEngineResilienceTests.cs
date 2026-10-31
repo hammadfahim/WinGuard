@@ -18,6 +18,7 @@ public sealed class BanEngineResilienceTests
 {
     private static readonly DateTimeOffset T0 = new(2026, 5, 1, 12, 0, 0, TimeSpan.Zero);
     private const string Attacker = "203.0.113.50";
+    private const string Nat64Client = "64:ff9b::cb00:7101"; // 203.0.113.1
 
     private static readonly PortSet Rdp = PortSet.Parse(["3389"]);
     private static readonly PortSet Sql = PortSet.Parse(["1433"]);
@@ -529,6 +530,48 @@ public sealed class BanEngineResilienceTests
         }
 
         Assert.Contains(Attacker, h.Firewall.Blocked);
+    }
+
+    // ---------- NAT64 ----------
+
+    [Fact]
+    public async Task One_nat64_attacker_does_not_ban_every_ipv4_client_of_the_translator()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, s => s.Ipv6AggregatePrefixLength = 64);
+        await Threshold(h, Nat64Client, ProtocolSource.MsSql);
+
+        Assert.Equal(Nat64Client, Assert.Single(h.Firewall.Blocked));
+    }
+
+    [Fact]
+    public async Task A_whitelisted_ipv4_client_seen_through_nat64_is_not_banned()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, seed: store => store.AddToListAsync(ListKind.Whitelist, "203.0.113.1"));
+        await Threshold(h, Nat64Client, ProtocolSource.MsSql);
+
+        Assert.Empty(h.Firewall.Blocked);
+    }
+
+    [Fact]
+    public async Task Whitelisting_an_ipv4_client_lifts_its_nat64_ban()
+    {
+        await using var h = await EngineHarness.StartAsync(T0);
+        await Threshold(h, Nat64Client, ProtocolSource.MsSql);
+        Assert.Contains(Nat64Client, h.Firewall.Blocked);
+
+        await h.Store.AddToListAsync(ListKind.Whitelist, "203.0.113.0/24");
+        await h.Engine.HousekeepOnceAsync();
+
+        Assert.Empty(h.Firewall.Blocked);
+    }
+
+    [Fact]
+    public async Task A_blacklisted_ipv4_client_seen_through_nat64_is_banned_for_good()
+    {
+        await using var h = await EngineHarness.StartAsync(T0, seed: store => store.AddToListAsync(ListKind.Blacklist, "203.0.113.1"));
+        await h.ProcessAsync(h.Fail(Nat64Client, ProtocolSource.MsSql));
+
+        Assert.True((await h.Store.GetBanAsync(Nat64Client))!.IsPermanent);
     }
 
     // ---------- shutdown between the block and the save ----------
