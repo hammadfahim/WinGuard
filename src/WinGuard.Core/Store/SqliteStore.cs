@@ -280,12 +280,12 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
             {
                 await using var cmd = connection.CreateCommand();
                 cmd.CommandText =
-                    "INSERT INTO bans (ip, source, banned_at_utc, expires_utc, offense_count, is_permanent, note) " +
-                    "VALUES ($ip, $source, $banned, $expires, $offense, $permanent, $note) " +
+                    "INSERT INTO bans (ip, source, banned_at_utc, expires_utc, offense_count, is_permanent, note, port_scope) " +
+                    "VALUES ($ip, $source, $banned, $expires, $offense, $permanent, $note, $portScope) " +
                     "ON CONFLICT(ip) DO UPDATE SET " +
                     "source = excluded.source, banned_at_utc = excluded.banned_at_utc, " +
                     "expires_utc = excluded.expires_utc, offense_count = excluded.offense_count, " +
-                    "is_permanent = excluded.is_permanent, note = excluded.note;";
+                    "is_permanent = excluded.is_permanent, note = excluded.note, port_scope = excluded.port_scope;";
                 cmd.Parameters.AddWithValue("$ip", ban.IpAddress);
                 cmd.Parameters.AddWithValue("$source", (int)ban.Source);
                 cmd.Parameters.AddWithValue("$banned", ToDb(ban.BannedAtUtc));
@@ -293,6 +293,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
                 cmd.Parameters.AddWithValue("$offense", ban.OffenseCount);
                 cmd.Parameters.AddWithValue("$permanent", ban.IsPermanent ? 1 : 0);
                 cmd.Parameters.AddWithValue("$note", (object?)ban.Note ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$portScope", (object?)ban.PortScope ?? DBNull.Value);
                 await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
                 return true;
             },
@@ -766,7 +767,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
     // ---- plumbing ----
 
     private const string BanColumns =
-        "ip, source, banned_at_utc, expires_utc, offense_count, is_permanent, note";
+        "ip, source, banned_at_utc, expires_utc, offense_count, is_permanent, note, port_scope";
 
     private async Task<T> WithConnectionAsync<T>(Func<SqliteConnection, Task<T>> action, CancellationToken ct)
     {
@@ -843,6 +844,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
     /// v2: the events table gets an AUTOINCREMENT id so the GUI's event cursor never sees an id
     /// reused after pruning, and raw log lines stored by older versions are discarded.
     /// v4: offense counts move from one settings row into their own table.
+    /// v5: bans get a port scope. Rows from before it have none, and keep following BlockedPorts.
     /// </summary>
     private async Task MigrateAsync(SqliteConnection connection, CancellationToken ct)
     {
@@ -890,11 +892,23 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
         }
 
         await ImportOffenseCountsBlobAsync(connection, ct).ConfigureAwait(false);
+        await AddBanPortScopeAsync(connection, ct).ConfigureAwait(false);
 
         await ExecuteNonQueryAsync(
             connection,
             $"UPDATE failed_logins SET raw = NULL WHERE raw IS NOT NULL; PRAGMA user_version = {SchemaVersion};",
             ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Adds the column to a bans table from before v5; a new table has it already.</summary>
+    private static async Task AddBanPortScopeAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('bans') WHERE name = 'port_scope';";
+        if (Convert.ToInt32(await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false), CultureInfo.InvariantCulture) == 0)
+        {
+            await ExecuteNonQueryAsync(connection, "ALTER TABLE bans ADD COLUMN port_scope TEXT;", ct).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -949,7 +963,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
         _logger.LogInformation("Moved {Count} offense count(s) into their own table.", rows.Count);
     }
 
-    private const int SchemaVersion = 4;
+    private const int SchemaVersion = 5;
 
     private const string LegacyOffenseCountsKey = "offense_counts";
 
@@ -1080,6 +1094,7 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
         OffenseCount = reader.GetInt32(4),
         IsPermanent = reader.GetInt32(5) != 0,
         Note = reader.IsDBNull(6) ? null : reader.GetString(6),
+        PortScope = reader.IsDBNull(7) ? null : reader.GetString(7),
     };
 
     private static LogEvent ReadEvent(SqliteDataReader reader) => new()
@@ -1168,7 +1183,8 @@ public sealed class SqliteStore : IStore, IAsyncDisposable
           expires_utc TEXT NOT NULL,
           offense_count INTEGER NOT NULL DEFAULT 1,
           is_permanent INTEGER NOT NULL DEFAULT 0,
-          note TEXT
+          note TEXT,
+          port_scope TEXT
         );
 
         CREATE TABLE IF NOT EXISTS lists (

@@ -366,6 +366,33 @@ public sealed class IpcRequestHandlerTests
     }
 
     [Fact]
+    public async Task Port_profiles_round_trip_and_bans_report_their_ports()
+    {
+        await using var h = await Harness.StartAsync();
+        var settings = await h.GetAsync<WinGuardSettings>(IpcMethods.GetSettings);
+        settings.MsSql.BlockedPorts = ["1433", "bogus"];
+        settings.Ftp.PassivePortRange = "50000-50100";
+        settings.CustomSources.Add(new CustomLogSource { Name = "app", PathGlob = @"C:\logs\*.log", Regex = @"from (?<ipaddress>\S+)", BlockedPorts = ["8443"] });
+
+        var stored = await h.GetAsync<WinGuardSettings>(IpcMethods.UpdateSettings, new UpdateSettingsParams { Settings = settings });
+
+        Assert.Equal(["1433"], stored.MsSql.BlockedPorts);
+        Assert.Equal("50000-50100", stored.Ftp.PassivePortRange);
+        Assert.Equal(["8443"], Assert.Single(stored.CustomSources).BlockedPorts);
+
+        for (var i = 0; i < stored.ThresholdFor(ProtocolSource.MsSql); i++)
+        {
+            await h.Engine.ProcessAsync(new FailedLogin { IpAddress = "203.0.113.7", Source = ProtocolSource.MsSql, TimestampUtc = T0.UtcDateTime });
+        }
+
+        var ban = await h.GetAsync<BanDto>(IpcMethods.BlockNow, new BlockNowParams { Ip = "203.0.113.8" });
+        Assert.Equal(string.Empty, ban.Ports);
+        var bans = await h.GetAsync<List<BanDto>>(IpcMethods.ListBans);
+        Assert.Equal("1433", bans.Single(b => b.IpAddress == "203.0.113.7").Ports);
+        Assert.Equal(string.Empty, bans.Single(b => b.IpAddress == "203.0.113.8").Ports);
+    }
+
+    [Fact]
     public async Task Events_are_listed_newest_first_and_by_cursor()
     {
         await using var h = await Harness.StartAsync();

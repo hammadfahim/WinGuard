@@ -515,6 +515,7 @@ public sealed class FakeStore : IStore
         OffenseCount = source.OffenseCount,
         IsPermanent = source.IsPermanent,
         Note = source.Note,
+        PortScope = source.PortScope,
     };
 
     private static OffenseCountEntry Clone(OffenseCountEntry source) => new()

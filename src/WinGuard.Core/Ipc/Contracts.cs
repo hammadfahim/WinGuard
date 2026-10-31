@@ -17,9 +17,9 @@ public static class PipeConstants
     /// Bumped whenever a request, response or DTO changes shape. The service reports it in
     /// <see cref="ServiceStatusDto.ProtocolVersion"/> so a GUI from another release can say so
     /// instead of misbehaving. v3: statistics + ban history + report-only. v4: BlockNow answers
-    /// with the ban it recorded.
+    /// with the ban it recorded. v5: bans report their ports.
     /// </summary>
-    public const int ProtocolVersion = 4;
+    public const int ProtocolVersion = 5;
 }
 
 /// <summary>Method names used in <see cref="IpcRequest.Method"/>.</summary>
@@ -111,7 +111,10 @@ public sealed class BanDto
     public bool IsPermanent { get; set; }
     public string? Note { get; set; }
 
-    public static BanDto From(BanEntry b) => new()
+    /// <summary>The ports this ban blocks, e.g. <c>1433,3389</c>. Empty = all ports.</summary>
+    public string Ports { get; set; } = string.Empty;
+
+    public static BanDto From(BanEntry b, WinGuardSettings settings) => new()
     {
         IpAddress = b.IpAddress,
         Source = b.Source,
@@ -120,6 +123,7 @@ public sealed class BanDto
         OffenseCount = b.OffenseCount,
         IsPermanent = b.IsPermanent,
         Note = b.Note,
+        Ports = PortProfiles.Resolve(b.PortScope, settings).Text,
     };
 }
 

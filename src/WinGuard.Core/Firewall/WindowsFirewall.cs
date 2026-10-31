@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using WinGuard.Core.Abstractions;
 using WinGuard.Core.Config;
 using WinGuard.Core.Engine;
+using WinGuard.Core.Model;
 
 namespace WinGuard.Core.Firewall;
 
@@ -18,12 +19,16 @@ namespace WinGuard.Core.Firewall;
 /// of the <see cref="IFirewall"/> surface — failures are logged instead.
 /// </para>
 /// <para>
-/// When <see cref="WinGuardSettings.BlockedPorts"/> is empty (the default) a single rule with
-/// <c>Protocol = Any</c> is used per batch (cheapest: one condition per IP). When it is non-empty a
-/// TCP and a UDP rule pair is maintained per batch with <c>LocalPorts</c> set, because a single rule
-/// cannot mix the TCP and UDP protocols. The pair shares the same remote-address batch and is named
-/// with a <c>_TCP</c>/<c>_UDP</c> suffix; both still start with <see cref="Defaults.RuleNamePrefix"/>
-/// so <see cref="ClearAll"/> and <see cref="ListBlocked"/> see them.
+/// Each distinct <see cref="PortSet"/> has its own family of batches, so the rule count follows the
+/// sets in use, not the number of bans. All ports use a single rule with <c>Protocol = Any</c> per
+/// batch (cheapest: one condition per IP) under the plain name above. Any other set keeps a TCP and
+/// a UDP rule pair per batch with <c>LocalPorts</c> set, because a single rule cannot mix the two
+/// protocols: <c>WinGuard_Block_P1A2B3C4D_0001_TCP</c> and <c>_UDP</c>, with the set's
+/// <see cref="PortSet.RuleFamily"/> in the name so a fresh process can tell what a rule covers. All
+/// of them start with <see cref="Defaults.RuleNamePrefix"/>, so <see cref="ClearAll"/> and
+/// <see cref="ListBlocked"/> see them. Which ports a target gets is the engine's decision: a pair
+/// named <c>WinGuard_Block_0001_TCP</c> comes from a version that decided it here, and
+/// <see cref="SyncRules(IEnumerable{FirewallTarget})"/> moves its addresses into their family.
 /// </para>
 /// <para>
 /// The batches are cached in memory (guarded by one lock) so a block or unblock is a single rule
@@ -47,8 +52,9 @@ public sealed class WindowsFirewall : IFirewall
 
     private List<RuleBatch>? _batchCache;
 
-    // The port list the rules were last written with; a change rewrites every batch.
-    private string? _appliedPortsKey;
+    // The first sync of a process writes every rule, which also re-enables one an administrator
+    // switched off. Later ones write what changed: a blocklist can span dozens of rules.
+    private bool _allRulesWritten;
 
     /// <summary>
     /// Creates the firewall wrapper over the Windows Firewall COM API.
@@ -59,8 +65,7 @@ public sealed class WindowsFirewall : IFirewall
     /// supplied; otherwise <see cref="WinGuardSettings.MaxAddressesPerRule"/> is read live.
     /// </param>
     /// <param name="settingsAccessor">
-    /// Optional live-settings accessor used to read <see cref="WinGuardSettings.BlockedPorts"/> and
-    /// <see cref="WinGuardSettings.MaxAddressesPerRule"/>. When null the firewall blocks all ports.
+    /// Optional live-settings accessor used to read <see cref="WinGuardSettings.MaxAddressesPerRule"/>.
     /// </param>
     public WindowsFirewall(
         ILogger<WindowsFirewall> logger,
@@ -83,8 +88,12 @@ public sealed class WindowsFirewall : IFirewall
     }
 
     /// <inheritdoc />
-    public void Block(string ipOrRange)
+    public void Block(string ipOrRange) => Block(ipOrRange, PortSet.All);
+
+    /// <inheritdoc />
+    public void Block(string ipOrRange, PortSet ports)
     {
+        ArgumentNullException.ThrowIfNull(ports);
         if (!TryNormalizeTarget(ipOrRange, out var normalized))
         {
             _logger.LogWarning("Refusing to block invalid address value {Ip}; it was not added to any firewall rule.", ipOrRange);
@@ -96,30 +105,28 @@ public sealed class WindowsFirewall : IFirewall
             try
             {
                 var batches = GetBatches();
-                var ports = CurrentPorts();
-                EnsurePortsApplied(batches, ports);
-
-                foreach (var batch in batches)
+                var holders = batches.Where(b => b.Addresses.Contains(normalized)).ToList();
+                var settled = holders.Find(b => b.HoldsFamily(ports));
+                if (settled is not null && holders.Count == 1)
                 {
-                    if (batch.Addresses.Contains(normalized))
-                    {
-                        _logger.LogDebug("Address {Ip} is already present in firewall rule {Rule}; nothing to do.", normalized, RuleName(batch.Index));
-                        return;
-                    }
+                    _logger.LogDebug("Address {Ip} is already present in firewall rule {Rule}; nothing to do.", normalized, RuleName(settled));
+                    return;
                 }
 
-                var max = MaxAddressesPerRule();
-                var target = batches.FirstOrDefault(b => b.Addresses.Count < max);
-                if (target is null)
+                // Into the new rule first: leaving the old one first would open a gap in the block.
+                if (settled is null)
                 {
-                    target = new RuleBatch { Index = NextFreeIndex(batches) };
-                    batches.Add(target);
-                    batches.Sort((a, b) => a.Index.CompareTo(b.Index));
+                    var target = FindOrAddBatch(batches, ports.RuleFamily, MaxAddressesPerRule());
+                    target.Addresses.Add(normalized);
+                    WriteBatch(target, ports);
+                    batches.Sort(CompareBatches);
+                    _logger.LogInformation("Blocked {Ip} in firewall rule {Rule} ({Count} addresses).", normalized, RuleName(target), target.Addresses.Count);
                 }
 
-                target.Addresses.Add(normalized);
-                WriteBatch(target, ports);
-                _logger.LogInformation("Blocked {Ip} in firewall rule {Rule} ({Count} addresses).", normalized, RuleName(target.Index), target.Addresses.Count);
+                foreach (var other in holders.Where(b => b != settled))
+                {
+                    RemoveAddress(batches, other, normalized);
+                }
             }
             catch (Exception ex)
             {
@@ -143,27 +150,18 @@ public sealed class WindowsFirewall : IFirewall
             try
             {
                 var batches = GetBatches();
-                var ports = CurrentPorts();
-                EnsurePortsApplied(batches, ports);
 
-                var target = batches.FirstOrDefault(b => b.Addresses.Contains(normalized));
-                if (target is null)
+                // More than one holds it only if the process died in the middle of a move.
+                var holders = batches.Where(b => b.Addresses.Contains(normalized)).ToList();
+                if (holders.Count == 0)
                 {
                     _logger.LogDebug("IP {Ip} was not present in any WinGuard firewall rule; nothing to do.", normalized);
                     return;
                 }
 
-                target.Addresses.Remove(normalized);
-                if (target.Addresses.Count == 0)
+                foreach (var holder in holders)
                 {
-                    DeleteBatchRules(target);
-                    batches.Remove(target);
-                    _logger.LogInformation("Unblocked {Ip}; firewall rule {Rule} is now empty and was removed.", normalized, RuleName(target.Index));
-                }
-                else
-                {
-                    WriteBatch(target, ports);
-                    _logger.LogInformation("Unblocked {Ip} from firewall rule {Rule} ({Count} addresses remain).", normalized, RuleName(target.Index), target.Addresses.Count);
+                    RemoveAddress(batches, holder, normalized);
                 }
             }
             catch (Exception ex)
@@ -177,6 +175,15 @@ public sealed class WindowsFirewall : IFirewall
     /// <inheritdoc />
     public void SyncRules(IEnumerable<string> targets)
     {
+        if (targets is not null)
+        {
+            SyncRules(targets.Select(target => new FirewallTarget(target, PortSet.All)));
+        }
+    }
+
+    /// <inheritdoc />
+    public void SyncRules(IEnumerable<FirewallTarget> targets)
+    {
         if (targets is null)
         {
             return;
@@ -186,49 +193,60 @@ public sealed class WindowsFirewall : IFirewall
         {
             try
             {
-                var ports = CurrentPorts();
                 var max = MaxAddressesPerRule();
-                var wanted = new List<string>();
-                var unplaced = new HashSet<string>(StringComparer.Ordinal);
+
+                // One family per address. Named twice, the wider block wins.
+                var wanted = new Dictionary<string, PortSet>(StringComparer.Ordinal);
                 foreach (var target in targets)
                 {
-                    if (TryNormalizeTarget(target, out var normalized) && unplaced.Add(normalized))
+                    if (TryNormalizeTarget(target.Address, out var normalized))
                     {
-                        wanted.Add(normalized);
+                        wanted[normalized] = wanted.TryGetValue(normalized, out var known) ? known.Union(target.Ports) : target.Ports;
                     }
                 }
 
                 // Every address stays in the rule that already holds it: moving one between rules
-                // would leave it unenforced from the first rule's write until the second's. The only
-                // exception is a lowered MaxAddressesPerRule, which the write order below covers.
+                // would leave it unenforced from the first rule's write until the second's. It moves
+                // only when its ports changed or MaxAddressesPerRule was lowered, and the write order
+                // below covers both.
+                var unplaced = new HashSet<string>(wanted.Keys, StringComparer.Ordinal);
                 var batches = LoadBatches();
+                var shrunk = new HashSet<RuleBatch>();
                 foreach (var batch in batches)
                 {
-                    var kept = batch.Addresses.Where(unplaced.Contains).Take(max).ToList();
+                    var kept = batch.Addresses
+                        .Where(address => unplaced.Contains(address) && batch.HoldsFamily(wanted[address]))
+                        .Take(max)
+                        .ToList();
                     unplaced.ExceptWith(kept);
+                    if (kept.Count != batch.Addresses.Count)
+                    {
+                        shrunk.Add(batch);
+                    }
+
                     batch.Addresses.Clear();
                     batch.Addresses.AddRange(kept);
                 }
 
                 var grown = new HashSet<RuleBatch>();
-                foreach (var address in wanted.Where(unplaced.Contains))
+                foreach (var (address, ports) in wanted.Where(pair => unplaced.Contains(pair.Key)))
                 {
-                    var batch = batches.FirstOrDefault(b => b.Addresses.Count < max);
-                    if (batch is null)
-                    {
-                        batch = new RuleBatch { Index = NextFreeIndex(batches) };
-                        batches.Add(batch);
-                    }
-
+                    var batch = FindOrAddBatch(batches, ports.RuleFamily, max);
                     batch.Addresses.Add(address);
                     grown.Add(batch);
                 }
 
                 // Write the rules that gain addresses first and delete what is left over last, so
-                // there is no moment at start-up where existing bans are unenforced.
-                foreach (var batch in batches.Where(b => b.Addresses.Count > 0).OrderByDescending(grown.Contains))
+                // there is no moment at start-up where existing bans are unenforced. A rule that also
+                // loses some waits for those that only gain, which is where the addresses went.
+                var portsOfFamily = wanted.Values.DistinctBy(set => set.RuleFamily).ToDictionary(set => set.RuleFamily);
+                var changed = batches
+                    .Where(b => b.Addresses.Count > 0 && (!_allRulesWritten || grown.Contains(b) || shrunk.Contains(b)))
+                    .OrderBy(b => (grown.Contains(b) ? 0 : 2) + (shrunk.Contains(b) ? 1 : 0))
+                    .ToList();
+                foreach (var batch in changed)
                 {
-                    WriteBatch(batch, ports);
+                    WriteBatch(batch, portsOfFamily[batch.Family]);
                 }
 
                 foreach (var stale in batches.Where(b => b.Addresses.Count == 0))
@@ -237,10 +255,10 @@ public sealed class WindowsFirewall : IFirewall
                 }
 
                 batches.RemoveAll(b => b.Addresses.Count == 0);
-                batches.Sort((a, b) => a.Index.CompareTo(b.Index));
+                batches.Sort(CompareBatches);
                 _batchCache = batches;
-                _appliedPortsKey = PortsKey(ports);
-                _logger.LogInformation("Reconciled firewall rules: {Rules} rule(s) for {Addresses} address(es).", batches.Count, wanted.Count);
+                _allRulesWritten = true;
+                _logger.LogInformation("Reconciled firewall rules: {Rules} batch(es) for {Addresses} address(es), {Written} written.", batches.Count, wanted.Count, changed.Count);
             }
             catch (Exception ex)
             {
@@ -251,29 +269,23 @@ public sealed class WindowsFirewall : IFirewall
     }
 
     /// <inheritdoc />
-    public IReadOnlyList<string>? ListBlocked()
+    public IReadOnlyList<string>? ListBlocked() =>
+        ListBlockedTargets()?.Select(target => target.Address).Distinct(StringComparer.Ordinal).ToList();
+
+    /// <inheritdoc />
+    public IReadOnlyList<BlockedTarget>? ListBlockedTargets()
     {
         lock (_gate)
         {
-            var results = new List<string>();
-            var seen = new HashSet<string>(StringComparer.Ordinal);
             try
             {
                 // Fresh read from the live firewall; also refreshes the cache (self-heals drift).
                 var batches = LoadBatches();
                 _batchCache = batches;
-                EnsurePortsApplied(batches, CurrentPorts());
-
-                foreach (var batch in batches)
-                {
-                    foreach (var address in batch.Addresses)
-                    {
-                        if (seen.Add(address))
-                        {
-                            results.Add(address);
-                        }
-                    }
-                }
+                return batches
+                    .SelectMany(batch => batch.Addresses.Select(address => new BlockedTarget(address, batch.ReportedFamily)))
+                    .Distinct()
+                    .ToList();
             }
             catch (Exception ex)
             {
@@ -281,8 +293,6 @@ public sealed class WindowsFirewall : IFirewall
                 _logger.LogError(ex, "Failed to enumerate WinGuard firewall rules.");
                 return null;
             }
-
-            return results;
         }
     }
 
@@ -501,41 +511,45 @@ public sealed class WindowsFirewall : IFirewall
 
     private List<RuleBatch> GetBatches() => _batchCache ??= LoadBatches();
 
-    /// <summary>Reads every <c>WinGuard_Block_*</c> rule into logical batches keyed by their index.</summary>
+    /// <summary>Reads every <c>WinGuard_Block_*</c> rule into logical batches keyed by family and index.</summary>
     private List<RuleBatch> LoadBatches()
     {
-        var map = new Dictionary<int, RuleBatch>();
+        var map = new Dictionary<(string Family, int Index), RuleBatch>();
+        var seen = new Dictionary<RuleBatch, HashSet<string>>();
         foreach (var rule in _store.ReadRules())
         {
-            if (!TryParseRuleName(rule.Name, out var index, out var kind))
+            if (!TryParseRuleName(rule.Name, out var family, out var index, out var kind))
             {
                 continue;
             }
 
-            if (!map.TryGetValue(index, out var batch))
+            if (!map.TryGetValue((family, index), out var batch))
             {
-                batch = new RuleBatch { Index = index };
-                map[index] = batch;
+                batch = new RuleBatch { Family = family, Index = index };
+                map[(family, index)] = batch;
+                seen[batch] = new HashSet<string>(StringComparer.Ordinal);
             }
 
             batch.ExistingKinds.Add(kind);
             foreach (var part in rule.RemoteAddresses.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             {
-                if (TryParseRuleAddress(part, out var normalized) && !batch.Addresses.Contains(normalized))
+                if (TryParseRuleAddress(part, out var normalized) && seen[batch].Add(normalized))
                 {
                     batch.Addresses.Add(normalized);
                 }
             }
         }
 
-        return map.Values.OrderBy(b => b.Index).ToList();
+        var batches = map.Values.ToList();
+        batches.Sort(CompareBatches);
+        return batches;
     }
 
     /// <summary>
-    /// Writes the batch's address list in the rule shape for the given port mode and removes the
-    /// rule variants of the other mode when they exist.
+    /// Writes the batch's address list in the rule shape for the given ports and removes the rule
+    /// variants of the other shape when they exist.
     /// </summary>
-    private void WriteBatch(RuleBatch batch, string[] ports)
+    private void WriteBatch(RuleBatch batch, PortSet ports)
     {
         // A rule with no remote addresses applies to every address. A batch gets here empty when
         // none of its rule's addresses could be parsed; such a rule must not be rewritten as "all".
@@ -546,28 +560,48 @@ public sealed class WindowsFirewall : IFirewall
         }
 
         var csv = string.Join(",", batch.Addresses);
-        if (ports.Length == 0)
+        if (ports.IsAll)
         {
-            // All-ports mode: one Protocol=Any rule per batch.
-            Upsert(batch, RuleKind.Any, ProtocolAny, null, csv);
+            // All ports: one Protocol=Any rule per batch.
+            Upsert(batch, RuleKind.Any, null, csv);
             RemoveIfPresent(batch, RuleKind.Tcp);
             RemoveIfPresent(batch, RuleKind.Udp);
         }
         else
         {
-            // Port mode: a TCP and a UDP rule sharing the same address batch (a single rule
-            // cannot carry both protocols), both restricted to the configured LocalPorts.
-            var portList = string.Join(",", ports);
-            Upsert(batch, RuleKind.Tcp, ProtocolTcp, portList, csv);
-            Upsert(batch, RuleKind.Udp, ProtocolUdp, portList, csv);
+            // Ports: a TCP and a UDP rule sharing the same address batch (a single rule cannot
+            // carry both protocols), both restricted to the set's LocalPorts.
+            Upsert(batch, RuleKind.Tcp, ports.Text, csv);
+            Upsert(batch, RuleKind.Udp, ports.Text, csv);
             RemoveIfPresent(batch, RuleKind.Any);
         }
     }
 
-    private void Upsert(RuleBatch batch, RuleKind kind, int protocol, string? localPorts, string csv)
+    /// <summary>Takes one address out of a batch, leaving its rules' ports as they are.</summary>
+    private void RemoveAddress(List<RuleBatch> batches, RuleBatch batch, string address)
     {
-        var name = RuleName(batch.Index, kind);
-        _store.Upsert(name, protocol, localPorts, csv);
+        batch.Addresses.Remove(address);
+        if (batch.Addresses.Count == 0)
+        {
+            DeleteBatchRules(batch);
+            batches.Remove(batch);
+            _logger.LogInformation("Unblocked {Ip}; firewall rule {Rule} is now empty and was removed.", address, RuleName(batch));
+            return;
+        }
+
+        var csv = string.Join(",", batch.Addresses);
+        foreach (var kind in batch.ExistingKinds)
+        {
+            _store.Upsert(RuleName(batch, kind), ProtocolOf(kind), null, csv);
+        }
+
+        _logger.LogInformation("Unblocked {Ip} from firewall rule {Rule} ({Count} addresses remain).", address, RuleName(batch), batch.Addresses.Count);
+    }
+
+    private void Upsert(RuleBatch batch, RuleKind kind, string? localPorts, string csv)
+    {
+        var name = RuleName(batch, kind);
+        _store.Upsert(name, ProtocolOf(kind), localPorts, csv);
         if (batch.ExistingKinds.Add(kind))
         {
             _logger.LogInformation("Created firewall rule {Rule}.", name);
@@ -578,7 +612,7 @@ public sealed class WindowsFirewall : IFirewall
     {
         if (batch.ExistingKinds.Remove(kind))
         {
-            TryRemove(RuleName(batch.Index, kind));
+            TryRemove(RuleName(batch, kind));
         }
     }
 
@@ -586,7 +620,7 @@ public sealed class WindowsFirewall : IFirewall
     {
         foreach (var kind in batch.ExistingKinds.ToArray())
         {
-            TryRemove(RuleName(batch.Index, kind));
+            TryRemove(RuleName(batch, kind));
         }
 
         batch.ExistingKinds.Clear();
@@ -605,39 +639,22 @@ public sealed class WindowsFirewall : IFirewall
         }
     }
 
-    /// <summary>
-    /// Rewrites every batch when <see cref="WinGuardSettings.BlockedPorts"/> changed since the rules
-    /// were last written, so a settings change also applies to bans that already exist.
-    /// </summary>
-    private void EnsurePortsApplied(List<RuleBatch> batches, string[] ports)
+    /// <summary>The first batch of the family with room (never an older pair), or a new one.</summary>
+    private static RuleBatch FindOrAddBatch(List<RuleBatch> batches, string family, int max)
     {
-        var key = PortsKey(ports);
-        if (_appliedPortsKey is null)
+        var batch = batches.Find(b => b.Family == family && !b.IsOlderPair && b.Addresses.Count < max);
+        if (batch is null)
         {
-            // First use in this process without a SyncRules: trust what is in the firewall.
-            _appliedPortsKey = key;
-            return;
+            batch = new RuleBatch { Family = family, Index = NextFreeIndex(batches, family) };
+            batches.Add(batch);
         }
 
-        if (string.Equals(_appliedPortsKey, key, StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        foreach (var batch in batches)
-        {
-            WriteBatch(batch, ports);
-        }
-
-        _appliedPortsKey = key;
-        _logger.LogInformation("Blocked-ports setting changed; rewrote {Count} firewall rule batch(es).", batches.Count);
+        return batch;
     }
 
-    private static string PortsKey(string[] ports) => string.Join(",", ports);
-
-    private static int NextFreeIndex(List<RuleBatch> batches)
+    private static int NextFreeIndex(List<RuleBatch> batches, string family)
     {
-        var used = batches.Select(b => b.Index).ToHashSet();
+        var used = batches.Where(b => b.Family == family).Select(b => b.Index).ToHashSet();
         var index = 1;
         while (used.Contains(index))
         {
@@ -645,6 +662,12 @@ public sealed class WindowsFirewall : IFirewall
         }
 
         return index;
+    }
+
+    private static int CompareBatches(RuleBatch a, RuleBatch b)
+    {
+        var family = string.CompareOrdinal(a.Family, b.Family);
+        return family != 0 ? family : a.Index.CompareTo(b.Index);
     }
 
     private int MaxAddressesPerRule()
@@ -665,39 +688,28 @@ public sealed class WindowsFirewall : IFirewall
         return _maxAddressesPerRule;
     }
 
-    private string[] CurrentPorts()
+    private static int ProtocolOf(RuleKind kind) => kind switch
     {
-        try
-        {
-            var settings = _settingsAccessor?.Invoke();
-            if (settings?.BlockedPorts is { Length: > 0 } ports)
-            {
-                return ports
-                    .Where(p => !string.IsNullOrWhiteSpace(p))
-                    .Select(p => p.Trim())
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToArray();
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Could not read BlockedPorts from settings; defaulting to block-all-ports.");
-        }
-
-        return [];
-    }
-
-    private static string RuleName(int index) => RuleName(index, RuleKind.Any);
-
-    private static string RuleName(int index, RuleKind kind) => kind switch
-    {
-        RuleKind.Tcp => $"{Defaults.RuleNamePrefix}{index:D4}_TCP",
-        RuleKind.Udp => $"{Defaults.RuleNamePrefix}{index:D4}_UDP",
-        _ => $"{Defaults.RuleNamePrefix}{index:D4}",
+        RuleKind.Tcp => ProtocolTcp,
+        RuleKind.Udp => ProtocolUdp,
+        _ => ProtocolAny,
     };
 
-    private static bool TryParseRuleName(string? name, out int index, out RuleKind kind)
+    private static string RuleName(RuleBatch batch, RuleKind kind = RuleKind.Any)
     {
+        var family = batch.Family.Length == 0 ? string.Empty : batch.Family + "_";
+        var name = $"{Defaults.RuleNamePrefix}{family}{batch.Index:D4}";
+        return kind switch
+        {
+            RuleKind.Tcp => name + "_TCP",
+            RuleKind.Udp => name + "_UDP",
+            _ => name,
+        };
+    }
+
+    private static bool TryParseRuleName(string? name, out string family, out int index, out RuleKind kind)
+    {
+        family = string.Empty;
         index = 0;
         kind = RuleKind.Any;
         if (name is null || !name.StartsWith(Defaults.RuleNamePrefix, StringComparison.OrdinalIgnoreCase))
@@ -717,6 +729,17 @@ public sealed class WindowsFirewall : IFirewall
             remainder = remainder[..^4];
         }
 
+        var separator = remainder.IndexOf('_');
+        if (separator >= 0)
+        {
+            family = remainder[..separator].ToUpperInvariant();
+            remainder = remainder[(separator + 1)..];
+            if (!PortSet.IsRuleFamily(family))
+            {
+                return false;
+            }
+        }
+
         return int.TryParse(remainder, out index) && index > 0;
     }
 
@@ -729,12 +752,22 @@ public sealed class WindowsFirewall : IFirewall
 
     private sealed class RuleBatch
     {
+        /// <summary>The <see cref="PortSet.RuleFamily"/> of the ports this batch's rules cover.</summary>
+        public string Family { get; init; } = string.Empty;
+
         public int Index { get; init; }
 
         public List<string> Addresses { get; } = [];
 
         /// <summary>Which rule variants of this batch currently exist in the firewall.</summary>
         public HashSet<RuleKind> ExistingKinds { get; } = [];
+
+        /// <summary>A rule pair from before families: its name does not say what it covers.</summary>
+        public bool IsOlderPair => Family.Length == 0 && (ExistingKinds.Contains(RuleKind.Tcp) || ExistingKinds.Contains(RuleKind.Udp));
+
+        public string ReportedFamily => IsOlderPair ? BlockedTarget.OlderRuleFamily : Family;
+
+        public bool HoldsFamily(PortSet ports) => Family == ports.RuleFamily && !IsOlderPair;
     }
 
     /// <summary>

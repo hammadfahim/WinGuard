@@ -155,7 +155,7 @@ public sealed partial class BanEngine
                 {
                     try
                     {
-                        _firewall.SyncRules(_blacklistedRanges);
+                        _firewall.SyncRules(FirewallTargets([]));
                     }
                     catch (Exception ex)
                     {
@@ -418,10 +418,11 @@ public sealed partial class BanEngine
                 OffenseCount = offense,
                 IsPermanent = isPermanent,
                 Note = string.IsNullOrWhiteSpace(note) ? null : note.Trim(),
+                PortScope = PortProfiles.AllPorts,
             };
 
             // Enforce first: a database problem must never leave an attacker unblocked.
-            TryBlock(normalized);
+            TryBlock(normalized, PortSet.All);
             await SaveBanAsync(ban, ct).ConfigureAwait(false);
             _offenses.Set(normalized, offense, now);
             await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
@@ -749,7 +750,7 @@ public sealed partial class BanEngine
         {
             if (current is { IsPermanent: true })
             {
-                TryBlock(ip);
+                await EnsureAllPortsAsync(current, ct).ConfigureAwait(false);
                 return;
             }
 
@@ -763,9 +764,10 @@ public sealed partial class BanEngine
                 OffenseCount = offense,
                 IsPermanent = true,
                 Note = "blacklist",
+                PortScope = PortProfiles.AllPorts,
             };
 
-            TryBlock(ip);
+            TryBlock(ip, PortSet.All);
             await SaveBanAsync(permanentBan, ct).ConfigureAwait(false);
             _offenses.Set(ip, offense, now);
             await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
@@ -791,8 +793,10 @@ public sealed partial class BanEngine
             return;
         }
 
-        // 4. Already actively banned -> nothing to do.
-        if (current is not null && (current.IsPermanent || current.ExpiresUtc > now))
+        // 4. Already actively banned -> nothing to do, unless the ban leaves this engine's ports
+        // open: such a failure counts like any other, and crossing the threshold widens the ban.
+        var isBanned = current is not null && (current.IsPermanent || current.ExpiresUtc > now);
+        if (isBanned && BanCovers(current!, failed, settings))
         {
             _logger.LogDebug("IP {Ip} is already banned; ignoring attempt.", ip);
             if (ShouldRecordSkip("b:" + ip))
@@ -835,6 +839,12 @@ public sealed partial class BanEngine
             duration = TimeSpan.FromHours(24);
         }
 
+        if (isBanned)
+        {
+            await WidenBanAsync(current!, failed, nextOffense, duration, settings, ct).ConfigureAwait(false);
+            return;
+        }
+
         var expiresUtc = now + duration;
         var ban = new BanEntry
         {
@@ -844,10 +854,12 @@ public sealed partial class BanEngine
             ExpiresUtc = expiresUtc,
             OffenseCount = nextOffense,
             IsPermanent = false,
+            PortScope = PortProfiles.ScopeFor(failed.Source, failed.Detector),
         };
 
         // Enforce first: a database problem must never leave an attacker unblocked.
-        TryBlock(ip);
+        var ports = PortProfiles.Resolve(ban.PortScope, settings);
+        TryBlock(ip, ports);
         await SaveBanAsync(ban, ct).ConfigureAwait(false);
         _offenses.Set(ip, nextOffense, now);
         await SaveOffenseCountsAsync(ct).ConfigureAwait(false);
@@ -880,7 +892,7 @@ public sealed partial class BanEngine
             Level = LogEventLevel.Warning,
             Source = failed.Source,
             IpAddress = ip,
-            Message = $"BLOCKED {ip} for {FormatDuration(duration)} (offense #{nextOffense}){reportSuffix}",
+            Message = $"BLOCKED {ip}{PortsNote(ports)} for {FormatDuration(duration)} (offense #{nextOffense}){reportSuffix}",
         }, ct).ConfigureAwait(false);
     }
 
@@ -921,6 +933,9 @@ public sealed partial class BanEngine
         try
         {
             await _store.UpsertBanAsync(ban, ct).ConfigureAwait(false);
+
+            // An older unsaved version of this ban must not overwrite this one on the next retry.
+            _unsavedBans.Remove(ban.IpAddress);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
@@ -1142,24 +1157,27 @@ public sealed partial class BanEngine
     /// <summary>
     /// Enforcement-side block, honoring report-only mode: in monitoring mode the ban is still
     /// recorded in the store (and its history row written), but the firewall is left untouched.
+    /// A target a list holds as well stays on all ports, however narrow the ban.
     /// </summary>
-    private void TryBlock(string ipOrRange)
+    private void TryBlock(string ipOrRange, PortSet ports)
     {
         if (_settingsAccessor().ReportOnly)
         {
             return;
         }
 
-        TryFirewall(() => _firewall.Block(ipOrRange), "block", ipOrRange);
+        var effective = IsListTarget(ipOrRange) ? PortSet.All : ports;
+        TryFirewall(() => _firewall.Block(ipOrRange, effective), "block", ipOrRange);
     }
 
     /// <summary>
     /// Enforcement-side unblock, honoring report-only mode like <see cref="TryBlock"/>. A rule from
     /// before the mode was switched on outlives its ban until then: reconcile lifts it as an orphan.
+    /// A target a list holds as well stays blocked when its ban ends.
     /// </summary>
     private void TryUnblock(string ipOrRange)
     {
-        if (_settingsAccessor().ReportOnly)
+        if (_settingsAccessor().ReportOnly || IsListTarget(ipOrRange))
         {
             return;
         }
@@ -1168,15 +1186,6 @@ public sealed partial class BanEngine
     }
 
     private string ReportSuffix() => _settingsAccessor().ReportOnly ? ReportOnlyNote : string.Empty;
-
-    /// <summary>What the firewall should hold: these bans, the ones the store has not taken yet, and the blacklisted ranges.</summary>
-    private List<string> FirewallTargets(IEnumerable<BanEntry> activeBans) =>
-        activeBans
-            .Select(ban => ban.IpAddress)
-            .Concat(_unsavedBans.Keys)
-            .Concat(_blacklistedRanges)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
 
     /// <summary>Appends a ban-history row; failures are logged, never propagated.</summary>
     private async Task AddBanHistoryCoreAsync(BanHistoryEntry entry, CancellationToken ct)

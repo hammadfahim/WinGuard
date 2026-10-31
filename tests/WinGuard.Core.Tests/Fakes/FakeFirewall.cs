@@ -1,4 +1,5 @@
 using WinGuard.Core.Abstractions;
+using WinGuard.Core.Model;
 
 namespace WinGuard.Core.Tests.Fakes;
 
@@ -10,8 +11,9 @@ public sealed class FakeFirewall : IFirewall
 {
     private readonly object _gate = new();
     private readonly List<string> _blocked = new();
+    private readonly Dictionary<string, PortSet> _ports = new(StringComparer.Ordinal);
 
-    /// <summary>Every IP passed to <see cref="Block"/>, in call order (duplicates included).</summary>
+    /// <summary>Every IP passed to <see cref="Block(string, PortSet)"/>, in call order (duplicates included).</summary>
     public List<string> BlockCalls { get; } = new();
 
     /// <summary>Every IP passed to <see cref="Unblock"/>, in call order.</summary>
@@ -35,7 +37,18 @@ public sealed class FakeFirewall : IFirewall
         get { lock (_gate) { return _blocked.ToList(); } }
     }
 
-    public void Block(string ip)
+    /// <summary>The ports a target is blocked on now, or null when it is not blocked.</summary>
+    public PortSet? PortsOf(string ip)
+    {
+        lock (_gate)
+        {
+            return _ports.GetValueOrDefault(ip);
+        }
+    }
+
+    public void Block(string ip) => Block(ip, PortSet.All);
+
+    public void Block(string ip, PortSet ports)
     {
         lock (_gate)
         {
@@ -44,6 +57,8 @@ public sealed class FakeFirewall : IFirewall
             {
                 _blocked.Add(ip);
             }
+
+            _ports[ip] = ports;
         }
     }
 
@@ -53,22 +68,29 @@ public sealed class FakeFirewall : IFirewall
         {
             UnblockCalls.Add(ip);
             _blocked.Remove(ip);
+            _ports.Remove(ip);
         }
     }
 
-    public void SyncRules(IEnumerable<string> targets)
+    public void SyncRules(IEnumerable<string> targets) =>
+        SyncRules(targets.Select(target => new FirewallTarget(target, PortSet.All)));
+
+    public void SyncRules(IEnumerable<FirewallTarget> targets)
     {
         lock (_gate)
         {
-            var ips = targets.ToList();
-            SyncRulesCalls.Add(ips);
+            var wanted = targets.ToList();
+            SyncRulesCalls.Add(wanted.Select(target => target.Address).ToList());
             _blocked.Clear();
-            foreach (var ip in ips)
+            _ports.Clear();
+            foreach (var target in wanted)
             {
-                if (!_blocked.Contains(ip))
+                if (!_blocked.Contains(target.Address))
                 {
-                    _blocked.Add(ip);
+                    _blocked.Add(target.Address);
                 }
+
+                _ports[target.Address] = target.Ports;
             }
         }
     }
@@ -81,12 +103,21 @@ public sealed class FakeFirewall : IFirewall
         }
     }
 
+    public IReadOnlyList<BlockedTarget>? ListBlockedTargets()
+    {
+        lock (_gate)
+        {
+            return FailListBlocked ? null : _blocked.Select(ip => new BlockedTarget(ip, _ports[ip].RuleFamily)).ToList();
+        }
+    }
+
     public void ClearAll()
     {
         lock (_gate)
         {
             ClearAllCallCount++;
             _blocked.Clear();
+            _ports.Clear();
         }
     }
 
