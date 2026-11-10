@@ -340,7 +340,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     public TextField SmtpHost { get; } = new("SMTP host", "Your mail relay. Leave empty to turn e-mail off.", "smtp.example.com");
 
     /// <summary>SMTP port.</summary>
-    public NumberField SmtpPort { get; } = new("SMTP port", "Usually 25, 465 or 587.", 1, 65535);
+    public NumberField SmtpPort { get; } = new("SMTP port", "Usually 587, or 25. Port 465 is not supported.", 1, 65535);
 
     /// <summary>SMTP TLS.</summary>
     public ToggleField SmtpTls { get; } = new("Use TLS", "Encrypt the connection to the relay.");

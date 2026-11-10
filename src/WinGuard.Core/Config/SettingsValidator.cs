@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using WinGuard.Core.Detection;
 using WinGuard.Core.Monitoring;
+using WinGuard.Core.Notifications;
 
 namespace WinGuard.Core.Config;
 
@@ -93,6 +94,13 @@ public static class SettingsValidator
             {
                 errors.Add("Syslog: the host must be a host name or an address.");
             }
+        }
+
+        if (settings.Notifications?.Smtp is { } smtp
+            && !string.IsNullOrWhiteSpace(smtp.Host)
+            && smtp.Port == NotificationDispatcher.ImplicitTlsSmtpPort)
+        {
+            errors.Add($"SMTP: port {NotificationDispatcher.ImplicitTlsSmtpPort} (TLS from the first byte) is not supported, so no mail would be sent. Use port 587 with TLS on (STARTTLS).");
         }
 
         foreach (var path in settings.BlocklistFiles ?? [])

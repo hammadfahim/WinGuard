@@ -128,7 +128,13 @@ public sealed class LogFileTailer
                         _rotated.RemoveAt(0);
                     }
 
-                    cursor = _cursors[path] = new FileCursor { Initialized = true };
+                    // What took the name is either a new file, read from its first byte, or one
+                    // already followed under another name: numbered archives move up one place at
+                    // each rotation (app.log to app.log.1, app.log.1 to app.log.2), and every one of
+                    // them has a cursor here. Such a file continues where its old name stopped;
+                    // reading it as new would count its whole history again.
+                    cursor = _cursors[path] = new FileCursor { Initialized = true, Identity = identity };
+                    ContinueRenamedFile(cursor);
                 }
 
                 cursor.Identity = identity;
@@ -257,10 +263,28 @@ public sealed class LogFileTailer
     /// <returns>Matching absolute file paths, sorted; empty when the path is missing/unreadable.</returns>
     public static IReadOnlyList<string> ResolveFiles(string? pathOrGlob, string defaultFolderPattern = "*")
     {
-        var files = new List<string>();
+        TryResolveFiles(pathOrGlob, defaultFolderPattern, out var files);
+        return files;
+    }
+
+    /// <summary>
+    /// Like <see cref="ResolveFiles"/>, and also says whether the answer can be relied on. It
+    /// returns <see langword="false"/> when the place the path names is not there or cannot be
+    /// listed: a missing folder, a missing file, a volume that is offline, an access error. No
+    /// files then means "cannot tell", not "there are none", and a caller must not forget the
+    /// files it was following. A folder that is there and holds no matching file is a reliable
+    /// empty answer, and so is a path that is never read at all (empty, or not on a local drive).
+    /// </summary>
+    /// <param name="pathOrGlob">File path, folder, or folder + glob.</param>
+    /// <param name="defaultFolderPattern">Pattern used when the input is a directory without a glob.</param>
+    /// <param name="files">Matching absolute file paths, sorted; empty when there are none or they cannot be listed.</param>
+    public static bool TryResolveFiles(string? pathOrGlob, string defaultFolderPattern, out IReadOnlyList<string> files)
+    {
+        var found = new List<string>();
+        files = found;
         if (string.IsNullOrWhiteSpace(pathOrGlob))
         {
-            return files;
+            return true;
         }
 
         var expanded = Environment.ExpandEnvironmentVariables(pathOrGlob.Trim());
@@ -268,9 +292,10 @@ public sealed class LogFileTailer
         {
             // The service runs as SYSTEM: opening a UNC path would authenticate the machine
             // account to whatever host the path names.
-            return files;
+            return true;
         }
 
+        var listed = false;
         try
         {
             if (expanded.IndexOfAny(new[] { '*', '?' }) >= 0)
@@ -284,25 +309,31 @@ public sealed class LogFileTailer
 
                 if (Directory.Exists(directory))
                 {
-                    files.AddRange(Directory.EnumerateFiles(directory, pattern, SearchOption.TopDirectoryOnly));
+                    found.AddRange(Directory.EnumerateFiles(directory, pattern, SearchOption.TopDirectoryOnly));
+                    listed = true;
                 }
             }
             else if (Directory.Exists(expanded))
             {
-                files.AddRange(Directory.EnumerateFiles(expanded, defaultFolderPattern, SearchOption.TopDirectoryOnly));
+                found.AddRange(Directory.EnumerateFiles(expanded, defaultFolderPattern, SearchOption.TopDirectoryOnly));
+                listed = true;
             }
             else if (File.Exists(expanded))
             {
-                files.Add(expanded);
+                found.Add(expanded);
+                listed = true;
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
-            // Unreadable or invalid path: report nothing this cycle.
+            // Unreadable or invalid path: report nothing this cycle. A listing that broke off half
+            // way is no better than none.
+            found.Clear();
+            listed = false;
         }
 
-        files.Sort(StringComparer.OrdinalIgnoreCase);
-        return files;
+        found.Sort(StringComparer.OrdinalIgnoreCase);
+        return listed;
     }
 
     private static char[] DecodeChars(Decoder decoder, byte[] buffer, int count)

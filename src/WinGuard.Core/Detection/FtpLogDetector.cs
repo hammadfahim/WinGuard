@@ -60,7 +60,7 @@ public sealed class FtpLogDetector : IDetector
 
     // Sources that were already polled at least once: a file that shows up under one of them
     // later is new (e.g. the next daily log) and is read from its first line.
-    private HashSet<string> _knownSources = new(StringComparer.OrdinalIgnoreCase);
+    private readonly WatchedSources _sources = new();
     private volatile bool _loopRunning;
 
     // How far back a busy file is searched for its last #Fields: line before settling for the first.
@@ -259,11 +259,11 @@ public sealed class FtpLogDetector : IDetector
                         _logger.LogWarning(ex, "FTP detector poll cycle failed.");
                     }
                 }
-                else if (_knownSources.Count > 0)
+                else if (_sources.Count > 0)
                 {
                     // Disabled: forget positions so re-enabling starts at the end of each file
                     // instead of replaying what was logged in the meantime.
-                    _knownSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    _sources.Clear();
                     _tailer.Prune([]);
                     _fieldsHeaders.Clear();
                     _headerPreReadDone.Clear();
@@ -294,7 +294,6 @@ public sealed class FtpLogDetector : IDetector
     internal void PollOnce(WinGuardSettings settings, Channel<FailedLogin> sink)
     {
         var activeFiles = new List<string>();
-        var seenSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var source in settings.Ftp.Sources ?? [])
         {
             if (source is null || string.IsNullOrWhiteSpace(source.Path))
@@ -303,17 +302,20 @@ public sealed class FtpLogDetector : IDetector
             }
 
             var sourceKey = $"{source.Kind}|{source.Path.Trim()}";
-            var sourceKnown = _knownSources.Contains(sourceKey);
-            seenSources.Add(sourceKey);
+            var watched = _sources.Resolve(sourceKey, source.Path, source.Kind == FtpServerKind.FileZilla ? "*" : "*.log");
+            if (watched.BecameUnavailable)
+            {
+                _logger.LogWarning("FTP source {Path} cannot be read right now; its files continue where they stopped once it can.", source.Path);
+            }
+            else if (watched.Returned)
+            {
+                _logger.LogInformation("FTP source {Path} can be read again.", source.Path);
+            }
 
-            var files = source.Kind == FtpServerKind.FileZilla
-                ? LogFileTailer.ResolveFiles(source.Path, "*")
-                : LogFileTailer.ResolveFiles(source.Path, "*.log");
-
-            foreach (var file in files)
+            foreach (var file in watched.Files)
             {
                 activeFiles.Add(file);
-                var lines = _tailer.ReadNewLines(file, readFromStartIfNew: sourceKnown);
+                var lines = _tailer.ReadNewLines(file, readFromStartIfNew: watched.ReadNewFilesFromStart);
 
                 // Only for a file that has new lines: a log folder can hold years of old logs.
                 if (source.Kind != FtpServerKind.FileZilla && lines.Count > 0)
@@ -347,8 +349,9 @@ public sealed class FtpLogDetector : IDetector
             }
         }
 
-        _knownSources = seenSources;
-        _tailer.Prune(activeFiles);
+        // A source that cannot be listed keeps the positions of its files: see WatchedSources.
+        _tailer.Prune(activeFiles.Concat(_sources.HeldFiles));
+        _sources.EndCycle();
         _signal.Watch(activeFiles);
 
         var activeSet = new HashSet<string>(activeFiles, StringComparer.OrdinalIgnoreCase);

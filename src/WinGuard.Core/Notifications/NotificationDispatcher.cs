@@ -155,11 +155,18 @@ public static class WinGuardEventIds
 /// dropped is counted and reported as one summary per <see cref="SuppressionSummaryInterval"/>.
 /// </para>
 /// <para>
-/// Delivery runs on two background loops started by the service host, each with its own queue. The
+/// Delivery runs on background loops started by the service host, each with its own queue. The
 /// Windows Application log and syslog are the record a SIEM relies on, and neither waits for the
 /// network here; webhook, Telegram and SMTP can each take many seconds to fail. With one loop a
 /// dead receiver held every later event back from the SIEM and filled the shared queue, so a
 /// webhook that hangs now costs chat notifications and nothing else.
+/// </para>
+/// <para>
+/// Webhook, Telegram and SMTP each have a queue and a loop of their own as well. The channel loop
+/// applies the rate limit and hands an event to them without waiting for any send, so a mail relay
+/// that takes thirty seconds to fail holds back mail and nothing else. A notification that has
+/// waited longer than <see cref="MaxQueueAge"/> behind a dead receiver is dropped and counted, not
+/// sent: news that old is no longer a notification, and it would keep the fresh ones waiting.
 /// </para>
 /// <para>
 /// A webhook URL and a Telegram token are secrets (whoever holds one can post to the channel), so
@@ -179,6 +186,14 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
     // a TLS handshake with a slow relay needs more time than an HTTP POST.
     private static readonly TimeSpan MailSendTimeout = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// The SMTPS port, where TLS starts before the first SMTP line. <see cref="SmtpClient"/> only
+    /// knows STARTTLS (ports 587 and 25), so a send to this port waits for a greeting that never
+    /// comes until it times out. The settings refuse it; a setting stored by an older version is
+    /// skipped with a warning.
+    /// </summary>
+    public const int ImplicitTlsSmtpPort = 465;
+
     private readonly Func<WinGuardSettings> _settingsAccessor;
     private readonly ILogger<NotificationDispatcher> _logger;
     private readonly WindowsEventLogWriter? _windowsEventLog;
@@ -186,6 +201,9 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
     private readonly TimeProvider _timeProvider;
     private readonly Channel<LogEvent> _siemQueue;
     private readonly Channel<LogEvent> _channelQueue;
+    private readonly ChannelWorker _webhook;
+    private readonly ChannelWorker _telegram;
+    private readonly ChannelWorker _mail;
     private readonly object _rateLock = new();
     private readonly Queue<DateTime> _recentSends = new();
 
@@ -203,8 +221,11 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
     // queue cannot swallow the news of its own overflow.
     private LogEvent? _pendingSummary;
 
-    // The channel loop is the only writer; a change of URL warns again.
+    // The webhook loop is the only writer; a change of URL warns again.
     private string? _warnedPlainHttpUrl;
+
+    // The mail loop is the only writer.
+    private bool _warnedImplicitTls;
 
     /// <summary>Creates the dispatcher.</summary>
     /// <param name="settingsAccessor">Live settings (channels are re-read per event).</param>
@@ -245,10 +266,16 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
 
         _siemQueue = CreateQueue();
         _channelQueue = CreateQueue();
+        _webhook = new ChannelWorker(this, "webhook");
+        _telegram = new ChannelWorker(this, "Telegram");
+        _mail = new ChannelWorker(this, "e-mail");
     }
 
     /// <summary>How often an idle loop checks for a summary that is due.</summary>
     internal TimeSpan SummaryPollInterval { get; init; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>How long a notification may wait behind a slow or dead receiver before it is dropped.</summary>
+    internal TimeSpan MaxQueueAge { get; init; } = TimeSpan.FromMinutes(10);
 
     /// <summary>Notifications dropped since the last summary.</summary>
     internal long SuppressedCount
@@ -265,7 +292,9 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
     private DateTime UtcNow => _timeProvider.GetUtcNow().UtcDateTime;
 
     // TryWrite reports success even when DropWrite discards the item; only the callback knows.
-    private Channel<LogEvent> CreateQueue() => Channel.CreateBounded<LogEvent>(
+    private Channel<LogEvent> CreateQueue() => CreateQueue<LogEvent>();
+
+    private Channel<T> CreateQueue<T>() => Channel.CreateBounded<T>(
         new BoundedChannelOptions(500)
         {
             SingleReader = true,
@@ -286,7 +315,10 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         _syslog.Start();
         _loops = Task.WhenAll(
             Task.Run(() => SiemLoopAsync(token), CancellationToken.None),
-            Task.Run(() => ChannelLoopAsync(token), CancellationToken.None));
+            Task.Run(() => ChannelLoopAsync(token), CancellationToken.None),
+            Task.Run(() => _webhook.RunAsync(token), CancellationToken.None),
+            Task.Run(() => _telegram.RunAsync(token), CancellationToken.None),
+            Task.Run(() => _mail.RunAsync(token), CancellationToken.None));
         _logger.LogInformation("Notification dispatcher started.");
     }
 
@@ -387,7 +419,10 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         }
     }
 
-    /// <summary>Webhook, Telegram and SMTP, one event at a time, however long each takes.</summary>
+    /// <summary>
+    /// Rate-limits the events for webhook, Telegram and SMTP and hands each one to the loops of
+    /// the channels in use. Nothing here waits for a receiver.
+    /// </summary>
     private async Task ChannelLoopAsync(CancellationToken ct)
     {
         var reader = _channelQueue.Reader;
@@ -396,24 +431,20 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
             while (!ct.IsCancellationRequested)
             {
                 await WaitForWorkAsync(reader, ct).ConfigureAwait(false);
-                await SendPendingSummaryAsync(ct).ConfigureAwait(false);
+                SendPendingSummary();
 
                 while (reader.TryRead(out var logEvent))
                 {
                     try
                     {
-                        await DeliverToChannelsAsync(logEvent, ct).ConfigureAwait(false);
-                    }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                    {
-                        throw;
+                        DeliverToChannels(logEvent);
                     }
                     catch (Exception ex)
                     {
                         _logger.LogWarning(ex, "Notification delivery failed for '{Message}'.", logEvent.Message);
                     }
 
-                    await SendPendingSummaryAsync(ct).ConfigureAwait(false);
+                    SendPendingSummary();
                 }
             }
         }
@@ -453,9 +484,11 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         }
     }
 
-    private async Task DeliverToChannelsAsync(LogEvent logEvent, CancellationToken ct)
+    private void DeliverToChannels(LogEvent logEvent)
     {
-        if (_settingsAccessor()?.Notifications is not { Enabled: true } notifications)
+        // With the switch on and nowhere to send to there is nothing to limit: taking a rate slot
+        // would report notifications as suppressed that could never have been sent.
+        if (_settingsAccessor()?.Notifications is not { Enabled: true } notifications || !HasDestination(notifications))
         {
             return;
         }
@@ -469,35 +502,48 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
             return;
         }
 
-        await SendToChannelsAsync(notifications, logEvent, ct).ConfigureAwait(false);
+        QueueForChannels(notifications, logEvent);
     }
 
+    private static bool UsesWebhook(NotificationSettings notifications) =>
+        !string.IsNullOrWhiteSpace(notifications.WebhookUrl);
+
+    private static bool UsesTelegram(NotificationSettings notifications) =>
+        !string.IsNullOrWhiteSpace(notifications.TelegramBotToken) && !string.IsNullOrWhiteSpace(notifications.TelegramChatId);
+
+    private static bool UsesMail(NotificationSettings notifications) =>
+        notifications.Smtp is { } smtp && !string.IsNullOrWhiteSpace(smtp.Host) && !string.IsNullOrWhiteSpace(smtp.To);
+
+    private static bool HasDestination(NotificationSettings notifications) =>
+        UsesWebhook(notifications) || UsesTelegram(notifications) || UsesMail(notifications);
+
     /// <summary>
-    /// Sends to every configured channel at once. Each send handles its own failures and timeout,
-    /// so a dead channel neither stops the others nor delays them.
+    /// Hands the event to the loop of every configured channel. Each channel sends in its own
+    /// order and at its own pace, so a dead one neither stops the others nor delays them, for
+    /// this event or for any later one.
     /// </summary>
-    private async Task SendToChannelsAsync(NotificationSettings notifications, LogEvent logEvent, CancellationToken ct)
+    private void QueueForChannels(NotificationSettings notifications, LogEvent logEvent)
     {
         var text = FormatEvent(logEvent);
-        var sends = new List<Task>(3);
 
-        if (!string.IsNullOrWhiteSpace(notifications.WebhookUrl))
+        if (UsesWebhook(notifications))
         {
-            sends.Add(SendWebhookAsync(notifications.WebhookUrl.Trim(), text, logEvent, ct));
+            var url = notifications.WebhookUrl.Trim();
+            _webhook.Post(ct => SendWebhookAsync(url, text, logEvent, ct));
         }
 
-        if (!string.IsNullOrWhiteSpace(notifications.TelegramBotToken) && !string.IsNullOrWhiteSpace(notifications.TelegramChatId))
+        if (UsesTelegram(notifications))
         {
-            sends.Add(SendTelegramAsync(notifications.TelegramBotToken.Trim(), notifications.TelegramChatId.Trim(), text, ct));
+            var botToken = notifications.TelegramBotToken.Trim();
+            var chatId = notifications.TelegramChatId.Trim();
+            _telegram.Post(ct => SendTelegramAsync(botToken, chatId, text, ct));
         }
 
-        var smtp = notifications.Smtp;
-        if (smtp is { } && !string.IsNullOrWhiteSpace(smtp.Host) && !string.IsNullOrWhiteSpace(smtp.To))
+        if (UsesMail(notifications))
         {
-            sends.Add(SendMailAsync(smtp, text, ct));
+            var smtp = notifications.Smtp!;
+            _mail.Post(ct => SendMailAsync(smtp, text, ct));
         }
-
-        await Task.WhenAll(sends).ConfigureAwait(false);
     }
 
     private void NoteSuppressed()
@@ -546,7 +592,7 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         Volatile.Write(ref _pendingSummary, summary);
     }
 
-    private async Task SendPendingSummaryAsync(CancellationToken ct)
+    private void SendPendingSummary()
     {
         var summary = Interlocked.Exchange(ref _pendingSummary, null);
         if (summary is null)
@@ -558,12 +604,8 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         {
             if (_settingsAccessor()?.Notifications is { Enabled: true } notifications)
             {
-                await SendToChannelsAsync(notifications, summary, ct).ConfigureAwait(false);
+                QueueForChannels(notifications, summary);
             }
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
         }
         catch (Exception ex)
         {
@@ -693,6 +735,22 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
     {
         try
         {
+            var port = smtp.Port > 0 ? smtp.Port : 25;
+            if (port == ImplicitTlsSmtpPort)
+            {
+                // Failing at once and saying why beats thirty seconds of waiting per mail.
+                if (!_warnedImplicitTls)
+                {
+                    _warnedImplicitTls = true;
+                    _logger.LogWarning(
+                        "E-mail through {Host} is not sent: port {Port} expects TLS from the first byte (SMTPS), which is not supported. Use port 587 with TLS on (STARTTLS).",
+                        smtp.Host,
+                        ImplicitTlsSmtpPort);
+                }
+
+                return;
+            }
+
             // System.Net.Mail lives in the base class library; no package needed.
             using var message = new MailMessage(
                 string.IsNullOrWhiteSpace(smtp.From) ? "winguard@localhost" : smtp.From.Trim(),
@@ -703,7 +761,7 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
                 BodyEncoding = Encoding.UTF8,
             };
 
-            using var client = new SmtpClient(smtp.Host.Trim(), smtp.Port > 0 ? smtp.Port : 25)
+            using var client = new SmtpClient(smtp.Host.Trim(), port)
             {
                 EnableSsl = smtp.EnableSsl,
             };
@@ -722,6 +780,56 @@ public sealed class NotificationDispatcher : IEventPublisher, IDisposable
         {
             // Bad settings land here too: an invalid address throws while the message is built.
             _logger.LogWarning("E-mail delivery through {Host} failed: {Reason}", smtp.Host, FailureReason(ex, smtp.Password));
+        }
+    }
+
+    /// <summary>
+    /// One channel's queue and loop: its sends go out one at a time and in order, without holding
+    /// up any other channel. A full queue drops the newest send and counts it, like the other
+    /// queues here, and so does a send that waited longer than <see cref="MaxQueueAge"/>.
+    /// </summary>
+    private sealed class ChannelWorker
+    {
+        private readonly NotificationDispatcher _owner;
+        private readonly string _name;
+        private readonly Channel<(Func<CancellationToken, Task> Send, DateTime QueuedUtc)> _queue;
+
+        public ChannelWorker(NotificationDispatcher owner, string name)
+        {
+            _owner = owner;
+            _name = name;
+            _queue = owner.CreateQueue<(Func<CancellationToken, Task> Send, DateTime QueuedUtc)>();
+        }
+
+        public void Post(Func<CancellationToken, Task> send) => _queue.Writer.TryWrite((send, _owner.UtcNow));
+
+        public async Task RunAsync(CancellationToken ct)
+        {
+            try
+            {
+                await foreach (var (send, queuedUtc) in _queue.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+                {
+                    if (_owner.UtcNow - queuedUtc > _owner.MaxQueueAge)
+                    {
+                        _owner.NoteSuppressed();
+                        continue;
+                    }
+
+                    try
+                    {
+                        await send(ct).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+                    {
+                        // The sends report their own failures; this is for what they did not foresee.
+                        _owner._logger.LogWarning(ex, "Notification delivery through {Channel} failed.", _name);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Normal stop.
+            }
         }
     }
 

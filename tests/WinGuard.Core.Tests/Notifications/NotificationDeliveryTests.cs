@@ -405,7 +405,9 @@ public sealed class NotificationDeliveryTests
         dispatcher.Publish(Blocked("203.0.113.2"));
         dispatcher.Publish(Blocked("203.0.113.3"));
         await WaitUntilAsync(() => dispatcher.SuppressedCount == 2, "the rate limit");
-        Assert.Single(http.Requests);
+
+        // The send is no longer awaited before the next event is looked at.
+        await WaitUntilAsync(() => http.Requests.Count == 1, "the one event that got through");
 
         // Not due yet: nothing but the one event that got through.
         await Task.Delay(50);
@@ -559,8 +561,9 @@ public sealed class NotificationDeliveryTests
             await WaitUntilAsync(() => Volatile.Read(ref written) == sent, "every event in the event log");
         }
 
-        // The one in flight plus the 500 waiting survive; the rest are counted.
-        Assert.True(dispatcher.SuppressedCount >= Events - 501, $"{dispatcher.SuppressedCount} dropped");
+        // The one in flight plus the 500 waiting survive; the rest are counted, once the channel
+        // loop has handed them to the webhook's own queue.
+        await WaitUntilAsync(() => dispatcher.SuppressedCount >= Events - 501, "the overflow being counted");
         await dispatcher.StopAsync();
     }
 

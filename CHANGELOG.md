@@ -5,6 +5,27 @@ All notable changes to WinGuard are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Webhook, Telegram and e-mail each send from a queue of their own. A notification that waited more
+  than 10 minutes behind a receiver that does not answer is dropped and counted in the
+  `SUPPRESSED` summary instead of being sent late.
+- SMTP port 465 is refused when settings are saved: it expects TLS from the first byte, which is not
+  supported. Use port 587 with TLS on. A setting stored earlier is skipped with one warning in the
+  log, where each mail used to wait 30 seconds and time out.
+
+### Fixed
+
+- A Telegram bot token or SMTP password typed into an empty field in Settings was not saved.
+- Numbered log archives that move up one name at each rotation (`app.log` to `app.log.1`,
+  `app.log.1` to `app.log.2`) were read again from the start by a custom source whose folder or
+  glob includes them, which could ban every address in them at each rotation.
+- A log folder that could not be listed for a moment (renamed, volume offline, access error) came
+  back as new: every file in it was read from its first line. Its files now continue where they
+  stopped, and files that turn up with it are treated as history.
+- One receiver that is slow or down no longer delays the notifications of the other channels.
+- Notifications switched on without any destination no longer produce `SUPPRESSED` summaries.
+
 ## [0.3.1] — 2026-11-01
 
 ### Added
