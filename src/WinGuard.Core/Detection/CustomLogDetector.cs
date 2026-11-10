@@ -44,7 +44,7 @@ public sealed class CustomLogDetector : IDetector
     private readonly FileChangeSignal _signal = new();
 
     // Sources already polled at least once: a file appearing under one of them later is new.
-    private HashSet<string> _knownSources = new(StringComparer.OrdinalIgnoreCase);
+    private readonly WatchedSources _sources = new();
     private volatile bool _loopRunning;
 
     // After this many full timeouts in a cycle a source stops spending seconds per line: its
@@ -242,7 +242,6 @@ public sealed class CustomLogDetector : IDetector
         // every source on it; reading it per source would leave the second one nothing to see.
         var files = new Dictionary<string, WatchedFile>(StringComparer.OrdinalIgnoreCase);
         var activeSources = new List<ActiveSource>();
-        var seenSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var source in settings.CustomSources ?? [])
         {
             if (source is null || !source.Enabled
@@ -259,13 +258,20 @@ public sealed class CustomLogDetector : IDetector
             }
 
             var sourceKey = $"{source.Name}|{source.PathGlob.Trim()}";
-            var sourceKnown = _knownSources.Contains(sourceKey);
-            seenSources.Add(sourceKey);
-
             var active = new ActiveSource(matcher, DisplayName(source));
             activeSources.Add(active);
             var pathGlob = CustomSourceRecipes.UpgradePathGlob(source.PathGlob, source.Regex);
-            foreach (var file in LogFileTailer.ResolveFiles(pathGlob, "*"))
+            var resolved = _sources.Resolve(sourceKey, pathGlob, "*");
+            if (resolved.BecameUnavailable)
+            {
+                _logger.LogWarning("Custom source '{Source}' cannot read {Path} right now; its files continue where they stopped once it can.", active.DetectorName, pathGlob);
+            }
+            else if (resolved.Returned)
+            {
+                _logger.LogInformation("Custom source '{Source}' can read {Path} again.", active.DetectorName, pathGlob);
+            }
+
+            foreach (var file in resolved.Files)
             {
                 if (!files.TryGetValue(file, out var watched))
                 {
@@ -274,7 +280,7 @@ public sealed class CustomLogDetector : IDetector
 
                 // A file new to the tailer but under a known source appeared since the last poll,
                 // so all of it is recent for a source added at the same moment too.
-                watched.ReadFromStartIfNew |= sourceKnown;
+                watched.ReadFromStartIfNew |= resolved.ReadNewFilesFromStart;
                 watched.CrLfRecords |= CustomSourceRecipes.UsesCrLfRecords(source.Regex);
                 watched.Sources.Add(active);
             }
@@ -296,8 +302,9 @@ public sealed class CustomLogDetector : IDetector
             ReportSlowLines(active);
         }
 
-        _knownSources = seenSources;
-        _tailer.Prune(files.Keys);
+        // A source that cannot be listed keeps the positions of its files: see WatchedSources.
+        _tailer.Prune(files.Keys.Concat(_sources.HeldFiles));
+        _sources.EndCycle();
         _signal.Watch(files.Keys);
 
         // Keep the compiled-pattern cache to the patterns still configured.

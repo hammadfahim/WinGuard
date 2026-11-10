@@ -9,18 +9,22 @@ namespace WinGuard.Gui.Controls;
 /// </summary>
 public static class SecretBinding
 {
-    /// <summary>The bound secret.</summary>
+    /// <summary>
+    /// The bound secret. The default is null and not the empty string: the box only starts
+    /// listening for typing when this property changes, and binding it to a secret that is not set
+    /// yet (an empty string) has to count as a change, or nothing typed would ever reach the source.
+    /// </summary>
     public static readonly DependencyProperty SecretProperty = DependencyProperty.RegisterAttached(
         "Secret",
         typeof(string),
         typeof(SecretBinding),
-        new FrameworkPropertyMetadata(string.Empty, FrameworkPropertyMetadataOptions.BindsTwoWayByDefault, OnSecretChanged));
+        new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.BindsTwoWayByDefault, OnSecretChanged));
 
     private static readonly DependencyProperty HookedProperty = DependencyProperty.RegisterAttached(
         "Hooked", typeof(bool), typeof(SecretBinding), new PropertyMetadata(false));
 
     /// <summary>Gets <see cref="SecretProperty"/>.</summary>
-    public static string GetSecret(DependencyObject element) => (string)element.GetValue(SecretProperty);
+    public static string GetSecret(DependencyObject element) => element.GetValue(SecretProperty) as string ?? string.Empty;
 
     /// <summary>Sets <see cref="SecretProperty"/>.</summary>
     public static void SetSecret(DependencyObject element, string value) => element.SetValue(SecretProperty, value);
