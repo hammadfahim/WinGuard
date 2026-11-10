@@ -5,6 +5,8 @@ All notable changes to WinGuard are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-11-10
+
 ### Changed
 
 - Webhook, Telegram and e-mail each send from a queue of their own. A notification that waited more
