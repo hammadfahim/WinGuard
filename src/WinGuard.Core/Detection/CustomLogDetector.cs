@@ -439,6 +439,9 @@ public sealed class CustomLogDetector : IDetector
     private static string DisplayName(CustomLogSource source) =>
         string.IsNullOrWhiteSpace(source.Name) ? DefaultDetectorName : source.Name;
 
+    /// <summary>Longest user name kept from a custom log; the client chooses it, so it can be any length.</summary>
+    internal const int MaxUserNameLength = 256;
+
     private static string? NormalizeOptional(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -447,7 +450,12 @@ public sealed class CustomLogDetector : IDetector
         }
 
         var trimmed = value.Trim();
-        return trimmed == "-" ? null : trimmed;
+        if (trimmed == "-")
+        {
+            return null;
+        }
+
+        return trimmed.Length > MaxUserNameLength ? trimmed[..MaxUserNameLength] : trimmed;
     }
 
     /// <summary>A source's compiled regex; lives as long as the pattern stays configured.</summary>

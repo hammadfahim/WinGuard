@@ -20,6 +20,8 @@ jobs:
     steps:
       # Actions are pinned to commit SHAs (the comment names the tag each SHA was taken from).
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
         with:
           dotnet-version: '10.0.x'
@@ -28,10 +30,23 @@ jobs:
       - name: Test
         run: dotnet test tests/WinGuard.Core.Tests -c Release --filter "Category!=Integration"
 
+      # The version goes into command lines below, so it is only ever digits and dots. A tag must
+      # also point at a commit that is on main: a tag pushed from any other branch builds nothing.
       - name: Compute version
         id: ver
         shell: bash
-        run: echo "v=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag '$GITHUB_REF_NAME' is not vMAJOR.MINOR.PATCH." >&2
+            exit 1
+          fi
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "Tag '$GITHUB_REF_NAME' does not point at a commit on main." >&2
+            exit 1
+          fi
+          echo "v=$version" >> "$GITHUB_OUTPUT"
 
       - name: Publish service
         run: dotnet publish src/WinGuard.Service/WinGuard.Service.csproj -c Release -r win-x64

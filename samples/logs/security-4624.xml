@@ -20,7 +20,7 @@
     <Data Name="SubjectUserName">VPS-01$</Data>
     <Data Name="SubjectDomainName">WORKGROUP</Data>
     <Data Name="SubjectLogonId">0x3e7</Data>
-    <Data Name="TargetUserSid">S-1-5-21-1377283216-344919071-3415362939-500</Data>
+    <Data Name="TargetUserSid">S-1-5-21-1111111111-2222222222-3333333333-500</Data>
     <Data Name="TargetUserName">administrator</Data>
     <Data Name="TargetDomainName">VPS-01</Data>
     <Data Name="TargetLogonId">0x8dcdc</Data>
