@@ -263,7 +263,8 @@ WPF + CommunityToolkit.Mvvm (MVVM). `net10.0-windows`, `UseWPF` + `UseWindowsFor
   whitelist/blacklist add/remove).
 - Tray: closing window hides to tray; tray menu Show / Exit. Icon: draw a simple
   shield at runtime with System.Drawing (no binary assets committed).
-- GUI is NOT elevated; all privileged ops go through the service pipe (PLAN §8/§9).
+- GUI runs elevated (its manifest says requireAdministrator), because the pipe admits only SYSTEM
+  and elevated administrators; all privileged ops still go through the service pipe.
 
 ---
 

@@ -88,6 +88,15 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+; Program Files is closed to standard users as Windows makes it. Any other folder inherits what
+; its drive allows, usually "Authenticated Users: Modify", and whoever can replace the service
+; executable there runs as LocalSystem. So a folder chosen elsewhere is left to SYSTEM and the
+; Administrators before the service is registered; users can still read and run. Not recursive:
+; icacls follows junctions, and Setup's own files all sit directly in the folder.
+Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /setowner *S-1-5-32-544 /C /L /Q"; Flags: runhidden; Check: AppDirNeedsLockdown
+Filename: "{sys}\icacls.exe"; Parameters: """{app}"" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX /C /L /Q"; Flags: runhidden; Check: AppDirNeedsLockdown
+Filename: "{sys}\icacls.exe"; Parameters: """{app}\*"" /setowner *S-1-5-32-544 /C /L /Q"; Flags: runhidden; Check: AppDirNeedsLockdown
+Filename: "{sys}\icacls.exe"; Parameters: """{app}\*"" /reset /C /L /Q"; Flags: runhidden; Check: AppDirNeedsLockdown
 ; Register the service. "binPath=" and "DisplayName=" need a space before the quoted value.
 ; The executable path is passed with escaped inner quotes (\"...\") so the stored ImagePath is
 ; itself quoted: a bare path with spaces ("C:\Program Files\...") is an unquoted service path.
@@ -117,6 +126,21 @@ var
   DeleteDataOnUninstall: Boolean;
   { Set by CheckServiceStarted; GetCustomSetupExitCode reports it. }
   ServiceNotStarted: Boolean;
+
+{ --- Install folder -------------------------------------------------------- }
+
+{ True when the chosen folder is not under Program Files, where its permissions come from the
+  drive and have to be set by [Run]. }
+function IsBelow(Folder, Parent: String): Boolean;
+begin
+  Result := Pos(Uppercase(AddBackslash(Parent)), Uppercase(AddBackslash(Folder))) = 1;
+end;
+
+function AppDirNeedsLockdown(): Boolean;
+begin
+  Result := not (IsBelow(ExpandConstant('{app}'), ExpandConstant('{commonpf64}'))
+    or IsBelow(ExpandConstant('{app}'), ExpandConstant('{commonpf32}')));
+end;
 
 { --- Service helpers ------------------------------------------------------- }
 

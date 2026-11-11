@@ -18,6 +18,25 @@ public sealed partial class BanEngine
             .Covers(PortProfiles.Resolve(PortProfiles.ScopeFor(failed.Source, failed.Detector), settings));
 
     /// <summary>
+    /// How long after a ban its failures may still be ones that were on their way: events the log
+    /// delivers late, and connections opened before the block.
+    /// </summary>
+    private static readonly TimeSpan ScopedBanSettleTime = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// True when a failure of an engine arrives although the ban blocks that engine's ports, which
+    /// only happens when the address logs on through a port the profile leaves open. Event 4625 is
+    /// written for every kind of Windows logon, so an address banned on 3389 can go on guessing over
+    /// SMB or WinRM, and each failure would be passed over as "already banned". A ban on all ports
+    /// has nothing left to add. Report-only and disarmed block nothing, so failures prove nothing.
+    /// </summary>
+    private bool CameAroundScopedBan(BanEntry ban, FailedLogin failed, WinGuardSettings settings) =>
+        !failed.IsReplayed
+        && !FirewallFrozen
+        && !EnforcedPorts(ban, settings).IsAll
+        && failed.TimestampUtc > ban.BannedAtUtc + ScopedBanSettleTime;
+
+    /// <summary>
     /// Extends a ban to the ports of an engine whose threshold the address crossed while banned. This
     /// is an offense like any other, and it gets a full tier: without that a ban about to run out
     /// would barely touch the new service. Who banned it first and since when stay as they are.
@@ -35,7 +54,10 @@ public sealed partial class BanEngine
             OffenseCount = offense,
             IsPermanent = ban.IsPermanent,
             Note = ban.Note,
-            PortScope = PortProfiles.Widen(ban.PortScope, PortProfiles.ScopeFor(failed.Source, failed.Detector)),
+            // An engine the ban covers already got here by coming around it: only all ports is left.
+            PortScope = BanCovers(ban, failed, settings)
+                ? PortProfiles.AllPorts
+                : PortProfiles.Widen(ban.PortScope, PortProfiles.ScopeFor(failed.Source, failed.Detector)),
         };
         var ports = EnforcedPorts(widened, settings);
 

@@ -89,7 +89,7 @@ public static class CustomSourceRecipes
         // ends at a space and nowhere else: \S would also stop at a no-break space, which IIS writes
         // as it is, so one of those in the URL would hide the failure.
         Regex = @"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [^ ]+ [^ ]+ [^ ]+ [^ ]+ \d+ (?<username>[^ ]+) (?<ipaddress>[0-9a-fA-F:.]+) [^ ]+ [^ ]+ 401 1 (?:1326|1327|1331|1909|2148074252) \d+\s*$",
-        Description = "IIS logins rejected with 401.1, on the default W3C fields. Adjust the W3SVC folder per site.",
+        Description = "IIS logins rejected with 401.1, on the default W3C fields. Adjust the W3SVC folder per site. Not for a site behind a CDN or reverse proxy: the address in the log is then the proxy's, and banning it cuts off every visitor.",
     };
 
     // The IIS recipe whose columns stopped at any white space, no-break spaces included.
