@@ -264,14 +264,14 @@ public sealed class UpdateTests : IDisposable
         var folder = Path.Combine(_folder, "Updates");
 
         // Not elevated here, so the owner stays the test's own account and counts as trusted.
-        Assert.Equal(folder, UpdateFolder.Prepare(folder, owner => me.Equals(owner) || IsAdministrators(owner), newOwner: null, [me]));
+        Assert.Equal(folder, UpdateFolder.Prepare(folder, owner => (owner is not null && me.Equals(owner)) || IsAdministrators(owner), newOwner: null, [me]));
         var security = new DirectoryInfo(folder).GetAccessControl();
         Assert.True(security.AreAccessRulesProtected);
 
         Directory.CreateDirectory(Path.Combine(folder, "old", "deeper"));
         File.WriteAllText(Path.Combine(folder, "old", "deeper", "x.txt"), "x");
         File.WriteAllText(Path.Combine(folder, "WinGuard-Setup-0.0.1.exe"), "old installer");
-        UpdateFolder.Prepare(folder, owner => me.Equals(owner) || IsAdministrators(owner), newOwner: null, [me]);
+        UpdateFolder.Prepare(folder, owner => (owner is not null && me.Equals(owner)) || IsAdministrators(owner), newOwner: null, [me]);
         Assert.Empty(Directory.GetFileSystemEntries(folder));
     }
 
