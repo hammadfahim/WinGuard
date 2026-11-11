@@ -5,6 +5,30 @@ All notable changes to WinGuard are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- `--install` refuses to register the service from a folder that accounts other than SYSTEM, the
+  Administrators and the installing administrator can change, and Setup leaves a folder chosen
+  outside Program Files to SYSTEM and the Administrators. A standard user could replace the
+  service executable in such a folder and run as LocalSystem.
+- `--console` secures the data folder before it opens the log and the database, as Setup and
+  `--install` do. A standard user could prepare `%ProgramData%\WinGuard` ahead of the first run
+  and plant a database that switches enforcement off.
+- The console also checks who owns the service's pipe, not only which process reports it, so a
+  pipe created by a standard user is refused even when its process id has passed to a service.
+- A ban on some ports only no longer hides further failures of the same engine. Event 4625 covers
+  every kind of Windows logon, so an address banned on 3389 could go on guessing over SMB or WinRM
+  with each failure skipped as "already banned". Failures logged more than a minute after the ban
+  count again, and at the threshold the ban widens to all ports.
+
+### Changed
+
+- `Ipv6AggregatePrefixLength` defaults to 64 on new installs: IPv6 attackers are counted and
+  banned per /64. Per address, one /64 holds enough addresses to stay under every threshold and
+  to fill the firewall with bans. Existing installs keep the value they stored (0 unless changed).
+- The IIS HTTP recipe and the README warn against using it behind a CDN or reverse proxy, where
+  the address in the log is the proxy's.
+
 ## [0.3.2] — 2026-11-10
 
 ### Changed

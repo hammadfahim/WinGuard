@@ -95,6 +95,12 @@ from an elevated prompt:
 For a persistent install from the portable binaries, register the service with
 `.\winguard-svc.exe --install` (elevated) and undo it with `--uninstall`.
 
+Extract the zip where only administrators can write, such as a folder under `C:\Program Files`.
+The service runs as LocalSystem, so `--install` refuses a folder that other accounts can change
+(`C:\WinGuard` and most folders on a data drive inherit that from the drive) and says how to fix
+it. Both `--install` and `--console` first secure `%ProgramData%\WinGuard` and move aside anything
+in it that an administrator did not put there.
+
 ### Option 3 — Build from source
 
 Requires the **.NET 10 SDK**.
@@ -186,6 +192,9 @@ Use this when innocent people share an attacker's address, such as behind an off
 - **It is a trade-off.** A ban on 3389 only leaves that address free to reach everything else, and
   SMB failures count under the RDP engine although a 3389 ban does not block SMB.
 - If a port-scoped address then attacks another engine, its ban widens to cover both.
+- If it keeps failing on the engine it is already banned for, it is getting in through a port the
+  profile leaves open (SMB or WinRM behind a 3389 ban). Failures logged more than a minute after
+  the ban count again, and at the threshold the ban widens to all ports.
 - Manual bans, blacklist bans and blacklisted ranges always block all ports, even with
   `BlockedPorts` set.
 - Changing a profile applies to active bans, including narrowing them.
@@ -259,7 +268,7 @@ GUI saves them. The GUI exposes all of the below under **Settings** and **Lists*
 | `ProcessInternalIPs` | `false` | Ignore RFC1918, loopback, link-local, CGNAT (100.64.0.0/10) and benchmarking (198.18.0.0/15) addresses by default. |
 | `ReportOnly` | `false` | Monitoring mode: record would-be bans, never touch the firewall. Bans recorded while on become enforced when switched off. |
 | `EventBacklogReplayMinutes` | `30` | How far back the startup replay looks for failures logged during downtime; 0 = off. |
-| `Ipv6AggregatePrefixLength` | `0` (off) | Ban whole IPv6 /N prefixes (e.g. `64`) instead of single addresses. A prefix holding a whitelisted address stays on per-address bans. |
+| `Ipv6AggregatePrefixLength` | `64` | Count and ban whole IPv6 /N prefixes instead of single addresses, so rotating inside a /64 does not evade the threshold. `0` = per address. A prefix holding a whitelisted address stays on per-address bans. Installs from before 0.3.3 keep the `0` they stored; set it to `64` in Settings. |
 | `MaxAddressesPerRule` | `1000` | Firewall addresses batched per rule. |
 | `BlockedPorts` | *empty* | Empty = block all ports (cheapest). Non-empty = block only those ports. Each engine can override it; see [Blocking on specific ports](#blocking-on-specific-ports). |
 | `BlocklistFiles` | *empty* | Local list files to block; see [Blocklist files](#blocklist-files). |
@@ -270,7 +279,7 @@ GUI saves them. The GUI exposes all of the below under **Settings** and **Lists*
 | `Rdp.ExclusionRules` | *empty* | e.g. `LogonType=2`, `TargetUserName=backup-*`. |
 | `MsSql.IgnoreMessagePatterns` | `[Failed to open the explicitly specified database]` | 18456 reasons that are not brute force. |
 | `Ftp.Sources`, `Ftp.PollInterval` | *empty*, `00:00:03` | IIS log folders / FileZilla file-or-folder. |
-| `CustomSources` | *empty* | `{ PathGlob, Regex }` with `(?<ipaddress>…)` / `(?<username>…)`; recipes provided for OpenSSH, hMailServer, IIS HTTP auth and VNC. hMailServer needs SMTP/POP3/IMAP logging switched on, and RealVNC needs a file log target. Two sources on one file each count a matching line. |
+| `CustomSources` | *empty* | `{ PathGlob, Regex }` with `(?<ipaddress>…)` / `(?<username>…)`; recipes provided for OpenSSH, hMailServer, IIS HTTP auth and VNC. hMailServer needs SMTP/POP3/IMAP logging switched on, and RealVNC needs a file log target. Two sources on one file each count a matching line. **Do not use the IIS HTTP recipe behind a CDN, load balancer or reverse proxy:** the log's client address is then the proxy's, so failed logins ban the proxy and cut off every visitor behind it (whitelist the proxy addresses if you must). |
 
 **Exclusion rules** use `=` / `!=` and `*` wildcards over the 4625 EventData fields.
 Conditions inside one rule are **AND**ed; separate rules are **OR**ed. Field names are

@@ -23,7 +23,10 @@ internal static class PipeServerIdentity
     /// <param name="Problem">Why not, for the console to show.</param>
     internal sealed record Result(bool Trusted, string? Problem);
 
-    /// <summary>Identifies the server from the access token of the process that created the pipe.</summary>
+    /// <summary>
+    /// Identifies the server from the access token of the process that created the pipe, and from
+    /// the owner of the pipe itself.
+    /// </summary>
     public static Result Verify(NamedPipeClientStream pipe)
     {
         try
@@ -48,7 +51,8 @@ internal static class PipeServerIdentity
             using (token)
             using (var identity = new WindowsIdentity(token.DangerousGetHandle()))
             {
-                return Evaluate(identity.User, identity.Groups, processId);
+                var creator = Evaluate(identity.User, identity.Groups, processId);
+                return creator.Trusted ? EvaluateOwner(ReadOwner(pipe), identity.User, processId) : creator;
             }
         }
         catch (Exception ex)
@@ -79,6 +83,39 @@ internal static class PipeServerIdentity
             $"Process {processId} ({user?.Value ?? "unknown user"}) owns the WinGuard pipe but is neither LocalSystem nor an elevated administrator, " +
             "so it is not the WinGuard service. This console will not talk to it. Find out what that process is, then restart the WinGuard service.");
     }
+
+    /// <summary>
+    /// The second half of the decision. The process id a pipe reports is the one that created it,
+    /// and stays that number when the creator has handed the pipe to another process and exited:
+    /// once Windows gives the number to a service, the check above would pass for a pipe a standard
+    /// user made. The owner of the pipe object cannot be made to lie that way. It is set when the
+    /// pipe is created, and only a process with the restore privilege can name an owner other than
+    /// itself or a group it holds as owner.
+    /// </summary>
+    /// <param name="owner">Owner of the pipe object, or null when it could not be read.</param>
+    /// <param name="serverUser">User of the process that passed <see cref="Evaluate"/>.</param>
+    /// <param name="processId">The server's process id, for the message.</param>
+    internal static Result EvaluateOwner(SecurityIdentifier? owner, SecurityIdentifier? serverUser, uint processId)
+    {
+        // A service's objects belong to SYSTEM or the Administrators group, an elevated
+        // administrator's to that group or, with UAC off, to the administrator.
+        if (owner is not null
+            && (owner.IsWellKnown(WellKnownSidType.LocalSystemSid)
+                || owner.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid)
+                || (serverUser is not null && owner.Equals(serverUser))))
+        {
+            return new Result(true, null);
+        }
+
+        return new Result(
+            false,
+            $"The WinGuard pipe was created by {owner?.Value ?? "an account that could not be read"}, not by process {processId} that now reports it, " +
+            "so it is not the WinGuard service. This console will not talk to it. Restart the WinGuard service, and find out what created that pipe.");
+    }
+
+    /// <summary>Reads the owner through the connection itself, so it is the pipe that was opened and no other.</summary>
+    internal static SecurityIdentifier? ReadOwner(PipeStream pipe) =>
+        pipe.GetAccessControl().GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
 
     private static Result Unverified(string what, int error) =>
         new(false, UnverifiedText($"{what} failed: {new Win32Exception(error).Message} (Win32 error {error})"));

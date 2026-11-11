@@ -44,9 +44,10 @@ public sealed class WinGuardSettings
     /// <summary>
     /// Ban whole IPv6 /N prefixes instead of single addresses, so an attacker rotating addresses
     /// inside their /64 cannot evade counting. 0 disables aggregation (per-address bans);
-    /// 64 is the recommended value (one customer site per prefix).
+    /// 64 is the default (one customer site per prefix). Per address, one /64 holds enough
+    /// addresses to stay under every threshold for ever, and to fill the firewall with bans.
     /// </summary>
-    public int Ipv6AggregatePrefixLength { get; set; }
+    public int Ipv6AggregatePrefixLength { get; set; } = Defaults.Ipv6AggregatePrefixLength;
 
     /// <summary>Days of event history kept before housekeeping prunes it.</summary>
     public int EventRetentionDays { get; set; } = Defaults.EventRetentionDays;

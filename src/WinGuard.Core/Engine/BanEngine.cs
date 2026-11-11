@@ -890,9 +890,10 @@ public sealed partial class BanEngine
         }
 
         // 4. Already actively banned -> nothing to do, unless the ban leaves this engine's ports
-        // open: such a failure counts like any other, and crossing the threshold widens the ban.
+        // open, or a ban on some ports only is not keeping the address out: such a failure counts
+        // like any other, and crossing the threshold widens the ban.
         var isBanned = current is not null && (current.IsPermanent || current.ExpiresUtc > now);
-        if (isBanned && BanCovers(current!, failed, settings))
+        if (isBanned && BanCovers(current!, failed, settings) && !CameAroundScopedBan(current!, failed, settings))
         {
             _logger.LogDebug("IP {Ip} is already banned; ignoring attempt.", ip);
             if (ShouldRecordSkip("b:" + ip))

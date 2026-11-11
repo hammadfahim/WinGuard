@@ -23,6 +23,9 @@ public static class Defaults
     public static readonly TimeSpan OffenseMemory = TimeSpan.FromDays(90);
 
     public const int EventRetentionDays = 30;
+
+    /// <summary>IPv6 attackers are counted and banned per /64: the block one customer site gets.</summary>
+    public const int Ipv6AggregatePrefixLength = 64;
     public const int BanHistoryRetentionDays = 365;
 
     /// <summary>Windows Firewall practical limit of addresses per rule; batch into WinGuard_Block_0001, ...</summary>

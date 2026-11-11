@@ -113,6 +113,16 @@ internal static class Program
 
     private static async Task<int> RunHostAsync(string[] args, bool console)
     {
+        // The service only ever starts on a data folder the setup or --install has secured. A
+        // console run may be the first thing to touch it, and any user can create a folder under
+        // ProgramData beforehand: a planted database would switch enforcement off, and a planted
+        // link would send the log wherever it points. So the same check runs here, before the log
+        // and the database are opened.
+        if (console && HardenDataFolder() == ExitFailure)
+        {
+            return ExitFailure;
+        }
+
         var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
         {
             // Pass configuration-relevant args through (e.g. --DatabasePath <path>);
@@ -260,6 +270,14 @@ internal static class Program
             return 1;
         }
 
+        // Registering the service makes this file run as LocalSystem at every boot, so it must sit
+        // where only administrators can replace it. Checked before anything is changed.
+        if (InstallFolderCheck.Problem(executable) is { } unsafeFolder)
+        {
+            Console.Error.WriteLine(unsafeFolder);
+            return ExitFailure;
+        }
+
         // A portable install gets the same data-folder protection as the setup, before anything
         // runs as LocalSystem on top of a folder a standard user may have prepared.
         if (Report(new DataFolderHardener().Harden(Defaults.DataFolder)) == ExitFailure)
@@ -372,7 +390,7 @@ internal static class Program
         using var identity = WindowsIdentity.GetCurrent();
         if (!new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
         {
-            Console.Error.WriteLine("Securing the data folder needs an elevated prompt.");
+            Console.Error.WriteLine("Securing the data folder needs an elevated prompt. Run this from one.");
             return ExitFailure;
         }
 
