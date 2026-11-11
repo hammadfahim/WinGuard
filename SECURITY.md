@@ -93,10 +93,21 @@ Public disclosure is coordinated with you after a fix is released.
   ciphertext stays in the database through every later save, so a console run cannot destroy it;
   only entering a new value replaces it. Moving WinGuard to another machine means entering the
   secrets again.
-- WinGuard makes **no outbound connections** of its own; the only network traffic it can produce
+- The service makes **no outbound connections** of its own; the only network traffic it can produce
   is to the notification destinations (webhook / Telegram / SMTP / syslog) an administrator
   explicitly configures. Webhook URLs and Telegram tokens are secrets and never reach the log; a
   plain `http://` webhook still works but logs a warning.
+- The **console** asks `github.com` for this project's newest release: once after it starts
+  (which can be turned off) and when **Check for updates** is chosen. The request carries the
+  console's version in its User-Agent and nothing else about the server.
+- **Updates are trusted by signature, not by where they come from.** Each release carries
+  `latest.json` (version, installer name, size, SHA-256) and an ECDSA P-256 signature of it. The
+  private key is a secret of the release workflow; the public key is compiled into the console.
+  The console runs an installer only when the signature holds, the version is higher than its
+  own, and the downloaded file matches the signed size and SHA-256. It downloads to
+  `%ProgramData%\WinGuard Updates`, a folder it creates for SYSTEM and Administrators only and
+  refuses when somebody else created it, and keeps the file open against changes from the check
+  until Setup runs. The installers are not Authenticode-signed unless the release says so.
 - **Syslog** is plain UDP or TCP without TLS, so events, including attacker addresses, travel
   unencrypted, and over UDP nothing confirms that a message arrived; use a trusted network or a
   local collector. Control characters in event text are escaped, so a crafted user name cannot

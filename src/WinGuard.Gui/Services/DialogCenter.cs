@@ -47,6 +47,9 @@ public sealed partial class DialogRequest
     /// <summary>Label of the primary button.</summary>
     public string ConfirmText { get; }
 
+    /// <summary>Icon next to the title; a warning sign unless the dialog only informs.</summary>
+    public string Glyph { get; init; } = "";
+
     /// <summary>Label of the cancel button.</summary>
     public string CancelText { get; init; } = "Cancel";
 

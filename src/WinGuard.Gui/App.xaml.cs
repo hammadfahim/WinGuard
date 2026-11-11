@@ -88,6 +88,14 @@ public partial class App : System.Windows.Application
         MainWindow = _mainWindow;
         _mainWindow.Show();
 
+        _mainViewModel.Updates.ExitRequested += () =>
+        {
+            // Setup is running and replaces this program: unsaved settings were asked about already.
+            _mainWindow.AllowClose = true;
+            Shutdown();
+        };
+        _ = _mainViewModel.Updates.CheckAtStartAsync();
+
         // Started last, after every listener is attached, so the first connection is not missed.
         _pipeClient.Start();
 

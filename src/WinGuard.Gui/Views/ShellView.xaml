@@ -71,6 +71,13 @@
                             <TextBlock Text="{Binding ConsoleVersionText}" FontSize="{StaticResource FontSizeMicro}"
                                        Foreground="{DynamicResource TextTertiaryBrush}" />
                         </StackPanel>
+                        <Button x:Name="UpdateButton" Style="{StaticResource GhostButton}" HorizontalContentAlignment="Left"
+                                ui:Ui.Icon="{StaticResource GlyphArrowDown}" Command="{Binding Updates.CheckCommand}"
+                                ToolTip="Look for a newer WinGuard release on GitHub"
+                                AutomationProperties.Name="{Binding Updates.ButtonText}">
+                            <TextBlock x:Name="UpdateLabel" Text="{Binding Updates.ButtonText}"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" />
+                        </Button>
                         <Button x:Name="ThemeButton" Style="{StaticResource GhostButton}" HorizontalContentAlignment="Left"
                                 ui:Ui.Icon="{StaticResource GlyphTheme}" Command="{Binding CycleThemeCommand}"
                                 ToolTip="Switch between following Windows, light and dark"
@@ -283,7 +290,7 @@
                     <StackPanel>
                         <StackPanel Orientation="Horizontal" Margin="{StaticResource GapBottom8}">
                             <TextBlock Style="{StaticResource ToneIcon}" ui:Ui.Tone="{Binding Tone}" FontSize="17"
-                                       Text="{StaticResource GlyphWarning}" Margin="0,0,10,0" />
+                                       Text="{Binding Glyph}" Margin="0,0,10,0" />
                             <TextBlock Style="{StaticResource TextHeading}" FontSize="16" Text="{Binding Title}" TextWrapping="Wrap"
                                        MaxWidth="380" />
                         </StackPanel>

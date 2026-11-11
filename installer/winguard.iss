@@ -115,6 +115,8 @@ Filename: "{sys}\auditpol.exe"; Parameters: "/set /subcategory:""{{0CCE9215-69AE
 ; is started as the ORIGINAL, non-elevated user by default, which fails with "CreateProcess
 ; failed; code 740". runascurrentuser starts it with Setup's own (already elevated) rights.
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent runascurrentuser
+; The console's own update runs Setup with /SILENT /RELAUNCH=1 and closes; this opens it again.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runascurrentuser; Check: RelaunchRequested
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
@@ -134,6 +136,12 @@ var
 function IsBelow(Folder, Parent: String): Boolean;
 begin
   Result := Pos(Uppercase(AddBackslash(Parent)), Uppercase(AddBackslash(Folder))) = 1;
+end;
+
+{ True when Setup was started by the console to update it. }
+function RelaunchRequested(): Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
 end;
 
 function AppDirNeedsLockdown(): Boolean;
