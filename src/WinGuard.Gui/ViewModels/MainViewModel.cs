@@ -39,6 +39,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         Statistics = new StatisticsViewModel(client, Toasts);
         Settings = new SettingsViewModel(client, Toasts);
         Lists = new ListsViewModel(client, Toasts, Dialogs);
+        Updates = new UpdateViewModel(Toasts, Dialogs, ConfirmExitAsync);
 
         NavigationItems =
         [
@@ -134,6 +135,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     /// <summary>Lists view-model.</summary>
     public ListsViewModel Lists { get; }
+
+    /// <summary>The update button in the rail.</summary>
+    public UpdateViewModel Updates { get; }
 
     /// <summary>In-app notifications.</summary>
     public ToastCenter Toasts { get; } = new();
@@ -244,6 +248,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _client.ProblemChanged -= OnClientProblemChanged;
         _clock.Stop();
         _poller.Dispose();
+        Updates.Dispose();
     }
 
     /// <summary>Cycles System → Light → Dark.</summary>

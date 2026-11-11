@@ -16,6 +16,11 @@ jobs:
       # base64, WINGUARD_SIGNING_PFX_PASSWORD its password. A step's "if" cannot read secrets, so
       # the job exposes only whether they are set.
       SIGNING_ENABLED: ${{ secrets.WINGUARD_SIGNING_PFX_BASE64 != '' && secrets.WINGUARD_SIGNING_PFX_PASSWORD != '' }}
+      # The console's "Check for updates" trusts a release only through latest.json and its signature,
+      # made with WINGUARD_UPDATE_SIGNING_KEY (an ECDSA P-256 private key, PKCS#8 PEM). Its public
+      # half is compiled into the program (src/WinGuard.Core/Updates/UpdateSource.cs). Without the
+      # secret the release is still built, but installed copies cannot update to it from the console.
+      UPDATE_SIGNING_ENABLED: ${{ secrets.WINGUARD_UPDATE_SIGNING_KEY != '' }}
       TIMESTAMP_URL: http://timestamp.digicert.com
     steps:
       # Actions are pinned to commit SHAs (the comment names the tag each SHA was taken from).
@@ -137,6 +142,23 @@ jobs:
           "$((Get-FileHash dist/WinGuard-portable-win-x64.zip -Algorithm SHA256).Hash.ToLower())  WinGuard-portable-win-x64.zip" |
             Set-Content "dist/WinGuard-portable-win-x64.zip.sha256"
 
+      # The tool also checks its own output against the key in the program, so a release signed
+      # with a key that installed copies do not know fails here and is never published.
+      - name: Sign the update manifest
+        if: env.UPDATE_SIGNING_ENABLED == 'true'
+        shell: pwsh
+        env:
+          WINGUARD_UPDATE_SIGNING_KEY: ${{ secrets.WINGUARD_UPDATE_SIGNING_KEY }}
+          VERSION: ${{ steps.ver.outputs.v }}
+        run: |
+          dotnet run --project tools/UpdateManifest -c Release -- "installer/Output/WinGuard-Setup-$env:VERSION.exe" $env:VERSION dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Warn that this release cannot be installed from the console
+        if: env.UPDATE_SIGNING_ENABLED != 'true'
+        shell: pwsh
+        run: Write-Output '::warning::WINGUARD_UPDATE_SIGNING_KEY is not set, so no latest.json was published. Check for updates will not offer this release.'
+
       - name: Create GitHub Release + upload assets
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
@@ -144,6 +166,8 @@ jobs:
             installer/Output/WinGuard-Setup-*.exe
             dist/WinGuard-portable-win-x64.zip
             dist/*.sha256
+            dist/latest.json
+            dist/latest.json.sig
 
       - name: Remove the signing certificate
         if: always() && env.SIGNING_ENABLED == 'true'

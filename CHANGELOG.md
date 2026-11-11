@@ -5,6 +5,18 @@ All notable changes to WinGuard are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Check for updates** in the console. It asks this project's GitHub releases for a newer version
+  and, for a copy installed by Setup, downloads the installer and runs it; a portable copy gets the
+  release link. A release is trusted only through `latest.json` and its ECDSA signature, whose
+  public key is compiled into WinGuard, and the installer must match the signed size and SHA-256.
+  An older release is never offered. The console also looks once after it starts and only reports
+  what it finds; that can be turned off from the same button.
+- The release workflow publishes `latest.json` and `latest.json.sig` with every release.
+- CI builds the installer and runs it on the build machine: an install outside Program Files, the
+  service start, the command line through the pipe, an upgrade and the uninstall.
+
 ### Security
 
 - `--install` refuses to register the service from a folder that accounts other than SYSTEM, the
@@ -20,6 +32,9 @@ All notable changes to WinGuard are documented here. The format follows
   every kind of Windows logon, so an address banned on 3389 could go on guessing over SMB or WinRM
   with each failure skipped as "already banned". Failures logged more than a minute after the ban
   count again, and at the threshold the ban widens to all ports.
+- The release workflow accepts only `vMAJOR.MINOR.PATCH` tags that point at a commit on `main`. A
+  tag name could put text into a command line of the build.
+- A user name taken from a custom log source is cut at 256 characters.
 
 ### Changed
 

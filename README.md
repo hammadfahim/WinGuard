@@ -101,6 +101,28 @@ The service runs as LocalSystem, so `--install` refuses a folder that other acco
 it. Both `--install` and `--console` first secure `%ProgramData%\WinGuard` and move aside anything
 in it that an administrator did not put there.
 
+### Updating
+
+The console has a **Check for updates** button at the bottom of the left rail. It asks this
+project's GitHub releases whether a newer version exists; no other service is involved. For a
+copy installed by Setup it then offers to download the new installer and run it. The service
+restarts during the update, addresses that are already banned stay blocked in the firewall, and
+the console opens again when Setup has finished. A portable copy is shown the release link
+instead: replace its files by hand.
+
+Before anything is run, three things are checked:
+
+- The release's `latest.json` carries a signature made with a key that only the release workflow
+  holds. Its public half is compiled into WinGuard, so a changed release page, download server or
+  network path cannot make the console run a file.
+- The version is higher than the one running. An older release is never offered.
+- The installer has the size and SHA-256 that the signed `latest.json` gives. It is downloaded to
+  `%ProgramData%\WinGuard Updates`, which only administrators can write to.
+
+The console also looks for a newer release about 20 seconds after it starts and tells you when
+there is one. It installs nothing on its own. To turn that off, choose **Check for updates** and
+then **Stop checking at start**. The service itself never connects to GitHub.
+
 ### Option 3 — Build from source
 
 Requires the **.NET 10 SDK**.

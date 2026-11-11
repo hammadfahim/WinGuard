@@ -64,6 +64,8 @@ public partial class ShellView : System.Windows.Controls.UserControl
         shell.Wordmark.Visibility = hidden;
         shell.RailFacts.Visibility = hidden;
         shell.ThemeLabel.Visibility = hidden;
+        shell.UpdateLabel.Visibility = hidden;
+        shell.UpdateButton.HorizontalContentAlignment = compact ? HorizontalAlignment.Center : HorizontalAlignment.Left;
         shell.ThemeButton.HorizontalContentAlignment = compact ? HorizontalAlignment.Center : HorizontalAlignment.Left;
         shell.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () => shell.PlaceIndicator(animate: false));
     }
