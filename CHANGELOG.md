@@ -5,6 +5,8 @@ All notable changes to WinGuard are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-11-12
+
 ### Added
 
 - **Check for updates** in the console. It asks this project's GitHub releases for a newer version
