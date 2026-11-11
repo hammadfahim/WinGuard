@@ -28,6 +28,7 @@ public sealed partial class UpdateViewModel : ObservableObject, IDisposable
     private readonly CancellationTokenSource _closing = new();
 
     private UpdateManifest? _available;
+    private bool _installing;
 
     /// <summary>Creates the view-model.</summary>
     /// <param name="toasts">Where results are reported.</param>
@@ -114,11 +115,12 @@ public sealed partial class UpdateViewModel : ObservableObject, IDisposable
                 Remember(manifest);
             }
 
+            _installing = false;
             await OfferAsync(_available!);
         }
         catch (UpdateException ex)
         {
-            _toasts.Error("The update did not go through", ex.Message);
+            _toasts.Error(_installing ? "The update was not installed" : "Could not check for updates", ex.Message);
         }
         catch (OperationCanceledException)
         {
@@ -208,6 +210,7 @@ public sealed partial class UpdateViewModel : ObservableObject, IDisposable
 
     private async Task InstallAsync(UpdateManifest manifest)
     {
+        _installing = true;
         ButtonText = "Downloading 0%";
         var folder = await Task.Run(() => UpdateFolder.Prepare(UpdateFolder.DefaultPath), _closing.Token);
         var progress = new Progress<double>(share => ButtonText = $"Downloading {share:P0}");
